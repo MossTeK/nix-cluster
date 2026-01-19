@@ -1,0 +1,10 @@
+directories:
+  repo: "/home/nad/nad"
+  log: "/home/nad/nad/log"
+
+config:
+  repo_url: ""
+
+commands:
+  rebuild:
+    - ["sudo", "nixos-rebuild", "switch", "--flake", ".#nad", "--impure"]
