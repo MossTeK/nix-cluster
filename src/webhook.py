@@ -38,32 +38,55 @@ class SecurityValidator:
     def __init__(self, secret: Optional[str]):
         self._secret = secret
 
-    def validate_signature(self, payload: bytes, header_signature: str) -> bool:
-        if not self._secret or not header_signature:
+    def validate_request(self, req: request) -> bool:
+        """
+        Validates the request using either GitLab Token or HMAC Signature.
+        """
+        if not self._secret:
+            logger.error("Security Error: No Webhook Secret configured.")
             return False
-        try:
-            mac = hmac.new(self._secret.encode('utf-8'), msg=payload, digestmod=hashlib.sha256)
-            return hmac.compare_digest(mac.hexdigest(), header_signature)
-        except Exception:
-            return False
+
+        # 1. GitLab Validation (Header: X-Gitlab-Token)
+        # GitLab sends the raw secret token. We use compare_digest to prevent timing attacks.
+        gitlab_token = req.headers.get('X-Gitlab-Token')
+        if gitlab_token:
+            return hmac.compare_digest(self._secret, gitlab_token)
+
+        # 2. Forgejo/GitHub Validation (Header: X-Hub-Signature-256)
+        # These services sign the payload with HMAC-SHA256.
+        sig = req.headers.get('X-Forgejo-Signature') or req.headers.get('X-Hub-Signature-256')
+        
+        if sig:
+            if sig.startswith('sha256='): 
+                sig = sig.split('=', 1)[1]
+            
+            try:
+                payload = req.get_data()
+                mac = hmac.new(self._secret.encode('utf-8'), msg=payload, digestmod=hashlib.sha256)
+                return hmac.compare_digest(mac.hexdigest(), sig)
+            except Exception:
+                return False
+
+        return False
 
 validator = SecurityValidator(WEBHOOK_SECRET)
 
 # webhook route
 @app.route('/webhook', methods=['POST'])
 def webhook_endpoint():
-    sig = (request.headers.get('X-Forgejo-Signature') or request.headers.get('X-Hub-Signature-256'))
-    if sig and sig.startswith('sha256='): sig = sig.split('=', 1)[1]
-    
     # auth check
-    if not validator.validate_signature(request.get_data(), sig):
-        logger.warning("SECURITY ALERT: Invalid signature.")
+    if not validator.validate_request(request):
+        logger.warning(f"SECURITY ALERT: Unauthorized request from {request.remote_addr}")
         return jsonify({"error": "Unauthorized"}), 403
 
     # process update
     try:
         payload = request.get_json()
-        commit_id = payload.get('after', 'manual_trigger')
+        # GitLab and GitHub use different keys for the commit hash
+        # v1.2.6 Original: payload.get('after', 'manual_trigger')
+        # Updated to support GitLab's 'checkout_sha' as well
+        commit_id = payload.get('after', payload.get('checkout_sha', 'manual_trigger'))
+        
         logger.info(f"Triggering update for commit: {commit_id}")
         logs = updater.perform_update(commit_id)
         return jsonify({"status": "success", "logs": logs}), 200
