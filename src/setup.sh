@@ -470,7 +470,7 @@ if [ "$NON_INTERACTIVE" = true ]; then
     INSTALLER_SSH_PUB_KEY=$(jq -r '.installer_ssh_pub_key // empty' "$CONFIG_FILE")
     NODE_ROLE=$(jq -r '.node_role // "worker"' "$CONFIG_FILE")
     KEEPALIVED_ROLE=$(jq -r '.keepalived_role // "backup"' "$CONFIG_FILE")
-    TRIGGER_CHOICE=$(jq -r '.trigger_choice // "1"' "$CONFIG_FILE")
+    TRIGGER_CHOICE=$(jq -r '.trigger_choice // "2"' "$CONFIG_FILE")
     FLEET_PRIVATE_KEY=$(jq -r '.fleet_private_key // empty' "$CONFIG_FILE")
     
     MATRIX_BOT_TOKEN=$(jq -r '.matrix_bot_token // ""' "$CONFIG_FILE")
@@ -549,11 +549,11 @@ else
     read -s -p "Enter Shared Fleet Private Age Key (Leave blank to generate a new unique key): " FLEET_PRIVATE_KEY
     echo ""
     echo "Select Update Trigger Method:"
-    echo "1) Matrix Pub/Sub (Default)"
-    echo "2) Webhook (Forgejo/GitLab/GitHub)"
+    echo "1) Matrix Pub/Sub"
+    echo "2) Webhook (Forgejo/GitLab/GitHub) (Default)"
     read -p "Enter choice [1 or 2]: " TRIGGER_CHOICE
-    if [ "$TRIGGER_CHOICE" != "2" ]; then
-        TRIGGER_CHOICE="1"
+    if [ "$TRIGGER_CHOICE" != "1" ]; then
+        TRIGGER_CHOICE="2"
     fi
     echo ""
 

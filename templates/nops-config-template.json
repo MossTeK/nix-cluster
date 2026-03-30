@@ -13,7 +13,7 @@
   "node_ssh_pub_key": "ssh-ed25519 <controller_pubkey>",
   "installer_auth_mode": "auto",
   "installer_ssh_pub_key": "",
-  "trigger_choice": "1",
+  "trigger_choice": "2",
   "webhook_secret": "<webhook_secret>",
   "cloudflare_api_token": "",
   "caddy_enable": false,

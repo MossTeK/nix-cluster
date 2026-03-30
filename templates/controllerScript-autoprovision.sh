@@ -432,7 +432,7 @@ EOF
         --arg keepalived_role "$KEEPALIVED_ROLE" \
         --arg fleet_private_key "$(sudo cat "$SOPS_KEY")" \
         --arg webhook_secret "$WEBHOOK_SECRET" \
-        '{bootstrap_mode: false, is_controller: ($node_role == "controller"), git_user: $git_user, git_token: $git_token, repo_url: $repo_url, node_group: $node_group, node_admin: $admin, node_admin_pass: $admin_pass, node_ssh_pub_key: $node_ssh_pub_key, installer_auth_mode: $installer_auth_mode, installer_ssh_pub_key: $installer_ssh_pub_key, node_role: $node_role, keepalived_role: $keepalived_role, fleet_private_key: $fleet_private_key, trigger_choice: "1", webhook_secret: $webhook_secret}' > "$CONFIG_JSON"
+        '{bootstrap_mode: false, is_controller: ($node_role == "controller"), git_user: $git_user, git_token: $git_token, repo_url: $repo_url, node_group: $node_group, node_admin: $admin, node_admin_pass: $admin_pass, node_ssh_pub_key: $node_ssh_pub_key, installer_auth_mode: $installer_auth_mode, installer_ssh_pub_key: $installer_ssh_pub_key, node_role: $node_role, keepalived_role: $keepalived_role, fleet_private_key: $fleet_private_key, trigger_choice: "2", webhook_secret: $webhook_secret}' > "$CONFIG_JSON"
     fi
 
     if copy_to_remote "$CONFIG_JSON" "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" /tmp/nops-config.json "$INSTALLER_AUTH_MODE"; then
