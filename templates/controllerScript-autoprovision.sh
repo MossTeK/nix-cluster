@@ -212,68 +212,35 @@ wait_for_login() {
   return 0
 }
 
-# Extract Fleet Secrets for provisioning
-GIT_USER=$(sudo env SOPS_AGE_KEY_FILE=$SOPS_KEY sops -d --extract '["git_username"]' secrets/secrets.yaml)
-GIT_PASS=$(sudo env SOPS_AGE_KEY_FILE=$SOPS_KEY sops -d --extract '["git_password"]' secrets/secrets.yaml)
-WEBHOOK_SECRET=$(sudo env SOPS_AGE_KEY_FILE=$SOPS_KEY sops -d --extract '["webhook_secret"]' secrets/secrets.yaml)
-REPO_URL=$(git remote get-url origin | sed -E 's|^https?://[^/@]+:[^/@]+@|https://|')
-CONTROLLER_SSH_PUB_KEY=$(cat "${NOPS_SSH_KEY}.pub")
+provision_live_installer() {
+  local PXE_TEMP_DISABLED=0
+  local TMP_DIR
+  local HOST_ID
+  local HASHED_PASS
 
-while read -r node; do
-  HOSTNAME=$(echo "$node" | jq -r '.hostname')
-  INSTALLER_IP=$(echo "$node" | jq -r '.installer_ip')
-  INSTALLER_USER=$(echo "$node" | jq -r '.installer_user // "nixos"')
-  INSTALLER_PASSWORD=$(echo "$node" | jq -r '.installer_password // empty')
-  INSTALLER_AUTH_MODE=$(echo "$node" | jq -r '.installer_auth_mode // "auto"')
-  INSTALLER_SSH_PUB_KEY=$(echo "$node" | jq -r '.installer_ssh_pub_key // empty')
-  DISK=$(echo "$node" | jq -r '.disk')
-  FS=$(echo "$node" | jq -r '.fs')
-  NODE_GROUP=$(echo "$node" | jq -r '.node_group')
-  NODE_ROLE=$(echo "$node" | jq -r '.node_role // "worker"')
-  KEEPALIVED_ROLE=$(echo "$node" | jq -r '.keepalived_role // "backup"')
-  NODE_ADMIN=$(echo "$node" | jq -r '.node_admin')
-  NODE_ADMIN_PASS=$(echo "$node" | jq -r '.node_admin_pass')
-
-  if [ -z "$HOSTNAME" ] || [ -z "$INSTALLER_IP" ]; then
-    echo "[nops] Skipping malformed deployment entry: $node"
-    continue
+  if [ -z "$DISK" ] || [ -z "$FS" ]; then
+    echo "[nops] $HOSTNAME is missing disk or fs in deployments.json. Skipping."
+    return 1
   fi
 
-  # State 1: Already active (answers as nops)
-  if can_login_with_key nops "$INSTALLER_IP"; then
-    echo "[nops] $HOSTNAME already active, skipping."
-    continue
+  if ! run_remote "$INSTALLER_USER" "$INSTALLER_IP" "$INSTALLER_PASSWORD" "$INSTALLER_AUTH_MODE" "test -b '$DISK'"; then
+    echo "[nops] $HOSTNAME configured disk $DISK does not exist on the live installer. Available disks:"
+    run_remote "$INSTALLER_USER" "$INSTALLER_IP" "$INSTALLER_PASSWORD" "$INSTALLER_AUTH_MODE" "lsblk -dn -o NAME,PATH,SIZE,MODEL,TYPE | awk '\$5 == \"disk\" { print }'" || true
+    return 1
   fi
 
-  # State 2: Live ISO (answers as the installer user)
-  if can_login "$INSTALLER_USER" "$INSTALLER_IP" "$INSTALLER_PASSWORD" "$INSTALLER_AUTH_MODE"; then
-    echo "[nops] $HOSTNAME detected as Live ISO, provisioning through $INSTALLER_USER@$INSTALLER_IP..."
+  TMP_DIR=$(mktemp -d)
+  HOST_ID=$(head -c 4 /dev/urandom | od -A n -t x4 | tr -d ' ' | cut -c 1-8)
+  HASHED_PASS=$(mkpasswd -m sha-512 -s <<< "$NODE_ADMIN_PASS")
 
-    PXE_TEMP_DISABLED=0
-
-    if [ -z "$DISK" ] || [ -z "$FS" ]; then
-      echo "[nops] $HOSTNAME is missing disk or fs in deployments.json. Skipping."
-      continue
-    fi
-
-    if ! run_remote "$INSTALLER_USER" "$INSTALLER_IP" "$INSTALLER_PASSWORD" "$INSTALLER_AUTH_MODE" "test -b '$DISK'"; then
-      echo "[nops] $HOSTNAME configured disk $DISK does not exist on the live installer. Available disks:"
-      run_remote "$INSTALLER_USER" "$INSTALLER_IP" "$INSTALLER_PASSWORD" "$INSTALLER_AUTH_MODE" "lsblk -dn -o NAME,PATH,SIZE,MODEL,TYPE | awk '\$5 == \"disk\" { print }'" || true
-      continue
-    fi
-
-    TMP_DIR=$(mktemp -d)
-    HOST_ID=$(head -c 4 /dev/urandom | od -A n -t x4 | tr -d ' ' | cut -c 1-8)
-    HASHED_PASS=$(mkpasswd -m sha-512 -s <<< "$NODE_ADMIN_PASS")
-
-    cat <<EOF > "$TMP_DIR/flake.nix"
+  cat <<EOF > "$TMP_DIR/flake.nix"
 {
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
     disko.url = "github:nix-community/disko";
     nixos-install.url = "git+NIXOS_INSTALL_REPO_URL_PLACEHOLDER";
   };
-  outputs = { self, nixpkgs, disko, nixos-install }: 
+  outputs = { self, nixpkgs, disko, nixos-install }:
     let
       renderedDisko = builtins.toFile "disko-$FS.nix" (
         builtins.replaceStrings [ "__DISK__" ] [ "$DISK" ]
@@ -331,58 +298,126 @@ while read -r node; do
 }
 EOF
 
-    if [ "$INSTALLER_AUTH_MODE" = "ssh_key" ] || { [ "$INSTALLER_AUTH_MODE" = "auto" ] && can_login_with_key "$INSTALLER_USER" "$INSTALLER_IP"; }; then
-      nix --extra-experimental-features "nix-command flakes" run github:nix-community/nixos-anywhere -- \
-        --phases kexec,disko,install \
-        --flake "$TMP_DIR#$HOSTNAME" \
-        --target-host "$INSTALLER_USER@$INSTALLER_IP"
-    elif [ "$INSTALLER_AUTH_MODE" = "password" ] && [ -n "$INSTALLER_PASSWORD" ]; then
-      SSHPASS="$INSTALLER_PASSWORD" nix --extra-experimental-features "nix-command flakes" run github:nix-community/nixos-anywhere -- \
-        --env-password \
-        --phases kexec,disko,install \
-        --flake "$TMP_DIR#$HOSTNAME" \
-        --target-host "$INSTALLER_USER@$INSTALLER_IP"
-    elif [ "$INSTALLER_AUTH_MODE" = "auto" ] && [ -n "$INSTALLER_PASSWORD" ]; then
-      SSHPASS="$INSTALLER_PASSWORD" nix --extra-experimental-features "nix-command flakes" run github:nix-community/nixos-anywhere -- \
-        --env-password \
-        --phases kexec,disko,install \
-        --flake "$TMP_DIR#$HOSTNAME" \
-        --target-host "$INSTALLER_USER@$INSTALLER_IP"
-    else
-      echo "[nops] $HOSTNAME is reachable on the live installer, but no password was provided. Skipping."
-      rm -rf "$TMP_DIR"
-      continue
-    fi
-
+  if [ "$INSTALLER_AUTH_MODE" = "ssh_key" ] || { [ "$INSTALLER_AUTH_MODE" = "auto" ] && can_login_with_key "$INSTALLER_USER" "$INSTALLER_IP"; }; then
+    nix --extra-experimental-features "nix-command flakes" run github:nix-community/nixos-anywhere -- \
+      --phases kexec,disko,install \
+      --flake "$TMP_DIR#$HOSTNAME" \
+      --target-host "$INSTALLER_USER@$INSTALLER_IP"
+  elif [ "$INSTALLER_AUTH_MODE" = "password" ] && [ -n "$INSTALLER_PASSWORD" ]; then
+    SSHPASS="$INSTALLER_PASSWORD" nix --extra-experimental-features "nix-command flakes" run github:nix-community/nixos-anywhere -- \
+      --env-password \
+      --phases kexec,disko,install \
+      --flake "$TMP_DIR#$HOSTNAME" \
+      --target-host "$INSTALLER_USER@$INSTALLER_IP"
+  elif [ "$INSTALLER_AUTH_MODE" = "auto" ] && [ -n "$INSTALLER_PASSWORD" ]; then
+    SSHPASS="$INSTALLER_PASSWORD" nix --extra-experimental-features "nix-command flakes" run github:nix-community/nixos-anywhere -- \
+      --env-password \
+      --phases kexec,disko,install \
+      --flake "$TMP_DIR#$HOSTNAME" \
+      --target-host "$INSTALLER_USER@$INSTALLER_IP"
+  else
+    echo "[nops] $HOSTNAME is reachable on the live installer, but no password was provided. Skipping."
     rm -rf "$TMP_DIR"
+    return 1
+  fi
 
-    if stop_pixiecore_for_disk_boot; then
-      PXE_TEMP_DISABLED=1
-    fi
+  rm -rf "$TMP_DIR"
 
-    echo "[nops] Rebooting $HOSTNAME into the installed system..."
-    run_remote "$INSTALLER_USER" "$INSTALLER_IP" "$INSTALLER_PASSWORD" "$INSTALLER_AUTH_MODE" "nohup sh -c 'sleep 2; reboot' >/dev/null 2>&1 &" || true
+  if stop_pixiecore_for_disk_boot; then
+    PXE_TEMP_DISABLED=1
+  fi
 
-    echo "[nops] Waiting for $HOSTNAME to reboot..."
-    if ! wait_for_login "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" 36; then
-      if [ "$PXE_TEMP_DISABLED" -eq 1 ]; then
-        start_pixiecore_after_disk_boot
-      fi
-      if can_login "$INSTALLER_USER" "$INSTALLER_IP" "$INSTALLER_PASSWORD" "$INSTALLER_AUTH_MODE"; then
-        echo "[nops] $HOSTNAME rebooted back into the live installer instead of the installed system. Boot from the local disk to continue enrollment."
-      else
-        echo "[nops] $HOSTNAME did not become reachable after installation. Skipping enrollment."
-      fi
-      continue
-    fi
+  echo "[nops] Rebooting $HOSTNAME into the installed system..."
+  run_remote "$INSTALLER_USER" "$INSTALLER_IP" "$INSTALLER_PASSWORD" "$INSTALLER_AUTH_MODE" "nohup sh -c 'sleep 2; reboot' >/dev/null 2>&1 &" || true
 
+  echo "[nops] Waiting for $HOSTNAME to reboot..."
+  if ! wait_for_login "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" 36; then
     if [ "$PXE_TEMP_DISABLED" -eq 1 ]; then
       start_pixiecore_after_disk_boot
+    fi
+    if can_login "$INSTALLER_USER" "$INSTALLER_IP" "$INSTALLER_PASSWORD" "$INSTALLER_AUTH_MODE"; then
+      echo "[nops] $HOSTNAME rebooted back into the live installer instead of the installed system. Boot from the local disk to continue enrollment."
+    else
+      echo "[nops] $HOSTNAME did not become reachable after installation. Skipping enrollment."
+    fi
+    return 1
+  fi
+
+  if [ "$PXE_TEMP_DISABLED" -eq 1 ]; then
+    start_pixiecore_after_disk_boot
+  fi
+
+  return 0
+}
+
+# Extract Fleet Secrets for provisioning
+GIT_USER=$(sudo env SOPS_AGE_KEY_FILE=$SOPS_KEY sops -d --extract '["git_username"]' secrets/secrets.yaml)
+GIT_PASS=$(sudo env SOPS_AGE_KEY_FILE=$SOPS_KEY sops -d --extract '["git_password"]' secrets/secrets.yaml)
+WEBHOOK_SECRET=$(sudo env SOPS_AGE_KEY_FILE=$SOPS_KEY sops -d --extract '["webhook_secret"]' secrets/secrets.yaml)
+REPO_URL=$(git remote get-url origin | sed -E 's|^https?://[^/@]+:[^/@]+@|https://|')
+CONTROLLER_SSH_PUB_KEY=$(cat "${NOPS_SSH_KEY}.pub")
+
+while read -r node; do
+  HOSTNAME=$(echo "$node" | jq -r '.hostname')
+  INSTALLER_IP=$(echo "$node" | jq -r '.installer_ip')
+  INSTALLER_USER=$(echo "$node" | jq -r '.installer_user // "nixos"')
+  INSTALLER_PASSWORD=$(echo "$node" | jq -r '.installer_password // empty')
+  INSTALLER_AUTH_MODE=$(echo "$node" | jq -r '.installer_auth_mode // "auto"')
+  INSTALLER_SSH_PUB_KEY=$(echo "$node" | jq -r '.installer_ssh_pub_key // empty')
+  DISK=$(echo "$node" | jq -r '.disk')
+  FS=$(echo "$node" | jq -r '.fs')
+  NODE_GROUP=$(echo "$node" | jq -r '.node_group')
+  NODE_ROLE=$(echo "$node" | jq -r '.node_role // "worker"')
+  KEEPALIVED_ROLE=$(echo "$node" | jq -r '.keepalived_role // "backup"')
+  NODE_ADMIN=$(echo "$node" | jq -r '.node_admin')
+  NODE_ADMIN_PASS=$(echo "$node" | jq -r '.node_admin_pass')
+  REINSTALL=$(echo "$node" | jq -r '.reinstall // "false"')
+
+  if [ -z "$HOSTNAME" ] || [ -z "$INSTALLER_IP" ]; then
+    echo "[nops] Skipping malformed deployment entry: $node"
+    continue
+  fi
+
+  # State 1: Already active (answers as nops)
+  if can_login_with_key nops "$INSTALLER_IP"; then
+    if [ "$REINSTALL" = "true" ]; then
+      echo "[nops] $HOSTNAME already active, but reinstall=true so a reprovision will be attempted."
+    else
+    echo "[nops] $HOSTNAME already active, skipping."
+    continue
+    fi
+  fi
+
+  # State 2: Live ISO (answers as the installer user)
+  if can_login "$INSTALLER_USER" "$INSTALLER_IP" "$INSTALLER_PASSWORD" "$INSTALLER_AUTH_MODE"; then
+    echo "[nops] $HOSTNAME detected as Live ISO, provisioning through $INSTALLER_USER@$INSTALLER_IP..."
+    if ! provision_live_installer; then
+      continue
     fi
   fi
 
   # State 3: Base OS (answers as admin user)
   if can_login "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS"; then
+    if [ "$REINSTALL" = "true" ]; then
+      echo "[nops] $HOSTNAME detected as Base OS, but reinstall=true so rebooting into netboot for a fresh install..."
+      run_remote "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" auto "nohup sh -c 'sleep 2; reboot' >/dev/null 2>&1 &" || true
+
+      echo "[nops] Waiting for $HOSTNAME to come back on the live installer..."
+      if ! wait_for_login "$INSTALLER_USER" "$INSTALLER_IP" "$INSTALLER_PASSWORD" 18; then
+        if can_login "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS"; then
+          echo "[nops] $HOSTNAME came back on the installed system instead of netboot. Ensure PXE/network boot is selected first, then rerun the controller."
+        else
+          echo "[nops] $HOSTNAME did not become reachable on the live installer after reboot. Skipping reinstall."
+        fi
+        continue
+      fi
+
+      echo "[nops] $HOSTNAME is back on the live installer. Reinstalling..."
+      if ! provision_live_installer; then
+        continue
+      fi
+    fi
+
     echo "[nops] $HOSTNAME detected as Base OS, enrolling..."
 
     CONFIG_JSON=$(mktemp)

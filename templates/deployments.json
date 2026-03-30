@@ -6,6 +6,7 @@
     "installer_auth_mode": "auto",
     "installer_ssh_pub_key": "",
     "installer_password": "changeme",
+    "reinstall": false,
     "disk": "/dev/nvme0n1",
     "fs": "zfs",
     "node_group": "web",
