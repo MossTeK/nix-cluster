@@ -328,7 +328,7 @@ EOF
   fi
 
   echo "[nops] Rebooting $HOSTNAME into the installed system..."
-  run_remote "$INSTALLER_USER" "$INSTALLER_IP" "$INSTALLER_PASSWORD" "$INSTALLER_AUTH_MODE" "nohup sh -c 'sleep 2; reboot' >/dev/null 2>&1 &" || true
+  run_remote "$INSTALLER_USER" "$INSTALLER_IP" "$INSTALLER_PASSWORD" "$INSTALLER_AUTH_MODE" "sudo nohup sh -c 'sleep 2; reboot' >/dev/null 2>&1 &" || true
 
   echo "[nops] Waiting for $HOSTNAME to reboot..."
   if ! wait_for_login "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" 36; then
@@ -400,7 +400,7 @@ while read -r node; do
   if can_login "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS"; then
     if [ "$REINSTALL" = "true" ]; then
       echo "[nops] $HOSTNAME detected as Base OS, but reinstall=true so rebooting into netboot for a fresh install..."
-      run_remote "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" auto "nohup sh -c 'sleep 2; reboot' >/dev/null 2>&1 &" || true
+      run_remote "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" auto "printf '%s\n' '$NODE_ADMIN_PASS' | sudo -S nohup sh -c 'sleep 2; reboot' >/dev/null 2>&1 &" || true
 
       echo "[nops] Waiting for $HOSTNAME to come back on the live installer..."
       if ! wait_for_login "$INSTALLER_USER" "$INSTALLER_IP" "$INSTALLER_PASSWORD" 18; then
