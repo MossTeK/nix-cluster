@@ -1,0 +1,9 @@
+creation_rules:
+  - path_regex: ^(deployments|nops-config-template)\.json$
+    key_groups:
+      - age:
+          - AGE_PUBLIC_KEY_PLACEHOLDER
+  - path_regex: secrets/.*$
+    key_groups:
+      - age:
+          - AGE_PUBLIC_KEY_PLACEHOLDER

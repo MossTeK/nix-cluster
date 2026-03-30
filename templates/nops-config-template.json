@@ -1,0 +1,68 @@
+{
+  "bootstrap_mode": false,
+  "is_controller": false,
+  "node_role": "worker",
+  "keepalived_role": "backup",
+  "git_user": "<your_git_user>",
+  "git_token": "<your_git_token>",
+  "repo_url": "https://git.example.com/<youruser>/fleet.git",
+  "repo_host_ip": "",
+  "node_group": "homelab",
+  "node_admin": "<admin>",
+  "node_admin_pass": "<password>",
+  "node_ssh_pub_key": "ssh-ed25519 <controller_pubkey>",
+  "installer_auth_mode": "auto",
+  "installer_ssh_pub_key": "",
+  "trigger_choice": "1",
+  "webhook_secret": "<webhook_secret>",
+  "cloudflare_api_token": "",
+  "caddy_enable": false,
+  "forgejo_public_host": "",
+  "keepalived_enable": false,
+  "keepalived_interface": "",
+  "keepalived_virtual_router_id": 51,
+  "keepalived_priority": 150,
+  "keepalived_vip_cidr": "",
+  "cloudflare_tunnel": false,
+  "cloudflare_tunnel_name": "",
+  "cloudflare_tunnel_domain": "",
+  "cloudflare_tunnel_vip": "",
+  "cloudflare_zone_id": "",
+  "cloudflare_account_id": "",
+  "modules": {
+    "caddy": {
+      "enable": false
+    },
+    "keepalived": {
+      "enable": false,
+      "interface": "",
+      "virtual_router_id": 51,
+      "priority": 150,
+      "vip_cidr": ""
+    },
+    "cloudflare": {
+      "enable": false,
+      "tunnel_name": "",
+      "tunnel_domain": "",
+      "tunnel_vip": "",
+      "zone_id": "",
+      "account_id": ""
+    },
+    "pxe": {
+      "enable": false,
+      "dhcp_enable": false,
+      "interface": "",
+      "http_port": 8081,
+      "boot_url": ""
+    },
+    "postgres_backup": {
+      "enable": false
+    }
+  },
+  "pxe_enable": false,
+  "pxe_dhcp_enable": false,
+  "pxe_interface": "",
+  "pxe_http_port": 8081,
+  "pxe_boot_url": "",
+  "postgres_backup_enable": false
+}

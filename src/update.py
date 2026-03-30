@@ -1,66 +1,167 @@
 import os
 import subprocess
 import logging
-import yaml
+import json
+import threading
 from typing import List, Dict, Any
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("nops-update")
 
+UPDATE_LOCK = threading.Lock()
+
+# Executes git fetch/reset and nixos-rebuild commands derived from the JSON config produced by the nops NixOS module.
 class UpdateManager:
-    #init setup
+    __slots__ = ('config_path', 'config', 'hostname')
+
+    # Loads config from the Nix-generated JSON file at config_path.
     def __init__(self, config_path: str):
         self.config_path = config_path
         self.config = self._load_config()
+        self.hostname = subprocess.getoutput("hostname")
 
-    #load config
+    # Reads and parses the Nix-generated JSON config file; raises on failure.
     def _load_config(self) -> Dict[str, Any]:
         try:
             with open(self.config_path, 'r') as f:
-                return yaml.safe_load(f)
+                return json.load(f)
         except Exception as e:
-            logger.error(f"Failed to load config: {e}")
+            logger.error(f"FAILED TO LOAD NOPS CONFIG: {e}")
             raise
 
-    #shell helper
-    def _run_command(self, cmd: List[str], cwd: str) -> str:
-        logger.info(f"Running: {' '.join(cmd)}")
-        result = subprocess.run(
-            cmd, cwd=cwd, check=True, capture_output=True, text=True
-        )
-        return result.stdout
+    # Runs a subprocess, streams stdout/stderr to the logger under the given stage label, and raises CalledProcessError on non-zero exit.
+    def _run_command(self, cmd: List[str], cwd: str, stage: str) -> str:
+        command_str = " ".join(cmd)
+        logger.info(f"{stage} START: {command_str}")
 
-    #main update logic
-    def perform_update(self, commit_id: str) -> str:
-        logger.info(f"Updating to commit: {commit_id}")
-        repo_dir = self.config['directories']['repo']
-        logs = []
+        result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
 
-        #git sync
+        if result.stdout:
+            for line in result.stdout.splitlines():
+                logger.info(f"{stage} OUTPUT: {line}")
+
+        if result.stderr:
+            log_func = logger.error if result.returncode != 0 else logger.info
+            for line in result.stderr.splitlines():
+                log_func(f"{stage} MESSAGE: {line}")
+
+        if result.returncode != 0:
+            logger.error(f"{stage} FAILED WITH CODE {result.returncode}")
+            raise subprocess.CalledProcessError(result.returncode, cmd, output=result.stdout, stderr=result.stderr)
+
+        logger.info(f"{stage} SUCCESS: {command_str}")
+        return result.stdout.strip()
+
+    # Returns files differing between local HEAD and origin/main; returns an empty list on error.
+    def _get_changed_files(self, repo_dir: str) -> List[str]:
         try:
-            self._run_command(["git", "fetch", "origin", "main"], cwd=repo_dir)
-            out = self._run_command(["git", "reset", "--hard", "origin/main"], cwd=repo_dir)
-            logs.append(f"GIT SYNC:\n{out}")
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Git sync failed: {e.stderr}")
-            return f"GIT ERROR: {e.stderr}"
+            output = self._run_command(["git", "diff", "--name-only", "HEAD", "origin/main"], cwd=repo_dir, stage="GIT-DIFF")
+            return output.splitlines()
+        except Exception:
+            return []
 
-        #run rebuild
-        rebuild_cmds = self.config['commands'].get('rebuild', [])
-        for cmd in rebuild_cmds:
-            try:
-                out = self._run_command(cmd, cwd=repo_dir)
-                logs.append(f"REBUILD:\n{out}")
-            except subprocess.CalledProcessError as e:
-                logger.error(f"Rebuild failed: {e.stderr}")
-                return f"\n".join(logs) + f"\nCRITICAL FAILURE:\n{e.stderr}"
+    # Returns True if any changed path falls under this node's directory, shared groups/, modules/, deployments.json, secrets/, or flake files.
+    def _should_rebuild(self, changed_files: List[str]) -> bool:
+        if not changed_files:
+            return False
 
-        return "\n".join(logs)
+        relevant_paths = [
+            f"nodes/{self.hostname}/",
+            "groups/",    
+            "modules/",   
+            "deployments.json",
+            "secrets/",
+            "scripts/",
+            "flake.nix",
+            "flake.lock"
+        ]
+        
+        for f in changed_files:
+            if any(f.startswith(path) for path in relevant_paths):
+                logger.info(f"RELEVANT CHANGE DETECTED: {f}")
+                return True
+        
+        return False
 
-    #boot sequence
+    # Executes the update pipeline.
+    # Fetches the remote repository to evaluate changes before running controller logic to avoid masking triggering commits.
+    # Forces a rebuild if the node acts as a controller, otherwise evaluates changes for worker nodes.
+    def perform_update(self, trigger_id: str) -> str:
+        if not UPDATE_LOCK.acquire(blocking=False):
+            logger.info(f"NOPS UPDATE ALREADY RUNNING. SKIPPING TRIGGER: {trigger_id}")
+            return "SKIPPED: update already in progress"
+
+        logger.info(f"NOPS UPDATE SEQUENCE INITIATED: {trigger_id}")
+        repo_dir = self.config['directories']['repo']
+        is_controller = self.config.get('is_controller', False)
+        controller_script = self.config.get('controller_script', "")
+
+        try:
+            self._run_command(["git", "fetch", "origin"], cwd=repo_dir, stage="GIT-FETCH")
+            changed_files = self._get_changed_files(repo_dir)
+            needs_rebuild = self._should_rebuild(changed_files)
+
+            if is_controller and controller_script:
+                logger.info("NODE IS CONTROLLER. SYNCING REPO BEFORE CONTROLLER SCRIPT...")
+                self._run_command(["git", "reset", "--hard", "origin/main"], cwd=repo_dir, stage="GIT-RESET-PRE")
+
+                logger.info("EXECUTING CONTROLLER SCRIPT...")
+                script_path = "/tmp/nops_controller.sh"
+                # FORCE LF: Write with newline='\n' and strip any existing \r characters
+                with open(script_path, "w", newline='\n') as f:
+                    f.write(controller_script.replace('\r', ''))
+                os.chmod(script_path, 0o755)
+                
+                try:
+                    self._run_command(["bash", "-c", script_path], cwd=repo_dir, stage="CONTROLLER-HOOK")
+                except subprocess.CalledProcessError as e:
+                    logger.warning(f"CONTROLLER-HOOK FAILED (non-fatal, continuing with rebuild): {e}")
+
+                self._run_command(["git", "fetch", "origin"], cwd=repo_dir, stage="GIT-FETCH-POST")
+                needs_rebuild = True
+
+            elif not is_controller:
+                logger.info("NODE IS WORKER. PAUSING 30s FOR CONTROLLER TO PROVISION SECRETS...")
+                import time
+                time.sleep(30)
+                
+                self._run_command(["git", "fetch", "origin"], cwd=repo_dir, stage="GIT-FETCH-POST")
+                changed_files = self._get_changed_files(repo_dir)
+                needs_rebuild = self._should_rebuild(changed_files)
+
+            if not needs_rebuild:
+                self._run_command(["git", "reset", "--hard", "origin/main"], cwd=repo_dir, stage="GIT-RESET")
+                logger.info("NO RELEVANT CHANGES FOUND. RESETTING REPO.")
+                return "SKIPPED"
+
+            self._run_command(["git", "reset", "--hard", "origin/main"], cwd=repo_dir, stage="GIT-RESET")
+            
+            rebuild_cmds = self.config['commands']['update']
+            output_log = ""
+            
+            # SANITIZATION: Ensure all rebuild commands are stripped of carriage returns
+            if isinstance(rebuild_cmds, list):
+                for cmd in rebuild_cmds:
+                    sanitized_cmd = cmd.replace('\r', '')
+                    output_log += self._run_command(["bash", "-c", sanitized_cmd], cwd=repo_dir, stage="REBUILD") + "\n"
+            else:
+                sanitized_cmd = rebuild_cmds.replace('\r', '')
+                output_log = self._run_command(["bash", "-c", sanitized_cmd], cwd=repo_dir, stage="REBUILD")
+            
+            logger.info(f"NOPS REBUILD TASK COMPLETED: {trigger_id}")
+            return output_log.strip()
+
+        except Exception as e:
+            logger.error(f"NOPS UPDATE PIPELINE FAILED: {str(e)}")
+            return f"FAILURE: {str(e)}"
+        finally:
+            UPDATE_LOCK.release()
+
+    # Fetches origin and hard-resets to origin/main so the daemon starts with current fleet state.
     def run_boot_sequence(self):
         repo_dir = self.config['directories']['repo']
-        for cmd in self.config['commands'].get('boot', []):
-            try:
-                self._run_command(cmd, cwd=repo_dir)
-            except Exception as e:
-                logger.error(f"Boot command failed: {e}")
+        logger.info("INITIALIZING BOOT SYNCHRONIZATION...")
+        try:
+            self._run_command(["git", "fetch", "origin"], cwd=repo_dir, stage="BOOT")
+            self._run_command(["git", "reset", "--hard", "origin/main"], cwd=repo_dir, stage="BOOT")
+        except Exception as e:
+            logger.error(f"BOOT SYNC FAILED: {e}")

@@ -1,0 +1,17 @@
+[
+  {
+    "hostname": "node5",
+    "installer_ip": "192.168.2.105",
+    "installer_user": "nixos",
+    "installer_auth_mode": "auto",
+    "installer_ssh_pub_key": "",
+    "installer_password": "changeme",
+    "disk": "/dev/nvme0n1",
+    "fs": "zfs",
+    "node_group": "web",
+    "node_role": "worker",
+    "keepalived_role": "backup",
+    "node_admin": "moss",
+    "node_admin_pass": "changeme"
+  }
+]
