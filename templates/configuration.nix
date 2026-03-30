@@ -6,9 +6,9 @@
     ./imports.nix
   ];
 
-  # All module/service config blocks are injected via imports.nix and hydrated by nops.
-  # nops daemon config — repoPath and afterPush are set by the installer; override trigger mode per node.
-  services.nops = {
+  # All module/service config blocks are injected via imports.nix and hydrated by nix-cluster.
+  # nix-cluster daemon config — repoPath and afterPush are set by the installer; override trigger mode per node.
+  services."nix-cluster" = {
     enable = true;
     repoPath = "/home/nops/";
     isController = IS_CONTROLLER_PLACEHOLDER;
@@ -17,7 +17,7 @@
     webhook.port = 8080;
     controllerScript = builtins.readFile ./controllerScript-autoprovision.sh;
     afterPush = [
-      "/run/wrappers/bin/sudo /run/current-system/sw/bin/systemd-run --working-directory=${config.services.nops.repoPath} --service-type=oneshot --setenv=PATH=/run/current-system/sw/bin:/run/wrappers/bin --setenv=NIXPKGS_ALLOW_UNFREE=1 -- /run/current-system/sw/bin/nixos-rebuild switch --flake ${config.services.nops.repoPath}#${config.networking.hostName} --impure"
+      "/run/wrappers/bin/sudo /run/current-system/sw/bin/systemd-run --working-directory=${config.services.\"nix-cluster\".repoPath} --service-type=oneshot --setenv=PATH=/run/current-system/sw/bin:/run/wrappers/bin --setenv=NIXPKGS_ALLOW_UNFREE=1 -- /run/current-system/sw/bin/nixos-rebuild switch --flake ${config.services.\"nix-cluster\".repoPath}#${config.networking.hostName} --impure"
     ];
   };
 

@@ -35,13 +35,13 @@ Git Push Event
   git fetch → change detection → controller/worker logic → nixos-rebuild
 ```
 
-Both daemons run in a single systemd service (`nops`), forked as background processes. `wait -n` causes systemd restart if either exits.
+Both daemons run in a single systemd service (`nix-cluster`), forked as background processes. `wait -n` causes systemd restart if either exits.
 
-## NixOS Module Options (services.nops.*)
+## NixOS Module Options (services."nix-cluster".*)
 
 | Option | Type | Default | Purpose |
 |--------|------|---------|---------|
-| `enable` | bool | false | Activate nops daemon |
+| `enable` | bool | false | Activate nix-cluster daemon |
 | `repoPath` | path | "/home/nops/" | Fleet repo directory |
 | `isController` | bool | false | Run controllerScript before rebuild |
 | `controllerScript` | lines | "" | Pre-rebuild bash (Terraform, secrets, etc.) |

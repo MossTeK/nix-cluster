@@ -471,7 +471,7 @@ while read -r node; do
     fi
 
     if copy_to_remote "$CONFIG_JSON" "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" /tmp/nops-config.json "$INSTALLER_AUTH_MODE"; then
-      run_remote "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" "$INSTALLER_AUTH_MODE" "nix --extra-experimental-features 'nix-command flakes' shell nixpkgs#git -c sh -lc 'sudo env PATH=\"\$PATH\" nix --extra-experimental-features \"nix-command flakes\" run git+NOPS_INSTALL_REPO_URL_PLACEHOLDER#install -- --config /tmp/nops-config.json'"
+      run_remote "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" "$INSTALLER_AUTH_MODE" "nix --extra-experimental-features 'nix-command flakes' shell nixpkgs#git -c sh -lc 'sudo env PATH=\"\$PATH\" nix --extra-experimental-features \"nix-command flakes\" run git+https://git.smallguytech.org/SGT/nix-cluster.git#install -- --config /tmp/nops-config.json'"
     else
       echo "[nops] Failed to copy worker config to $HOSTNAME. Skipping enrollment."
     fi

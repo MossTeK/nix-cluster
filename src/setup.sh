@@ -7,6 +7,7 @@ trap 'exit 0' EXIT
 
 HOSTNAME=$(hostname)
 TEMPLATES_DIR="${NOPS_TEMPLATES_DIR:-../templates}"
+DEFAULT_NIX_CLUSTER_REPO_URL="https://git.smallguytech.org/SGT/nix-cluster.git"
 
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
@@ -460,8 +461,8 @@ if [ "$NON_INTERACTIVE" = true ]; then
     GIT_TOKEN=$(jq -r '.git_token // empty' "$CONFIG_FILE")
     REPO_URL=$(jq -r '.repo_url // empty' "$CONFIG_FILE")
     REPO_HOST_IP=$(jq -r '.repo_host_ip // empty' "$CONFIG_FILE")
-    NOPS_REPO_URL=$(jq -r '.nops_repo_url // empty' "$CONFIG_FILE")
-    NIXOS_INSTALL_REPO_URL=$(jq -r '.nixos_install_repo_url // empty' "$CONFIG_FILE")
+    NIX_CLUSTER_REPO_URL=$(jq -r --arg default_repo "$DEFAULT_NIX_CLUSTER_REPO_URL" '.nix_cluster_repo_url // .nops_repo_url // $default_repo' "$CONFIG_FILE")
+    NIXOS_INSTALL_REPO_URL=$(jq -r --arg default_repo "$DEFAULT_NIX_CLUSTER_REPO_URL" '.nixos_install_repo_url // .nix_cluster_repo_url // .nops_repo_url // $default_repo' "$CONFIG_FILE")
     NODE_GROUP=$(jq -r '.node_group // "default"' "$CONFIG_FILE")
     NODE_ADMIN=$(jq -r '.node_admin // empty' "$CONFIG_FILE")
     NODE_ADMIN_PASS=$(jq -r '.node_admin_pass // empty' "$CONFIG_FILE")
@@ -522,8 +523,10 @@ else
     echo ""
     read -p "Enter Fleet Repository URL (HTTPS): " REPO_URL
     read -p "Optional internal IP for the repo hostname (writes /etc/hosts on this node): " REPO_HOST_IP
-    read -p "Optional nops repo URL for generated fleet flakes (blank to leave placeholder): " NOPS_REPO_URL
-    read -p "Optional nixos-install repo URL for controller provisioning (blank to leave placeholder): " NIXOS_INSTALL_REPO_URL
+    read -p "nix-cluster repo URL for generated fleet flakes [$DEFAULT_NIX_CLUSTER_REPO_URL]: " NIX_CLUSTER_REPO_URL
+    NIX_CLUSTER_REPO_URL=${NIX_CLUSTER_REPO_URL:-$DEFAULT_NIX_CLUSTER_REPO_URL}
+    read -p "nix-cluster install repo URL for controller provisioning [$DEFAULT_NIX_CLUSTER_REPO_URL]: " NIXOS_INSTALL_REPO_URL
+    NIXOS_INSTALL_REPO_URL=${NIXOS_INSTALL_REPO_URL:-$DEFAULT_NIX_CLUSTER_REPO_URL}
 
     read -p "Enter the group/tier for this node (e.g., media, signaling, db) [default]: " NODE_GROUP
     NODE_GROUP=${NODE_GROUP:-default}
@@ -645,14 +648,14 @@ if [ "${NODE_ROLE:-worker}" = "controller" ]; then
     IS_CONTROLLER="true"
 fi
 
-if [ "${IS_CONTROLLER:-false}" = "true" ] && { [ -z "${NOPS_REPO_URL:-}" ] || [ -z "${NIXOS_INSTALL_REPO_URL:-}" ]; }; then
-    echo "Error: nops_repo_url and nixos_install_repo_url must be set for controller/bootstrap installs."
+if [ "${IS_CONTROLLER:-false}" = "true" ] && { [ -z "${NIX_CLUSTER_REPO_URL:-}" ] || [ -z "${NIXOS_INSTALL_REPO_URL:-}" ]; }; then
+    echo "Error: nix_cluster_repo_url and nixos_install_repo_url must be set for controller/bootstrap installs."
     exit 1
 fi
 
 if [ "$CLEAN" = true ] && [ "${IS_BOOTSTRAP:-false}" = "true" ]; then
     log "Bootstrap clean requested. Wiping local Forgejo and tunnel runtime state..."
-    sudo systemctl stop nops 2>/dev/null || true
+    sudo systemctl stop nix-cluster 2>/dev/null || sudo systemctl stop nops 2>/dev/null || true
     sudo systemctl stop cloudflared 2>/dev/null || true
     sudo systemctl stop forgejo 2>/dev/null || true
     sudo systemctl stop docker 2>/dev/null || true
@@ -765,9 +768,9 @@ if [ ! -f "flake.nix" ]; then
     log "Empty fleet repository detected. Initializing base flake..."
     sudo -u nops cp --no-preserve=mode "$TEMPLATES_DIR/flake.nix" "$TARGET_DIR/flake.nix"
     sudo -u nops chmod u+w "$TARGET_DIR/flake.nix"
-    if [ -n "${NOPS_REPO_URL:-}" ]; then
-        NOPS_FLAKE_URL="$(normalize_git_flake_url "$NOPS_REPO_URL")"
-        sudo -u nops sed -i "s|NOPS_FLAKE_URL_PLACEHOLDER|${NOPS_FLAKE_URL}|" "$TARGET_DIR/flake.nix"
+    if [ -n "${NIX_CLUSTER_REPO_URL:-}" ]; then
+        NIX_CLUSTER_FLAKE_URL="$(normalize_git_flake_url "$NIX_CLUSTER_REPO_URL")"
+        sudo -u nops sed -i "s|git+https://git.smallguytech.org/SGT/nix-cluster.git|${NIX_CLUSTER_FLAKE_URL}|" "$TARGET_DIR/flake.nix"
     fi
 fi
 
@@ -1082,10 +1085,12 @@ fi
 sudo -u nops cp --no-preserve=mode "$TEMPLATES_DIR/controllerScript-autoprovision.sh" "$NODE_DIR/controllerScript-autoprovision.sh"
 sudo -u nops chmod u+w "$NODE_DIR/controllerScript-autoprovision.sh"
     if [ -n "${NIXOS_INSTALL_REPO_URL:-}" ]; then
-        sudo -u nops sed -i "s|NIXOS_INSTALL_REPO_URL_PLACEHOLDER|${NIXOS_INSTALL_REPO_URL}|" "$NODE_DIR/controllerScript-autoprovision.sh"
+        NIXOS_INSTALL_FLAKE_URL="$(normalize_git_flake_url "$NIXOS_INSTALL_REPO_URL")"
+        sudo -u nops sed -i "s|git+https://git.smallguytech.org/SGT/nix-cluster.git|${NIXOS_INSTALL_FLAKE_URL}|" "$NODE_DIR/controllerScript-autoprovision.sh"
     fi
-    if [ -n "${NOPS_REPO_URL:-}" ]; then
-        sudo -u nops sed -i "s|NOPS_INSTALL_REPO_URL_PLACEHOLDER|${NOPS_REPO_URL}|" "$NODE_DIR/controllerScript-autoprovision.sh"
+    if [ -n "${NIX_CLUSTER_REPO_URL:-}" ] && [ -z "${NIXOS_INSTALL_REPO_URL:-}" ]; then
+        NIX_CLUSTER_INSTALL_FLAKE_URL="$(normalize_git_flake_url "$NIX_CLUSTER_REPO_URL")"
+        sudo -u nops sed -i "s|git+https://git.smallguytech.org/SGT/nix-cluster.git|${NIX_CLUSTER_INSTALL_FLAKE_URL}|" "$NODE_DIR/controllerScript-autoprovision.sh"
     fi
 
 
@@ -1310,7 +1315,7 @@ fi
 
 log "Adding node to Fleet flake.nix..."
 if ! grep -q "nixosConfigurations.$HOSTNAME" "$TARGET_DIR/flake.nix"; then
-    sudo -u nops sed -i "/# NODES_MARKER/a \    nixosConfigurations.$HOSTNAME = nixpkgs.lib.nixosSystem { system = \"x86_64-linux\"; modules = [ ./nodes/$HOSTNAME/configuration.nix nops.nixosModules.default ]; };" "$TARGET_DIR/flake.nix"
+    sudo -u nops sed -i "/# NODES_MARKER/a \    nixosConfigurations.$HOSTNAME = nixpkgs.lib.nixosSystem { system = \"x86_64-linux\"; modules = [ ./nodes/$HOSTNAME/configuration.nix nixCluster.nixosModules.default ]; };" "$TARGET_DIR/flake.nix"
 else
     log "Node $HOSTNAME already exists in flake.nix. Skipping insertion."
 fi

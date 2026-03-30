@@ -1,5 +1,5 @@
 {
-  description = "nops - Nix Operations Daemon";
+  description = "nix-cluster - Nix Cluster Controller";
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
@@ -17,7 +17,7 @@
       # Package definition for nops daemons.
       # Compiles the Python-based Matrix listener and Webhook server into wrapped executables.
       default = pkgs.stdenv.mkDerivation {
-        pname = "nops";
+        pname = "nix-cluster";
         version = "2.2.0";
         src = ./.;
         nativeBuildInputs = [ pkgs.makeWrapper pkgs.dos2unix ];
@@ -83,10 +83,10 @@
     };
 
     # NixOS module imported by fleet nodes via flake input.
-    # Declares the nops service user, systemd daemon(s), firewall rules, and injects SOPS-decrypted secrets.
+    # Declares the nix-cluster service user, systemd daemon(s), firewall rules, and injects SOPS-decrypted secrets.
     nixosModules.default = { config, lib, pkgs, ... }: 
     let 
-      cfg = config.services.nops;
+      cfg = config.services."nix-cluster";
       # Serializes repo path and rebuild commands to a JSON file the Python daemon reads at startup.
     nopsConfig = pkgs.writeText "nops-config.json" (builtins.toJSON {
       is_controller = cfg.isController;
@@ -136,9 +136,12 @@
       };
     });
     in {
-      imports = [ sops-nix.nixosModules.sops ];
-      options.services.nops = {
-        enable = lib.mkEnableOption "nops - Nix Operations Daemon";
+      imports = [
+        sops-nix.nixosModules.sops
+        (lib.mkRenamedOptionModule [ "services" "nops" ] [ "services" "nix-cluster" ])
+      ];
+      options.services."nix-cluster" = {
+        enable = lib.mkEnableOption "nix-cluster - Nix Cluster Controller";
         isController = lib.mkOption {
           type = lib.types.bool;
           default = false;
@@ -156,7 +159,7 @@
         afterPush = lib.mkOption {
           type = lib.types.listOf lib.types.str;
           default = [
-            "/run/wrappers/bin/sudo /run/current-system/sw/bin/systemd-run --working-directory=${config.services.nops.repoPath} --service-type=oneshot --setenv=PATH=/run/current-system/sw/bin:/run/wrappers/bin -- /run/current-system/sw/bin/nixos-rebuild switch --flake ${config.services.nops.repoPath}#${config.networking.hostName} --impure"
+            "/run/wrappers/bin/sudo /run/current-system/sw/bin/systemd-run --working-directory=${config.services.\"nix-cluster\".repoPath} --service-type=oneshot --setenv=PATH=/run/current-system/sw/bin:/run/wrappers/bin -- /run/current-system/sw/bin/nixos-rebuild switch --flake ${config.services.\"nix-cluster\".repoPath}#${config.networking.hostName} --impure"
           ];
           description = "Array of shell commands to execute after a push is received.";
         };
@@ -303,7 +306,7 @@
         networking.firewall.allowedTCPPorts = lib.optionals cfg.webhook.enable [ cfg.webhook.port ];
         users.users.nops = {
           isNormalUser = true;
-          description = "nops Service Daemon Account";
+          description = "nix-cluster Service Daemon Account";
           group = "nops";
           extraGroups = [ "wheel" "docker" ];
           home = "/home/nops";
@@ -325,9 +328,10 @@
           "d /home/nops/log 0755 nops nops -"
         ];
         
-        # Runs the nops listener(s) as the nops user. Spawns the Matrix daemon and/or webhook server based on enabled options.
-        systemd.services.nops = {
-          description = "nops Operations Listener Daemon";
+        # Runs the nix-cluster listener(s) as the nops user. Spawns the Matrix daemon and/or webhook server based on enabled options.
+        systemd.services."nix-cluster" = {
+          description = "nix-cluster Operations Listener Daemon";
+          aliases = [ "nops.service" ];
           wantedBy = [ "multi-user.target" ];
           after = [ "network-online.target" ];
           wants = [ "network-online.target" ];
