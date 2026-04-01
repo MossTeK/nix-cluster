@@ -371,6 +371,7 @@ while read -r node; do
   KEEPALIVED_ROLE=$(echo "$node" | jq -r '.keepalived_role // "backup"')
   NODE_ADMIN=$(echo "$node" | jq -r '.node_admin')
   NODE_ADMIN_PASS=$(echo "$node" | jq -r '.node_admin_pass')
+  NODE_ADMIN_PASS_ESCAPED=$(printf "%q" "$NODE_ADMIN_PASS")
   REINSTALL=$(echo "$node" | jq -r '.reinstall // "false"')
 
   if [ -z "$HOSTNAME" ] || [ -z "$INSTALLER_IP" ]; then
@@ -398,6 +399,11 @@ while read -r node; do
 
   # State 3: Base OS (answers as admin user)
   if can_login "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS"; then
+    if [ "$REINSTALL" != "true" ] && run_remote "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" auto "printf '%s\n' $NODE_ADMIN_PASS_ESCAPED | sudo -S systemctl cat nix-cluster.service >/dev/null 2>&1 || printf '%s\n' $NODE_ADMIN_PASS_ESCAPED | sudo -S systemctl cat nops.service >/dev/null 2>&1"; then
+      echo "[nops] $HOSTNAME detected as Base OS and already enrolled, skipping."
+      continue
+    fi
+
     if [ "$REINSTALL" = "true" ]; then
       echo "[nops] $HOSTNAME detected as Base OS, but reinstall=true so rebooting into netboot for a fresh install..."
       run_remote "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" auto "printf '%s\n' '$NODE_ADMIN_PASS' | sudo -S nohup sh -c 'sleep 2; reboot' >/dev/null 2>&1 &" || true
@@ -470,8 +476,8 @@ while read -r node; do
         '{bootstrap_mode: false, is_controller: ($node_role == "controller"), git_user: $git_user, git_token: $git_token, repo_url: $repo_url, node_group: $node_group, node_admin: $admin, node_admin_pass: $admin_pass, node_ssh_pub_key: $node_ssh_pub_key, installer_auth_mode: $installer_auth_mode, installer_ssh_pub_key: $installer_ssh_pub_key, node_role: $node_role, keepalived_role: $keepalived_role, fleet_private_key: $fleet_private_key, trigger_choice: "2", webhook_secret: $webhook_secret}' > "$CONFIG_JSON"
     fi
 
-    if copy_to_remote "$CONFIG_JSON" "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" /tmp/nops-config.json "$INSTALLER_AUTH_MODE"; then
-      run_remote "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" "$INSTALLER_AUTH_MODE" "nix --extra-experimental-features 'nix-command flakes' shell nixpkgs#git -c sh -lc 'sudo env PATH=\"\$PATH\" nix --extra-experimental-features \"nix-command flakes\" run git+https://git.smallguytech.org/SGT/nix-cluster.git#install -- --config /tmp/nops-config.json'"
+    if copy_to_remote "$CONFIG_JSON" "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" /tmp/nops-config.json auto; then
+      run_remote "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" auto "nix --extra-experimental-features 'nix-command flakes' shell nixpkgs#git -c sh -lc 'printf '\''%s\\n'\'' $NODE_ADMIN_PASS_ESCAPED | sudo -S env PATH=\"$PATH\" nix --extra-experimental-features \"nix-command flakes\" run git+https://git.smallguytech.org/SGT/nix-cluster.git#install -- --config /tmp/nops-config.json'"
     else
       echo "[nops] Failed to copy worker config to $HOSTNAME. Skipping enrollment."
     fi
