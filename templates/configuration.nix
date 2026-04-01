@@ -17,7 +17,7 @@
     webhook.port = 8080;
     controllerScript = builtins.readFile ./controllerScript-autoprovision.sh;
     afterPush = [
-      "/run/wrappers/bin/sudo /run/current-system/sw/bin/systemd-run --working-directory=${config.services.\"nix-cluster\".repoPath} --service-type=oneshot --setenv=PATH=/run/current-system/sw/bin:/run/wrappers/bin --setenv=NIXPKGS_ALLOW_UNFREE=1 -- /run/current-system/sw/bin/nixos-rebuild switch --flake ${config.services.\"nix-cluster\".repoPath}#${config.networking.hostName} --impure"
+      "/run/wrappers/bin/sudo /run/current-system/sw/bin/systemd-run --working-directory=${config.services."nix-cluster".repoPath} --service-type=oneshot --setenv=PATH=/run/current-system/sw/bin:/run/wrappers/bin --setenv=NIXPKGS_ALLOW_UNFREE=1 -- /run/current-system/sw/bin/nixos-rebuild switch --flake ${config.services."nix-cluster".repoPath}#${config.networking.hostName} --impure"
     ];
   };
 
