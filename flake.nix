@@ -42,6 +42,26 @@
           makeWrapper ${pythonEnv}/bin/python3 $out/bin/nops-webhook \
             --add-flags "$out/lib/webhook.py" \
             --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.git pkgs.inetutils pkgs.nixos-rebuild pkgs.systemd pkgs.bash pkgs.sops pkgs.age pkgs.jq pkgs.openssh pkgs.sshpass pkgs.mkpasswd ]}
+
+          makeWrapper ${pkgs.bash}/bin/bash $out/bin/nops-observe \
+            --add-flags "$out/lib/observe.sh" \
+            --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.systemd pkgs.jq pkgs.bash ]}
+
+          makeWrapper ${pkgs.bash}/bin/bash $out/bin/nops-node \
+            --add-flags "$out/lib/node-observe.sh" \
+            --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.openssh pkgs.bash ]}
+
+          makeWrapper ${pkgs.bash}/bin/bash $out/bin/nops-fleet-status \
+            --add-flags "$out/lib/fleet-status.sh" \
+            --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.sops pkgs.age pkgs.jq pkgs.openssh pkgs.bash ]}
+
+          makeWrapper ${pkgs.bash}/bin/bash $out/bin/nops-fleet-watch \
+            --add-flags "$out/lib/fleet-watch.sh" \
+            --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.jq pkgs.coreutils pkgs.bash ]}
+
+          makeWrapper ${pkgs.bash}/bin/bash $out/bin/nops-controller-heartbeat \
+            --add-flags "$out/lib/controller-heartbeat.sh" \
+            --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.iputils pkgs.systemd pkgs.jq pkgs.coreutils pkgs.bash ]}
         '';
       };
 
@@ -87,6 +107,16 @@
     nixosModules.default = { config, lib, pkgs, ... }: 
     let 
       cfg = config.services."nix-cluster";
+      trackedUnits = lib.unique (
+        [ "nix-cluster.service" ]
+        ++ lib.optionals cfg.modules.caddy.enable [ "caddy.service" ]
+        ++ lib.optionals cfg.modules.keepalived.enable [ "keepalived.service" ]
+        ++ lib.optionals cfg.modules.cloudflare.enable [ "cloudflared.service" ]
+        ++ lib.optionals cfg.modules.pxe.enable [ "caddy.service" ]
+        ++ lib.optionals (cfg.modules.pxe.enable && cfg.modules.pxe.dhcpEnable) [ "dnsmasq.service" ]
+        ++ lib.optionals cfg.modules.postgresBackup.enable [ "postgresqlBackup.timer" ]
+        ++ cfg.observability.extraTrackedUnits
+      );
       # Serializes repo path and rebuild commands to a JSON file the Python daemon reads at startup.
     nopsConfig = pkgs.writeText "nops-config.json" (builtins.toJSON {
       is_controller = cfg.isController;
@@ -102,6 +132,14 @@
       };
       controller = {
         reconcile_interval_seconds = cfg.controller.reconcileIntervalSeconds;
+        monitor = {
+          enable = cfg.controller.monitor.enable;
+          interval_seconds = cfg.controller.monitor.intervalSeconds;
+          targets = cfg.controller.monitor.targets;
+        };
+      };
+      observability = {
+        tracked_units = trackedUnits;
       };
       modules = {
         caddy = {
@@ -159,7 +197,7 @@
         afterPush = lib.mkOption {
           type = lib.types.listOf lib.types.str;
           default = [
-            "/run/wrappers/bin/sudo /run/current-system/sw/bin/systemd-run --working-directory=${config.services.\"nix-cluster\".repoPath} --service-type=oneshot --setenv=PATH=/run/current-system/sw/bin:/run/wrappers/bin -- /run/current-system/sw/bin/nixos-rebuild switch --flake ${config.services.\"nix-cluster\".repoPath}#${config.networking.hostName} --impure"
+            "/run/wrappers/bin/sudo /run/current-system/sw/bin/systemd-run --working-directory=${config.services."nix-cluster".repoPath} --service-type=oneshot --setenv=PATH=/run/current-system/sw/bin:/run/wrappers/bin -- /run/current-system/sw/bin/nixos-rebuild switch --flake ${config.services."nix-cluster".repoPath}#${config.networking.hostName} --impure"
           ];
           description = "Array of shell commands to execute after a push is received.";
         };
@@ -167,6 +205,26 @@
           type = lib.types.int;
           default = 60;
           description = "How often the controller should rerun reconciliation to detect provisionable nodes even when no webhook event occurs. Set to 0 to disable periodic reconciliation.";
+        };
+        controller.monitor.enable = lib.mkOption {
+          type = lib.types.bool;
+          default = true;
+          description = "On non-controller nodes, periodically ping known controller targets and log state changes.";
+        };
+        controller.monitor.intervalSeconds = lib.mkOption {
+          type = lib.types.int;
+          default = 15;
+          description = "How often workers should check controller reachability.";
+        };
+        controller.monitor.targets = lib.mkOption {
+          type = lib.types.listOf lib.types.str;
+          default = [];
+          description = "Controller hostnames or IPs that workers should ping. Configure at least one stable controller address or VIP.";
+        };
+        observability.extraTrackedUnits = lib.mkOption {
+          type = lib.types.listOf lib.types.str;
+          default = [];
+          description = "Additional systemd units to include in on-demand observability checks.";
         };
         modules = {
           caddy.enable = lib.mkOption {
@@ -319,13 +377,16 @@
           pkgs.git 
           pkgs.sops 
           pkgs.inetutils
+          pkgs.iputils
           pkgs.openssh
           pkgs.jq
           pkgs.sshpass
           pkgs.mkpasswd
         ];
+        environment.etc."nops-runtime-config.json".source = nopsConfig;
         systemd.tmpfiles.rules = [
           "d /home/nops/log 0755 nops nops -"
+          "d /var/lib/nops-heartbeat 0755 nops nops -"
         ];
         
         # Runs the nix-cluster listener(s) as the nops user. Spawns the Matrix daemon and/or webhook server based on enabled options.
@@ -391,6 +452,34 @@
              
              wait -n
           '';
+        };
+
+        systemd.services."nix-cluster-controller-heartbeat" = lib.mkIf (!cfg.isController && cfg.controller.monitor.enable && cfg.controller.monitor.targets != []) {
+          description = "nix-cluster controller heartbeat monitor";
+          after = [ "network-online.target" ];
+          wants = [ "network-online.target" ];
+          serviceConfig = {
+            Type = "oneshot";
+            User = "nops";
+            Group = "nops";
+          };
+          environment = {
+            NOPS_RUNTIME_CONFIG_PATH = "/etc/nops-runtime-config.json";
+            NOPS_HEARTBEAT_STATE_DIR = "/var/lib/nops-heartbeat";
+          };
+          script = ''
+            exec ${self.packages.${system}.default}/bin/nops-controller-heartbeat
+          '';
+        };
+
+        systemd.timers."nix-cluster-controller-heartbeat" = lib.mkIf (!cfg.isController && cfg.controller.monitor.enable && cfg.controller.monitor.targets != []) {
+          description = "nix-cluster controller heartbeat monitor timer";
+          wantedBy = [ "timers.target" ];
+          timerConfig = {
+            OnBootSec = "30s";
+            OnUnitActiveSec = "${toString cfg.controller.monitor.intervalSeconds}s";
+            Unit = "nix-cluster-controller-heartbeat.service";
+          };
         };
       };
     };
