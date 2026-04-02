@@ -9,6 +9,12 @@ HOSTNAME=$(hostname)
 TEMPLATES_DIR="${NOPS_TEMPLATES_DIR:-../templates}"
 DEFAULT_NIX_CLUSTER_REPO_URL="https://git.smallguytech.org/SGT/nix-cluster.git"
 
+HELPER_DIR="${NOPS_SRC_DIR:-$(cd "$(dirname "$0")" && pwd)}/lib"
+if [ -f "$HELPER_DIR/install-config.sh" ]; then
+    # shellcheck source=./lib/install-config.sh
+    . "$HELPER_DIR/install-config.sh"
+fi
+
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
 YELLOW='\033[1;33m'
@@ -18,14 +24,7 @@ CONFIG_FILE=""
 NON_INTERACTIVE=false
 CLEAN=false
 
-while [[ "$#" -gt 0 ]]; do
-    case $1 in
-        --config) CONFIG_FILE="$2"; shift ;;
-        --clean) CLEAN=true ;;
-        *) echo "Unknown parameter passed: $1"; exit 1 ;;
-    esac
-    shift
-done
+parse_install_cli_args "$@"
 
 if [ -n "$CONFIG_FILE" ]; then
     if [ ! -f "$CONFIG_FILE" ]; then
@@ -483,21 +482,21 @@ if [ "$NON_INTERACTIVE" = true ]; then
     FORGEJO_PUBLIC_HOST=$(jq -r '.forgejo_public_host // ""' "$CONFIG_FILE")
     KEEPALIVED_ENABLE=$(jq -r '.modules.keepalived.enable // .keepalived_enable // "false"' "$CONFIG_FILE")
     KEEPALIVED_INTERFACE=$(jq -r '.modules.keepalived.interface // .keepalived_interface // ""' "$CONFIG_FILE")
-    KEEPALIVED_ROUTER_ID=$(jq -r '.modules.keepalived.virtual_router_id // .keepalived_virtual_router_id // "51"' "$CONFIG_FILE")
+    KEEPALIVED_ROUTER_ID=$(jq -r '.modules.keepalived.virtual_router_id // .modules.keepalived.virtualRouterId // .keepalived_virtual_router_id // "51"' "$CONFIG_FILE")
     KEEPALIVED_PRIORITY=$(jq -r '.modules.keepalived.priority // .keepalived_priority // "150"' "$CONFIG_FILE")
-    KEEPALIVED_VIP_CIDR=$(jq -r '.modules.keepalived.vip_cidr // .keepalived_vip_cidr // ""' "$CONFIG_FILE")
-    CF_TUNNEL=$(jq -r '.modules.cloudflare.enable // .cloudflare_tunnel // "false"' "$CONFIG_FILE")
-    CF_TUNNEL_NAME=$(jq -r '.modules.cloudflare.tunnel_name // .cloudflare_tunnel_name // ""' "$CONFIG_FILE")
-    CF_TUNNEL_DOMAIN=$(jq -r '.modules.cloudflare.tunnel_domain // .cloudflare_tunnel_domain // ""' "$CONFIG_FILE")
-    CF_TUNNEL_VIP=$(jq -r '.modules.cloudflare.tunnel_vip // .cloudflare_tunnel_vip // ""' "$CONFIG_FILE")
-    CF_ZONE_ID=$(jq -r '.modules.cloudflare.zone_id // .cloudflare_zone_id // ""' "$CONFIG_FILE")
-    CF_ACCOUNT_ID=$(jq -r '.modules.cloudflare.account_id // .cloudflare_account_id // ""' "$CONFIG_FILE")
+    KEEPALIVED_VIP_CIDR=$(jq -r '.modules.keepalived.vip_cidr // .modules.keepalived.vipCidr // .keepalived_vip_cidr // ""' "$CONFIG_FILE")
+    CF_TUNNEL=$(jq -r '.modules.cloudflare.tunnel // .modules.cloudflare.enable // .cloudflare_tunnel // "false"' "$CONFIG_FILE")
+    CF_TUNNEL_NAME=$(jq -r '.modules.cloudflare.tunnel_name // .modules.cloudflare.tunnelName // .cloudflare_tunnel_name // ""' "$CONFIG_FILE")
+    CF_TUNNEL_DOMAIN=$(jq -r '.modules.cloudflare.tunnel_domain // .modules.cloudflare.tunnelDomain // .cloudflare_tunnel_domain // ""' "$CONFIG_FILE")
+    CF_TUNNEL_VIP=$(jq -r '.modules.cloudflare.tunnel_vip // .modules.cloudflare.vip // .cloudflare_tunnel_vip // ""' "$CONFIG_FILE")
+    CF_ZONE_ID=$(jq -r '.modules.cloudflare.zone_id // .modules.cloudflare.zoneId // .cloudflare_zone_id // ""' "$CONFIG_FILE")
+    CF_ACCOUNT_ID=$(jq -r '.modules.cloudflare.account_id // .modules.cloudflare.accountId // .cloudflare_account_id // ""' "$CONFIG_FILE")
     PXE_ENABLE=$(jq -r '.modules.pxe.enable // .pxe_enable // "false"' "$CONFIG_FILE")
-    PXE_DHCP_ENABLE=$(jq -r '.modules.pxe.dhcp_enable // .pxe_dhcp_enable // "false"' "$CONFIG_FILE")
+    PXE_DHCP_ENABLE=$(jq -r '.modules.pxe.dhcp_enable // .modules.pxe.dhcpEnable // .pxe_dhcp_enable // "false"' "$CONFIG_FILE")
     PXE_INTERFACE=$(jq -r '.modules.pxe.interface // .pxe_interface // ""' "$CONFIG_FILE")
-    PXE_HTTP_PORT=$(jq -r '.modules.pxe.http_port // .pxe_http_port // "8081"' "$CONFIG_FILE")
-    PXE_BOOT_URL=$(jq -r '.modules.pxe.boot_url // .pxe_boot_url // ""' "$CONFIG_FILE")
-    POSTGRES_BACKUP_ENABLE=$(jq -r '.modules.postgres_backup.enable // .postgres_backup_enable // "false"' "$CONFIG_FILE")
+    PXE_HTTP_PORT=$(jq -r '.modules.pxe.http_port // .modules.pxe.httpPort // .pxe_http_port // "8081"' "$CONFIG_FILE")
+    PXE_BOOT_URL=$(jq -r '.modules.pxe.boot_url // .modules.pxe.bootUrl // .pxe_boot_url // ""' "$CONFIG_FILE")
+    POSTGRES_BACKUP_ENABLE=$(jq -r '.modules.postgresBackup.enable // .modules.postgres_backup.enable // .postgres_backup_enable // "false"' "$CONFIG_FILE")
     IS_CONTROLLER=$(jq -r '.is_controller // "false"' "$CONFIG_FILE")
 
     CUSTOM_GROUP_CONFIG=$(jq -r '.custom_group_config // ""' "$CONFIG_FILE")
@@ -509,6 +508,7 @@ if [ "$NON_INTERACTIVE" = true ]; then
         echo "Error: Missing required fields in config file."
         exit 1
     fi
+    apply_install_overrides
 else
     read -p "Is this the FIRST node (Bootstrap Mode - will install local Forgejo)? (y/N): " BOOTSTRAP_PROMPT
     if [[ "$BOOTSTRAP_PROMPT" =~ ^[Yy]$ ]]; then
@@ -635,6 +635,7 @@ else
     read -p "Path to custom group imports.nix: " CUSTOM_GROUP_IMPORTS
     read -p "Path to custom node configuration.nix: " CUSTOM_NODE_CONFIG
     read -p "Path to custom node imports.nix: " CUSTOM_NODE_IMPORTS
+    apply_install_overrides
 fi
 
 if [ "${IS_BOOTSTRAP:-false}" = "true" ]; then
@@ -953,6 +954,23 @@ if [ ! -d "$GROUP_DIR" ]; then
     sudo -u nops chmod -R u+w "$GROUP_DIR"
 fi
 
+log "Ensuring standard module files exist..."
+sudo -u nops mkdir -p "$TARGET_DIR/modules/caddy" "$TARGET_DIR/modules/cloudflare" "$TARGET_DIR/modules/backup" "$TARGET_DIR/modules/ingress" "$TARGET_DIR/modules/pxe"
+for module_spec in \
+    "caddy/caddy.nix:caddy.nix" \
+    "cloudflare/cloudflared.nix:cloudflared.nix" \
+    "backup/postgres.nix:postgres-backup.nix" \
+    "ingress/keepalived.nix:keepalived.nix" \
+    "pxe/pxe.nix:pxe.nix"
+do
+    module_target="${module_spec%%:*}"
+    module_template="${module_spec##*:}"
+    if [ ! -f "$TARGET_DIR/modules/$module_target" ]; then
+        sudo -u nops cp --no-preserve=mode "$TEMPLATES_DIR/$module_template" "$TARGET_DIR/modules/$module_target"
+        sudo -u nops chmod u+w "$TARGET_DIR/modules/$module_target"
+    fi
+done
+
 # Scaffolds a base Caddy module when enabled so generated fleets have a shared reverse proxy layer.
 if [ "${CADDY_ENABLE:-false}" = "true" ]; then
     log "Base Caddy reverse proxy enabled. Scaffolding module..."
@@ -1099,21 +1117,7 @@ IMPORTS_FILE="$NODE_DIR/imports.nix"
 echo "{ config, pkgs, ... }: { imports = [" > "$IMPORTS_FILE"
 echo "  ../../groups/$NODE_GROUP/configuration.nix" >> "$IMPORTS_FILE"
 echo "  ../../groups/$NODE_GROUP/imports.nix" >> "$IMPORTS_FILE"
-if [ "${CADDY_ENABLE:-false}" = "true" ]; then
-    echo "  ../../modules/caddy/caddy.nix" >> "$IMPORTS_FILE"
-fi
-if [ "${CF_TUNNEL:-false}" = "true" ]; then
-    echo "  ../../modules/cloudflare/cloudflared.nix" >> "$IMPORTS_FILE"
-fi
-if [ "${KEEPALIVED_ENABLE:-false}" = "true" ]; then
-    echo "  ../../modules/ingress/keepalived.nix" >> "$IMPORTS_FILE"
-fi
-if [ "${PXE_ENABLE:-false}" = "true" ] && [ "${IS_CONTROLLER:-false}" = "true" ]; then
-    echo "  ../../modules/pxe/pxe.nix" >> "$IMPORTS_FILE"
-fi
-if [ "${IS_BOOTSTRAP:-false}" = "true" ]; then
-    echo "  ../../modules/backup/postgres.nix" >> "$IMPORTS_FILE"
-fi
+echo "  ../../modules/pxe/pxe.nix" >> "$IMPORTS_FILE"
 if [ "$IS_BOOTSTRAP" = "true" ]; then
     echo "  ../../modules/forgejo/forgejo.nix" >> "$IMPORTS_FILE"
 fi
@@ -1156,6 +1160,25 @@ else
 fi
 
 sudo -u nops sed -i "s|IS_CONTROLLER_PLACEHOLDER|${IS_CONTROLLER:-false}|" "$NODE_DIR/configuration.nix"
+sudo -u nops sed -i "s|CADDY_ENABLE_PLACEHOLDER|${CADDY_ENABLE:-false}|" "$NODE_DIR/configuration.nix"
+sudo -u nops sed -i "s|KEEPALIVED_ENABLE_PLACEHOLDER|${KEEPALIVED_ENABLE:-false}|" "$NODE_DIR/configuration.nix"
+sudo -u nops sed -i "s|KEEPALIVED_INTERFACE_PLACEHOLDER|$(nops_escape_sed "${KEEPALIVED_INTERFACE:-}")|" "$NODE_DIR/configuration.nix"
+sudo -u nops sed -i "s|KEEPALIVED_ROUTER_ID_PLACEHOLDER|${KEEPALIVED_ROUTER_ID:-51}|" "$NODE_DIR/configuration.nix"
+sudo -u nops sed -i "s|KEEPALIVED_PRIORITY_PLACEHOLDER|${KEEPALIVED_PRIORITY:-100}|" "$NODE_DIR/configuration.nix"
+sudo -u nops sed -i "s|KEEPALIVED_VIP_CIDR_PLACEHOLDER|$(nops_escape_sed "${KEEPALIVED_VIP_CIDR:-}")|" "$NODE_DIR/configuration.nix"
+sudo -u nops sed -i "s|CLOUDFLARE_ENABLE_PLACEHOLDER|${CF_TUNNEL:-false}|" "$NODE_DIR/configuration.nix"
+sudo -u nops sed -i "s|CLOUDFLARE_TUNNEL_ENABLE_PLACEHOLDER|${CF_TUNNEL:-false}|" "$NODE_DIR/configuration.nix"
+sudo -u nops sed -i "s|CLOUDFLARE_TUNNEL_NAME_PLACEHOLDER|$(nops_escape_sed "${CF_TUNNEL_NAME:-}")|" "$NODE_DIR/configuration.nix"
+sudo -u nops sed -i "s|CLOUDFLARE_TUNNEL_DOMAIN_PLACEHOLDER|$(nops_escape_sed "${CF_TUNNEL_DOMAIN:-}")|" "$NODE_DIR/configuration.nix"
+sudo -u nops sed -i "s|CLOUDFLARE_TUNNEL_VIP_PLACEHOLDER|$(nops_escape_sed "${CF_TUNNEL_VIP:-}")|" "$NODE_DIR/configuration.nix"
+sudo -u nops sed -i "s|CLOUDFLARE_ZONE_ID_PLACEHOLDER|$(nops_escape_sed "${CF_ZONE_ID:-}")|" "$NODE_DIR/configuration.nix"
+sudo -u nops sed -i "s|CLOUDFLARE_ACCOUNT_ID_PLACEHOLDER|$(nops_escape_sed "${CF_ACCOUNT_ID:-}")|" "$NODE_DIR/configuration.nix"
+sudo -u nops sed -i "s|PXE_ENABLE_PLACEHOLDER|${PXE_ENABLE:-false}|" "$NODE_DIR/configuration.nix"
+sudo -u nops sed -i "s|PXE_DHCP_ENABLE_PLACEHOLDER|${PXE_DHCP_ENABLE:-false}|" "$NODE_DIR/configuration.nix"
+sudo -u nops sed -i "s|PXE_INTERFACE_PLACEHOLDER|$(nops_escape_sed "${PXE_INTERFACE:-}")|" "$NODE_DIR/configuration.nix"
+sudo -u nops sed -i "s|PXE_HTTP_PORT_PLACEHOLDER|${PXE_HTTP_PORT:-8081}|" "$NODE_DIR/configuration.nix"
+sudo -u nops sed -i "s|PXE_BOOT_URL_PLACEHOLDER|$(nops_escape_sed "${PXE_BOOT_URL:-}")|" "$NODE_DIR/configuration.nix"
+sudo -u nops sed -i "s|POSTGRES_BACKUP_ENABLE_PLACEHOLDER|${POSTGRES_BACKUP_ENABLE:-false}|" "$NODE_DIR/configuration.nix"
 
 # Dynamically scaffold Forgejo module if this is the bootstrap node
 if [ "$IS_BOOTSTRAP" = "true" ]; then

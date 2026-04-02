@@ -1,9 +1,10 @@
-# Copilot instructions for nops
+# Copilot instructions for nix-cluster
 
 ## Project shape
 - `nops` is a GitOps deployment system for NixOS fleets.
 - The main control flow is: Matrix room message or webhook POST → `src/update.py` → `git fetch`/change detection → `nixos-rebuild`.
 - `flake.nix` packages the daemons (`nops-daemon`, `nops-webhook`) and exposes `nops-install`/`nops-deploy` apps.
+- The deployed systemd service name is `nix-cluster`; use `nix-cluster.service` in operational docs and troubleshooting steps.
 
 ## Read first
 - `README.md` explains the operator model and enrollment flow.

@@ -1,7 +1,7 @@
 # Runs the Cloudflare tunnel daemon via Docker using a SOPS-decrypted token provisioned by the controller.
-{ config, pkgs, ... }:
+{ config, pkgs, lib, ... }:
 
-{
+lib.mkIf config.services."nix-cluster".modules.cloudflare.enable {
   sops.secrets.cloudflare_tunnel_token = {};
 
   virtualisation.docker.enable = true;

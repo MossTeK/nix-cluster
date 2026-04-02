@@ -49,7 +49,7 @@
 
           makeWrapper ${pkgs.bash}/bin/bash $out/bin/nops-node \
             --add-flags "$out/lib/node-observe.sh" \
-            --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.openssh pkgs.bash ]}
+            --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.openssh pkgs.sshpass pkgs.sops pkgs.age pkgs.jq pkgs.bash ]}
 
           makeWrapper ${pkgs.bash}/bin/bash $out/bin/nops-fleet-status \
             --add-flags "$out/lib/fleet-status.sh" \
@@ -62,6 +62,14 @@
           makeWrapper ${pkgs.bash}/bin/bash $out/bin/nops-controller-heartbeat \
             --add-flags "$out/lib/controller-heartbeat.sh" \
             --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.iputils pkgs.systemd pkgs.jq pkgs.coreutils pkgs.bash ]}
+
+          makeWrapper ${pythonEnv}/bin/python3 $out/bin/nops-reporter \
+            --add-flags "$out/lib/reporter.py" \
+            --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.systemd pkgs.coreutils pkgs.bash ]}
+
+          makeWrapper ${pythonEnv}/bin/python3 $out/bin/nops-monitor \
+            --add-flags "$out/lib/monitor.py" \
+            --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.systemd pkgs.coreutils pkgs.bash ]}
         '';
       };
 
@@ -80,6 +88,7 @@
           mkdir -p $out/share/nops/src $out/bin
           cp src/setup.sh $out/share/nops/src/setup.sh
           cp src/deploy.sh $out/share/nops/src/deploy.sh 2>/dev/null || true
+          cp -r src/lib $out/share/nops/src/lib 2>/dev/null || true
           chmod +x $out/share/nops/src/*.sh
           cp -r templates $out/share/nops/templates
 
@@ -107,6 +116,9 @@
     nixosModules.default = { config, lib, pkgs, ... }: 
     let 
       cfg = config.services."nix-cluster";
+      storeCfg = cfg.ha.runtimeStore.localServer;
+      storeAdvertisePeerUrl = if storeCfg.initialAdvertisePeerUrls != [] then builtins.elemAt storeCfg.initialAdvertisePeerUrls 0 else "http://${config.networking.hostName}:2380";
+      storeInitialCluster = if storeCfg.initialCluster != [] then lib.concatStringsSep "," storeCfg.initialCluster else "${storeCfg.name}=${storeAdvertisePeerUrl}";
       trackedUnits = lib.unique (
         [ "nix-cluster.service" ]
         ++ lib.optionals cfg.modules.caddy.enable [ "caddy.service" ]
@@ -115,6 +127,9 @@
         ++ lib.optionals cfg.modules.pxe.enable [ "caddy.service" ]
         ++ lib.optionals (cfg.modules.pxe.enable && cfg.modules.pxe.dhcpEnable) [ "dnsmasq.service" ]
         ++ lib.optionals cfg.modules.postgresBackup.enable [ "postgresqlBackup.timer" ]
+        ++ lib.optionals cfg.ha.runtimeStore.localServer.enable [ "nix-cluster-runtime-store.service" ]
+        ++ lib.optionals cfg.observability.prometheus.enable [ "prometheus-node-exporter.service" ]
+        ++ lib.optionals (cfg.observability.loki.enable && cfg.observability.loki.url != "") [ "promtail.service" ]
         ++ cfg.observability.extraTrackedUnits
       );
       # Serializes repo path and rebuild commands to a JSON file the Python daemon reads at startup.
@@ -125,6 +140,8 @@
       directories = {
         repo = cfg.repoPath;
         log = "/home/nops/log";
+        state = "/var/lib/nops";
+        metrics = "/var/lib/nops/metrics";
       };
       commands = {
         # AUTOMATIC SANITIZATION: Strip \r from every command in the update list
@@ -140,6 +157,44 @@
       };
       observability = {
         tracked_units = trackedUnits;
+        prometheus = {
+          enable = cfg.observability.prometheus.enable;
+          port = cfg.observability.prometheus.port;
+        };
+        loki = {
+          enable = cfg.observability.loki.enable;
+          url = cfg.observability.loki.url;
+        };
+      };
+      ha = {
+        enable = cfg.ha.enable;
+        reporting = {
+          enable = cfg.ha.reporting.enable;
+          mode = cfg.ha.reporting.mode;
+          services = cfg.ha.reporting.services;
+          include_tracked_units = cfg.ha.reporting.includeTrackedUnits;
+          interval_seconds = cfg.ha.reporting.intervalSeconds;
+        };
+        runtime_store = {
+          type = cfg.ha.runtimeStore.type;
+          endpoint = cfg.ha.runtimeStore.endpoint;
+          key_prefix = cfg.ha.runtimeStore.keyPrefix;
+          stale_after_seconds = cfg.ha.runtimeStore.staleAfterSeconds;
+          local_server = {
+            enable = cfg.ha.runtimeStore.localServer.enable;
+            name = cfg.ha.runtimeStore.localServer.name;
+            listen_client_urls = cfg.ha.runtimeStore.localServer.listenClientUrls;
+            advertise_client_urls = cfg.ha.runtimeStore.localServer.advertiseClientUrls;
+            listen_peer_urls = cfg.ha.runtimeStore.localServer.listenPeerUrls;
+            initial_advertise_peer_urls = cfg.ha.runtimeStore.localServer.initialAdvertisePeerUrls;
+            initial_cluster = cfg.ha.runtimeStore.localServer.initialCluster;
+            initial_cluster_state = cfg.ha.runtimeStore.localServer.initialClusterState;
+          };
+        };
+        scheduler = {
+          enable = cfg.ha.scheduler.enable;
+          interval_seconds = cfg.ha.scheduler.intervalSeconds;
+        };
       };
       modules = {
         caddy = {
@@ -225,6 +280,116 @@
           type = lib.types.listOf lib.types.str;
           default = [];
           description = "Additional systemd units to include in on-demand observability checks.";
+        };
+        observability.prometheus = {
+          enable = lib.mkEnableOption "Prometheus node exporter integration for nix-cluster runtime metrics";
+          port = lib.mkOption {
+            type = lib.types.int;
+            default = 9100;
+            description = "Port exposed by the node exporter when Prometheus integration is enabled.";
+          };
+        };
+        observability.loki = {
+          enable = lib.mkEnableOption "Promtail shipping of systemd journal logs, including nix-cluster.service";
+          url = lib.mkOption {
+            type = lib.types.str;
+            default = "";
+            description = "Loki push endpoint, for example http://loki:3100/loki/api/v1/push.";
+          };
+        };
+        ha = {
+          enable = lib.mkEnableOption "real-time service health reporting and controller-side aggregation";
+          reporting = {
+            enable = lib.mkEnableOption "report selected systemd service health into the nix-cluster runtime store";
+            mode = lib.mkOption {
+              type = lib.types.enum [ "only" "none_except" "all_except" ];
+              default = "only";
+              description = "Filter mode for service health reporting. `only` and `none_except` report only the listed services; `all_except` reports every service except the listed ones.";
+            };
+            services = lib.mkOption {
+              type = lib.types.listOf lib.types.str;
+              default = [];
+              description = "Systemd service units used by the reporting filter logic, for example nix-cluster.service or caddy.service.";
+            };
+            includeTrackedUnits = lib.mkOption {
+              type = lib.types.bool;
+              default = true;
+              description = "Always include the tracked observability units in reporting decisions.";
+            };
+            intervalSeconds = lib.mkOption {
+              type = lib.types.int;
+              default = 5;
+              description = "Seconds between health snapshots emitted by the reporter.";
+            };
+          };
+          runtimeStore = {
+            type = lib.mkOption {
+              type = lib.types.enum [ "none" "etcd" ];
+              default = "none";
+              description = "Runtime state backend used for cross-node health aggregation.";
+            };
+            endpoint = lib.mkOption {
+              type = lib.types.str;
+              default = "";
+              description = "HTTP endpoint for the runtime store, for example http://192.168.2.201:2379.";
+            };
+            keyPrefix = lib.mkOption {
+              type = lib.types.str;
+              default = "/nix-cluster/health";
+              description = "Prefix used for service health keys in the runtime store.";
+            };
+            staleAfterSeconds = lib.mkOption {
+              type = lib.types.int;
+              default = 15;
+              description = "A report older than this is treated as stale by the controller monitor.";
+            };
+            localServer = {
+              enable = lib.mkEnableOption "a local etcd runtime store on this node";
+              name = lib.mkOption {
+                type = lib.types.str;
+                default = config.networking.hostName;
+                description = "Member name for the local etcd runtime store.";
+              };
+              listenClientUrls = lib.mkOption {
+                type = lib.types.listOf lib.types.str;
+                default = [ "http://0.0.0.0:2379" ];
+                description = "Client listen URLs for the local etcd runtime store.";
+              };
+              advertiseClientUrls = lib.mkOption {
+                type = lib.types.listOf lib.types.str;
+                default = [ "http://${config.networking.hostName}:2379" ];
+                description = "Advertised client URLs for the local etcd runtime store.";
+              };
+              listenPeerUrls = lib.mkOption {
+                type = lib.types.listOf lib.types.str;
+                default = [ "http://0.0.0.0:2380" ];
+                description = "Peer listen URLs for the local etcd runtime store.";
+              };
+              initialAdvertisePeerUrls = lib.mkOption {
+                type = lib.types.listOf lib.types.str;
+                default = [ "http://${config.networking.hostName}:2380" ];
+                description = "Advertised peer URLs for the local etcd runtime store.";
+              };
+              initialCluster = lib.mkOption {
+                type = lib.types.listOf lib.types.str;
+                default = [];
+                description = "Optional explicit etcd initial cluster entries in name=url form.";
+              };
+              initialClusterState = lib.mkOption {
+                type = lib.types.enum [ "new" "existing" ];
+                default = "new";
+                description = "Initial cluster state used when starting the local etcd runtime store.";
+              };
+            };
+          };
+          scheduler = {
+            enable = lib.mkEnableOption "controller-side health aggregation and failover planning";
+            intervalSeconds = lib.mkOption {
+              type = lib.types.int;
+              default = 5;
+              description = "Seconds between controller runtime-store aggregation passes.";
+            };
+          };
         };
         modules = {
           caddy.enable = lib.mkOption {
@@ -361,7 +526,10 @@
       };
 
       config = lib.mkIf cfg.enable {
-        networking.firewall.allowedTCPPorts = lib.optionals cfg.webhook.enable [ cfg.webhook.port ];
+        networking.firewall.allowedTCPPorts =
+          lib.optionals cfg.webhook.enable [ cfg.webhook.port ]
+          ++ lib.optionals cfg.ha.runtimeStore.localServer.enable [ 2379 2380 ]
+          ++ lib.optionals cfg.observability.prometheus.enable [ cfg.observability.prometheus.port ];
         users.users.nops = {
           isNormalUser = true;
           description = "nix-cluster Service Daemon Account";
@@ -382,12 +550,94 @@
           pkgs.jq
           pkgs.sshpass
           pkgs.mkpasswd
-        ];
+        ] ++ lib.optionals cfg.ha.runtimeStore.localServer.enable [ pkgs.etcd ];
         environment.etc."nops-runtime-config.json".source = nopsConfig;
         systemd.tmpfiles.rules = [
           "d /home/nops/log 0755 nops nops -"
+          "d /var/lib/nops 0755 nops nops -"
+          "d /var/lib/nops/ha 0755 nops nops -"
+          "d /var/lib/nops/metrics 0755 nops nops -"
           "d /var/lib/nops-heartbeat 0755 nops nops -"
+        ] ++ lib.optionals cfg.ha.runtimeStore.localServer.enable [
+          "d /var/lib/nops/etcd 0755 nops nops -"
+        ] ++ lib.optionals (cfg.observability.loki.enable && cfg.observability.loki.url != "") [
+          "d /var/lib/promtail 0755 promtail promtail -"
         ];
+
+        services.prometheus.exporters.node = lib.mkIf cfg.observability.prometheus.enable {
+          enable = true;
+          port = cfg.observability.prometheus.port;
+          listenAddress = "0.0.0.0";
+          enabledCollectors = [ "systemd" "textfile" ];
+          extraFlags = [ "--collector.textfile.directory=/var/lib/nops/metrics" ];
+        };
+
+        services.promtail = lib.mkIf (cfg.observability.loki.enable && cfg.observability.loki.url != "") {
+          enable = true;
+          configuration = {
+            server = {
+              http_listen_port = 9080;
+              grpc_listen_port = 0;
+            };
+            positions = {
+              filename = "/var/lib/promtail/positions.yaml";
+            };
+            clients = [{
+              url = cfg.observability.loki.url;
+            }];
+            scrape_configs = [{
+              job_name = "journal";
+              journal = {
+                max_age = "24h";
+                labels = {
+                  job = "systemd-journal";
+                  host = config.networking.hostName;
+                  cluster_service = "nix-cluster";
+                };
+              };
+              relabel_configs = [
+                {
+                  source_labels = [ "__journal__systemd_unit" ];
+                  target_label = "unit";
+                }
+                {
+                  source_labels = [ "__journal_priority" ];
+                  target_label = "priority";
+                }
+              ];
+            }];
+          };
+        };
+
+        systemd.services.promtail = lib.mkIf (cfg.observability.loki.enable && cfg.observability.loki.url != "") {
+          serviceConfig.SupplementaryGroups = [ "systemd-journal" ];
+        };
+
+        systemd.services."nix-cluster-runtime-store" = lib.mkIf cfg.ha.runtimeStore.localServer.enable {
+          description = "nix-cluster runtime state store (etcd)";
+          wantedBy = [ "multi-user.target" ];
+          after = [ "network-online.target" ];
+          wants = [ "network-online.target" ];
+          serviceConfig = {
+            User = "nops";
+            Group = "nops";
+            Restart = "always";
+            RestartSec = "10s";
+            StateDirectory = "nops/etcd";
+            WorkingDirectory = "/var/lib/nops/etcd";
+          };
+          script = ''
+            exec ${pkgs.etcd}/bin/etcd \
+              --name=${lib.escapeShellArg storeCfg.name} \
+              --data-dir=/var/lib/nops/etcd \
+              --listen-client-urls=${lib.escapeShellArg (lib.concatStringsSep "," storeCfg.listenClientUrls)} \
+              --advertise-client-urls=${lib.escapeShellArg (lib.concatStringsSep "," storeCfg.advertiseClientUrls)} \
+              --listen-peer-urls=${lib.escapeShellArg (lib.concatStringsSep "," storeCfg.listenPeerUrls)} \
+              --initial-advertise-peer-urls=${lib.escapeShellArg (lib.concatStringsSep "," storeCfg.initialAdvertisePeerUrls)} \
+              --initial-cluster=${lib.escapeShellArg storeInitialCluster} \
+              --initial-cluster-state=${lib.escapeShellArg storeCfg.initialClusterState}
+          '';
+        };
         
         # Runs the nix-cluster listener(s) as the nops user. Spawns the Matrix daemon and/or webhook server based on enabled options.
         systemd.services."nix-cluster" = {
@@ -448,6 +698,14 @@
 
              if [ "${builtins.toString cfg.webhook.enable}" = "1" ]; then
                ${self.packages.${system}.default}/bin/nops-webhook &
+             fi
+
+             if [ "${builtins.toString (cfg.ha.enable && cfg.ha.reporting.enable)}" = "1" ]; then
+               ${self.packages.${system}.default}/bin/nops-reporter &
+             fi
+
+             if [ "${builtins.toString (cfg.isController && cfg.ha.enable && cfg.ha.scheduler.enable && cfg.ha.runtimeStore.type == "etcd" && cfg.ha.runtimeStore.endpoint != "")}" = "1" ]; then
+               ${self.packages.${system}.default}/bin/nops-monitor &
              fi
              
              wait -n

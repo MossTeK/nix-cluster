@@ -12,6 +12,33 @@
     enable = true;
     repoPath = "/home/nops/";
     isController = IS_CONTROLLER_PLACEHOLDER;
+    modules = {
+      caddy.enable = CADDY_ENABLE_PLACEHOLDER;
+      keepalived = {
+        enable = KEEPALIVED_ENABLE_PLACEHOLDER;
+        interface = "KEEPALIVED_INTERFACE_PLACEHOLDER";
+        virtualRouterId = KEEPALIVED_ROUTER_ID_PLACEHOLDER;
+        priority = KEEPALIVED_PRIORITY_PLACEHOLDER;
+        vipCidr = "KEEPALIVED_VIP_CIDR_PLACEHOLDER";
+      };
+      cloudflare = {
+        enable = CLOUDFLARE_ENABLE_PLACEHOLDER;
+        tunnel = CLOUDFLARE_TUNNEL_ENABLE_PLACEHOLDER;
+        tunnelName = "CLOUDFLARE_TUNNEL_NAME_PLACEHOLDER";
+        tunnelDomain = "CLOUDFLARE_TUNNEL_DOMAIN_PLACEHOLDER";
+        vip = "CLOUDFLARE_TUNNEL_VIP_PLACEHOLDER";
+        zoneId = "CLOUDFLARE_ZONE_ID_PLACEHOLDER";
+        accountId = "CLOUDFLARE_ACCOUNT_ID_PLACEHOLDER";
+      };
+      pxe = {
+        enable = PXE_ENABLE_PLACEHOLDER;
+        dhcpEnable = PXE_DHCP_ENABLE_PLACEHOLDER;
+        interface = "PXE_INTERFACE_PLACEHOLDER";
+        httpPort = PXE_HTTP_PORT_PLACEHOLDER;
+        bootUrl = "PXE_BOOT_URL_PLACEHOLDER";
+      };
+      postgresBackup.enable = POSTGRES_BACKUP_ENABLE_PLACEHOLDER;
+    };
     matrix.enable = MATRIX_ENABLE_PLACEHOLDER;
     webhook.enable = WEBHOOK_ENABLE_PLACEHOLDER;
     webhook.port = 8080;

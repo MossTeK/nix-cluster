@@ -2,29 +2,40 @@
 # optional dnsmasq DHCP/TFTP, and TFTP assets from the iPXE package.
 { config, pkgs, lib, ... }:
 
-{
-  environment.etc."pxe/tftp".source = "${pkgs.ipxe}/share/ipxe";
-  environment.etc."pxe/http/boot.ipxe".text = ''
+let
+  pxeCfg = config.services."nix-cluster".modules.pxe;
+  bootScript = if pxeCfg.bootUrl != "" then ''
     #!ipxe
     echo nops PXE bootstrap
     dhcp
-    chain PXE_BOOT_URL_PLACEHOLDER || shell
+    chain ${pxeCfg.bootUrl} || shell
+  '' else ''
+    #!ipxe
+    echo nops PXE bootstrap
+    dhcp
+    shell
   '';
+in
+lib.mkIf (pxeCfg.enable && config.services."nix-cluster".isController) {
+  environment.etc."pxe/tftp".source = "${pkgs.ipxe}/share/ipxe";
+  environment.etc."pxe/http/boot.ipxe".text = bootScript;
 
-  services.caddy.virtualHosts."http://:${toString PXE_HTTP_PORT_PLACEHOLDER}" = {
+  services.caddy.enable = lib.mkDefault true;
+
+  services.caddy.virtualHosts."http://:${toString pxeCfg.httpPort}" = {
     extraConfig = ''
       root * /etc/pxe/http
       file_server
     '';
   };
 
-  networking.firewall.allowedTCPPorts = [ PXE_HTTP_PORT_PLACEHOLDER ];
-  networking.firewall.allowedUDPPorts = [ 69 ] ++ lib.optionals PXE_DHCP_ENABLE_PLACEHOLDER [ 67 68 ];
+  networking.firewall.allowedTCPPorts = [ pxeCfg.httpPort ];
+  networking.firewall.allowedUDPPorts = [ 69 ] ++ lib.optionals pxeCfg.dhcpEnable [ 67 68 ];
 
-} // lib.optionalAttrs PXE_DHCP_ENABLE_PLACEHOLDER {
+} // lib.optionalAttrs pxeCfg.dhcpEnable {
   services.dnsmasq.enable = true;
   services.dnsmasq.extraConfig = ''
-    interface=PXE_INTERFACE_PLACEHOLDER
+    interface=${pxeCfg.interface}
     bind-interfaces
     log-dhcp
     enable-tftp

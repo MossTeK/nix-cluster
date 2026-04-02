@@ -1,16 +1,19 @@
 # Assigns a VRRP-managed ingress VIP so the active node can answer tunnel traffic on the configured address.
-{ config, pkgs, ... }:
+{ config, pkgs, lib, ... }:
 
-{
+let
+  keepalivedCfg = config.services."nix-cluster".modules.keepalived;
+in
+lib.mkIf (keepalivedCfg.enable && keepalivedCfg.interface != "" && keepalivedCfg.vipCidr != "") {
   services.keepalived = {
     enable = true;
     vrrpInstances."ingress_vip" = {
-      interface = "KEEPALIVED_INTERFACE_PLACEHOLDER";
-      state = "KEEPALIVED_STATE_PLACEHOLDER";
-      priority = KEEPALIVED_PRIORITY_PLACEHOLDER;
-      virtualRouterId = KEEPALIVED_ROUTER_ID_PLACEHOLDER;
+      interface = keepalivedCfg.interface;
+      state = if keepalivedCfg.priority >= 150 then "MASTER" else "BACKUP";
+      priority = keepalivedCfg.priority;
+      virtualRouterId = keepalivedCfg.virtualRouterId;
       virtualIps = [
-        { addr = "KEEPALIVED_VIP_CIDR_PLACEHOLDER"; }
+        { addr = keepalivedCfg.vipCidr; }
       ];
     };
   };

@@ -2,12 +2,9 @@
 
 {
   imports = [
-    # These are injected by the installer if enabled in the JSON or prompts:
-    CADDY_MODULE_PLACEHOLDER
-    CLOUDFLARED_MODULE_PLACEHOLDER
-    FORGEJO_MODULE_PLACEHOLDER
-    PXE_MODULE_PLACEHOLDER
-    POSTGRES_BACKUP_MODULE_PLACEHOLDER
-    KEEPALIVED_MODULE_PLACEHOLDER
+    ../../modules/caddy/caddy.nix
+    ../../modules/cloudflare/cloudflared.nix
+    ../../modules/backup/postgres.nix
+    ../../modules/ingress/keepalived.nix
   ];
 }

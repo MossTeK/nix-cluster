@@ -1,7 +1,7 @@
 # Adds a simple scheduled PostgreSQL backup job for the Forgejo database.
 { config, pkgs, lib, ... }:
 
-lib.mkIf (config.services.forgejo.enable or false) {
+lib.mkIf (config.services."nix-cluster".modules.postgresBackup.enable && (config.services.forgejo.enable or false)) {
   services.postgresqlBackup = {
     enable = true;
     backupAll = false;
