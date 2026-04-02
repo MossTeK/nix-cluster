@@ -64,14 +64,14 @@ That file is produced by the NixOS module in [flake.nix](../flake.nix) and then 
 
 ```mermaid
 flowchart LR
-    A[services.nix-cluster.* options] --> B[flake.nix module]
-    B --> C[/etc/nops-runtime-config.json]
-    C --> D[UpdateManager]
-    C --> E[MatrixListener]
-    C --> F[WebhookServer]
-    C --> G[ServiceReporter]
-    C --> H[ClusterMonitor]
-    C --> I[observe.sh / fleet-status.sh / controller-heartbeat.sh]
+    A["services.nix-cluster.* options"] --> B["flake.nix module"]
+    B --> C["/etc/nops-runtime-config.json"]
+    C --> D["UpdateManager"]
+    C --> E["MatrixListener"]
+    C --> F["WebhookServer"]
+    C --> G["ServiceReporter"]
+    C --> H["ClusterMonitor"]
+    C --> I["observe.sh / fleet-status.sh / controller-heartbeat.sh"]
 ```
 
 This design is important because the runtime behavior is not hardcoded into the daemons alone. It is declared through NixOS options, serialized once, and then reused consistently by all components.
@@ -93,11 +93,11 @@ This design is important because the runtime behavior is not hardcoded into the 
 
 ```mermaid
 flowchart TD
-    A[Matrix room message] --> B[MatrixListener]
-    C[HTTP POST /webhook] --> D[WebhookServer]
-    B --> E[UpdateManager.perform_update]
+    A["Matrix room message"] --> B["MatrixListener"]
+    C["HTTP POST /webhook"] --> D["WebhookServer"]
+    B --> E["UpdateManager.perform_update"]
     D --> E
-    D --> F[periodic-reconcile timer loop]
+    D --> F["periodic-reconcile timer loop"]
     F --> E
 ```
 
@@ -144,22 +144,22 @@ It is responsible for:
 
 ```mermaid
 flowchart TD
-    A[Trigger received] --> B[git fetch remote]
-    B --> C[git diff HEAD vs branch ref]
-    C --> D{Controller?}
-    D -- yes --> E[git reset --hard]
-    E --> F[write controller script to controllerScriptDir]
-    F --> G[run controller hook]
-    G --> H[git fetch again]
-    H --> I[mark rebuild required]
-    D -- no --> J[sleep workerWaitSeconds]
-    J --> K[git fetch again]
-    K --> L[re-evaluate changed paths]
-    I --> M{needs rebuild?}
+    A["Trigger received"] --> B["git fetch remote"]
+    B --> C["git diff HEAD vs branch ref"]
+    C --> D{"Controller?"}
+    D -- yes --> E["git reset --hard"]
+    E --> F["write controller script to controllerScriptDir"]
+    F --> G["run controller hook"]
+    G --> H["git fetch again"]
+    H --> I["mark rebuild required"]
+    D -- no --> J["sleep workerWaitSeconds"]
+    J --> K["git fetch again"]
+    K --> L["re-evaluate changed paths"]
+    I --> M{"needs rebuild?"}
     L --> M
-    M -- no --> N[git reset --hard and exit]
-    M -- yes --> O[git reset --hard]
-    O --> P[run afterPush rebuild commands]
+    M -- no --> N["git reset --hard and exit"]
+    M -- yes --> O["git reset --hard"]
+    O --> P["run afterPush rebuild commands"]
 ```
 
 ### Rebuild policy
@@ -192,10 +192,10 @@ It contains two services:
 
 ```mermaid
 flowchart LR
-    A[Tracked systemd units] --> B[ServiceReporter]
-    B --> C[/var/lib/nops/ha/service-health.json]
-    B --> D[/var/lib/nops/metrics/service-health.prom]
-    B --> E[etcd key prefix /nix-cluster/health/...]
+    A["Tracked systemd units"] --> B["ServiceReporter"]
+    B --> C["/var/lib/nops/ha/service-health.json"]
+    B --> D["/var/lib/nops/metrics/service-health.prom"]
+    B --> E["etcd key prefix /nix-cluster/health/..."]
 ```
 
 The reporter:
@@ -210,11 +210,11 @@ The reporter:
 
 ```mermaid
 flowchart LR
-    A[etcd health records] --> B[ClusterMonitor]
-    B --> C[healthy/unhealthy/stale grouping]
-    C --> D[recommended target selection]
-    D --> E[/var/lib/nops/ha/cluster-state.json]
-    D --> F[/var/lib/nops/metrics/cluster-state.prom]
+    A["etcd health records"] --> B["ClusterMonitor"]
+    B --> C["healthy/unhealthy/stale grouping"]
+    C --> D["recommended target selection"]
+    D --> E["/var/lib/nops/ha/cluster-state.json"]
+    D --> F["/var/lib/nops/metrics/cluster-state.prom"]
 ```
 
 The controller monitor:
@@ -238,11 +238,11 @@ Workers can run a timer-backed heartbeat monitor:
 
 ```mermaid
 flowchart TD
-    A[systemd timer] --> B[controller-heartbeat.sh]
-    B --> C[load controller targets from runtime config]
-    C --> D[ping targets in order]
-    D --> E[write /var/lib/nops-heartbeat/controller-status.json]
-    E --> F[emit journal event on state change]
+    A["systemd timer"] --> B["controller-heartbeat.sh"]
+    B --> C["load controller targets from runtime config"]
+    C --> D["ping targets in order"]
+    D --> E["write /var/lib/nops-heartbeat/controller-status.json"]
+    E --> F["emit journal event on state change"]
 ```
 
 This script does not rebuild anything. It only records whether a worker can reach one of the configured controller targets.
@@ -380,13 +380,13 @@ It creates:
 
 ```mermaid
 flowchart TD
-    A[flake.nix module options] --> B[wrapped executables]
-    A --> C[/etc/nops-runtime-config.json]
-    B --> D[systemd services]
+    A["flake.nix module options"] --> B["wrapped executables"]
+    A --> C["/etc/nops-runtime-config.json"]
+    B --> D["systemd services"]
     C --> D
-    D --> E[nix-cluster.service]
-    D --> F[nix-cluster-runtime-store.service]
-    D --> G[nix-cluster-controller-heartbeat.timer]
+    D --> E["nix-cluster.service"]
+    D --> F["nix-cluster-runtime-store.service"]
+    D --> G["nix-cluster-controller-heartbeat.timer"]
 ```
 
 ---
@@ -442,14 +442,14 @@ sequenceDiagram
 
 ```mermaid
 flowchart TD
-    A[nops-install] --> B[setup.sh]
-    B --> C[create service account and keys]
-    C --> D[clone or initialize fleet repo]
-    D --> E[render templates into nodes/groups/modules]
-    E --> F[create or rotate SOPS data]
-    F --> G[commit and push fleet state]
-    G --> H[nixos-rebuild switch]
-    H --> I[optional bootstrap tasks: Forgejo / Cloudflare]
+    A["nops-install"] --> B["setup.sh"]
+    B --> C["create service account and keys"]
+    C --> D["clone or initialize fleet repo"]
+    D --> E["render templates into nodes/groups/modules"]
+    E --> F["create or rotate SOPS data"]
+    F --> G["commit and push fleet state"]
+    G --> H["nixos-rebuild switch"]
+    H --> I["optional bootstrap tasks: Forgejo / Cloudflare"]
 ```
 
 ---

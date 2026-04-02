@@ -195,9 +195,9 @@ Typical behavior:
 
 ```mermaid
 flowchart LR
-    A[controller automation commit] --> B[commit message contains skip marker]
-    B --> C[webhook listener ignores event]
-    C --> D[no recursive fleet loop]
+    A["controller automation commit"] --> B["commit message contains skip marker"]
+    B --> C["webhook listener ignores event"]
+    C --> D["no recursive fleet loop"]
 ```
 
 ---

@@ -18,29 +18,29 @@ The runtime is driven from NixOS module options, not ad hoc environment assumpti
 ```mermaid
 flowchart LR
     subgraph Config
-        A[services.nix-cluster.*]
-        B[flake.nix module]
-        C[/etc/nops-runtime-config.json]
+        A["services.nix-cluster.*"]
+        B["flake.nix module"]
+        C["/etc/nops-runtime-config.json"]
     end
 
     subgraph Triggers
-        D[Matrix listener]
-        E[Webhook listener]
+        D["Matrix listener"]
+        E["Webhook listener"]
     end
 
     subgraph Reconciliation
-        F[UpdateManager]
-        G[Controller hook]
-        H[git fetch/reset/diff]
-        I[nixos-rebuild]
+        F["UpdateManager"]
+        G["Controller hook"]
+        H["git fetch/reset/diff"]
+        I["nixos-rebuild"]
     end
 
     subgraph HA
-        J[ServiceReporter]
-        K[etcd runtime store]
-        L[ClusterMonitor]
-        M[Prometheus textfile metrics]
-        N[cluster-state.json]
+        J["ServiceReporter"]
+        K["etcd runtime store"]
+        L["ClusterMonitor"]
+        M["Prometheus textfile metrics"]
+        N["cluster-state.json"]
     end
 
     A --> B --> C
@@ -167,30 +167,30 @@ It is responsible for:
 
 ```mermaid
 flowchart TD
-    A[Trigger received] --> B[git fetch]
-    B --> C[git diff]
-    C --> D[Controller node]
-    D --> E[git reset --hard branchRef]
-    E --> F[materialize controller script]
-    F --> G[execute controller hook]
-    G --> H[git fetch again]
-    H --> I[force rebuild path]
-    I --> J[run rebuild commands]
+    A["Trigger received"] --> B["git fetch"]
+    B --> C["git diff"]
+    C --> D["Controller node"]
+    D --> E["git reset --hard branchRef"]
+    E --> F["materialize controller script"]
+    F --> G["execute controller hook"]
+    G --> H["git fetch again"]
+    H --> I["force rebuild path"]
+    I --> J["run rebuild commands"]
 ```
 
 ### Worker path
 
 ```mermaid
 flowchart TD
-    A[Trigger received] --> B[git fetch]
-    B --> C[git diff]
-    C --> D[Worker node]
-    D --> E[sleep workerWaitSeconds]
-    E --> F[git fetch again]
-    F --> G[recalculate changed paths]
-    G --> H{relevant changes?}
-    H -- no --> I[git reset and exit]
-    H -- yes --> J[git reset and rebuild]
+    A["Trigger received"] --> B["git fetch"]
+    B --> C["git diff"]
+    C --> D["Worker node"]
+    D --> E["sleep workerWaitSeconds"]
+    E --> F["git fetch again"]
+    F --> G["recalculate changed paths"]
+    G --> H{"relevant changes?"}
+    H -- no --> I["git reset and exit"]
+    H -- yes --> J["git reset and rebuild"]
 ```
 
 ### Rebuild scope
@@ -228,10 +228,10 @@ It:
 
 ```mermaid
 flowchart LR
-    A[systemd units] --> B[ServiceReporter]
-    B --> C[/var/lib/nops/ha/service-health.json]
-    B --> D[/var/lib/nops/metrics/service-health.prom]
-    B --> E[/nix-cluster/health/... in etcd]
+    A["systemd units"] --> B["ServiceReporter"]
+    B --> C["/var/lib/nops/ha/service-health.json"]
+    B --> D["/var/lib/nops/metrics/service-health.prom"]
+    B --> E["/nix-cluster/health/... in etcd"]
 ```
 
 ## ClusterMonitor
@@ -250,12 +250,12 @@ It:
 
 ```mermaid
 flowchart LR
-    A[etcd service-health keys] --> B[ClusterMonitor]
-    B --> C[group reports by service]
-    C --> D[mark stale/unhealthy/healthy]
-    D --> E[choose recommended target]
-    E --> F[/var/lib/nops/ha/cluster-state.json]
-    E --> G[/var/lib/nops/metrics/cluster-state.prom]
+    A["etcd service-health keys"] --> B["ClusterMonitor"]
+    B --> C["group reports by service"]
+    C --> D["mark stale/unhealthy/healthy"]
+    D --> E["choose recommended target"]
+    E --> F["/var/lib/nops/ha/cluster-state.json"]
+    E --> G["/var/lib/nops/metrics/cluster-state.prom"]
 ```
 
 ---
@@ -266,11 +266,11 @@ Workers can optionally run a heartbeat timer that checks controller reachability
 
 ```mermaid
 flowchart TD
-    A[systemd timer] --> B[controller-heartbeat.sh]
-    B --> C[read controller.monitor.targets]
-    C --> D[ping each target in order]
-    D --> E[write controller-status.json]
-    E --> F[emit journal event if state changed]
+    A["systemd timer"] --> B["controller-heartbeat.sh"]
+    B --> C["read controller.monitor.targets"]
+    C --> D["ping each target in order"]
+    D --> E["write controller-status.json"]
+    E --> F["emit journal event if state changed"]
 ```
 
 This is reachability tracking only. It is not a failover engine and it does not directly trigger rebuilds.
@@ -296,15 +296,15 @@ It performs:
 
 ```mermaid
 flowchart TD
-    A[nops-install] --> B[setup.sh]
-    B --> C[parse CLI or JSON config]
-    C --> D[prepare nix-cluster account and keys]
-    D --> E[clone or initialize fleet repo]
-    E --> F[render node/group/module templates]
-    F --> G[prepare secrets and SOPS metadata]
-    G --> H[commit and push]
-    H --> I[nixos-rebuild switch]
-    I --> J[optional bootstrap actions]
+    A["nops-install"] --> B["setup.sh"]
+    B --> C["parse CLI or JSON config"]
+    C --> D["prepare nix-cluster account and keys"]
+    D --> E["clone or initialize fleet repo"]
+    E --> F["render node/group/module templates"]
+    F --> G["prepare secrets and SOPS metadata"]
+    G --> H["commit and push"]
+    H --> I["nixos-rebuild switch"]
+    I --> J["optional bootstrap actions"]
 ```
 
 ---

@@ -53,22 +53,22 @@ The important parts of the repository are:
 
 ```mermaid
 flowchart TD
-    A[services.nix-cluster.* options] --> B[flake.nix NixOS module]
-    B --> C[/etc/nops-runtime-config.json]
-    C --> D[Matrix listener]
-    C --> E[Webhook listener]
-    C --> F[Update manager]
-    C --> G[Service reporter]
-    C --> H[Cluster monitor]
-    C --> I[Shell observability tools]
+    A["services.nix-cluster.* options"] --> B["flake.nix NixOS module"]
+    B --> C["/etc/nops-runtime-config.json"]
+    C --> D["Matrix listener"]
+    C --> E["Webhook listener"]
+    C --> F["Update manager"]
+    C --> G["Service reporter"]
+    C --> H["Cluster monitor"]
+    C --> I["Shell observability tools"]
     D --> F
     E --> F
-    F --> J[git fetch / diff / reset]
-    J --> K[nixos-rebuild switch]
-    G --> L[JSON + Prometheus metrics]
-    G --> M[etcd runtime store]
+    F --> J["git fetch / diff / reset"]
+    J --> K["nixos-rebuild switch"]
+    G --> L["JSON + Prometheus metrics"]
+    G --> M["etcd runtime store"]
     M --> H
-    H --> N[cluster-state outputs]
+    H --> N["cluster-state outputs"]
 ```
 
 ---

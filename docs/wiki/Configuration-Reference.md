@@ -286,14 +286,14 @@ These are used both for runtime tracking and for the installer/scaffolding model
 
 ```mermaid
 flowchart TD
-    A[services.nix-cluster.* options] --> B[/etc/nops-runtime-config.json]
-    B --> C[listener.py]
-    B --> D[webhook.py]
-    B --> E[update.py]
-    B --> F[ha.py]
-    B --> G[observe.sh]
-    B --> H[fleet-status.sh]
-    B --> I[controller-heartbeat.sh]
+    A["services.nix-cluster.* options"] --> B["/etc/nops-runtime-config.json"]
+    B --> C["listener.py"]
+    B --> D["webhook.py"]
+    B --> E["update.py"]
+    B --> F["ha.py"]
+    B --> G["observe.sh"]
+    B --> H["fleet-status.sh"]
+    B --> I["controller-heartbeat.sh"]
 ```
 
 ---
