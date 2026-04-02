@@ -4,7 +4,7 @@ set -euo pipefail
 
 # Configuration Paths
 DEPLOYMENTS_JSON="deployments.json"
-NOPS_SSH_KEY="/home/nops/.ssh/id_ed25519"
+NOPS_SSH_KEY="/home/nix-cluster/.ssh/id_ed25519"
 SOPS_KEY="/var/lib/sops-nix/key.txt"
 
 SSH_BASE_OPTS=(
@@ -379,8 +379,8 @@ while read -r node; do
     continue
   fi
 
-  # State 1: Already active (answers as nops)
-  if can_login_with_key nops "$INSTALLER_IP"; then
+  # State 1: Already active (answers as nix-cluster)
+  if can_login_with_key nix-cluster "$INSTALLER_IP"; then
     if [ "$REINSTALL" = "true" ]; then
       echo "[nops] $HOSTNAME already active, but reinstall=true so a reprovision will be attempted."
     else

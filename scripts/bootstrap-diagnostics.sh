@@ -3,7 +3,7 @@
 set -u
 
 CONFIG_FILE="${1:-$HOME/nops-config.json}"
-FLEET_DIR="${FLEET_DIR:-/home/nops/homelab-fleet}"
+FLEET_DIR="${FLEET_DIR:-/home/nix-cluster/homelab-fleet}"
 SOPS_KEY_FILE="${SOPS_KEY_FILE:-/var/lib/sops-nix/key.txt}"
 FORGEJO_APP_INI="/var/lib/forgejo/custom/conf/app.ini"
 FORGEJO_API="http://localhost:3000/api/healthz"
@@ -264,19 +264,19 @@ for cmd in sops age-keygen docker terraform; do
 done
 
 section "Bootstrap Users And Paths"
-check_user "nops"
+check_user "nix-cluster"
 if id forgejo >/dev/null 2>&1; then
     pass "User present: forgejo"
 else
     warn "User missing: forgejo"
 fi
-check_group "nops"
+check_group "nix-cluster"
 if getent group forgejo >/dev/null 2>&1; then
     pass "Group present: forgejo"
 else
     warn "Group missing: forgejo"
 fi
-check_dir_exists "/home/nops" "nops home"
+check_dir_exists "/home/nix-cluster" "nix-cluster home"
 if [ -e "$SOPS_KEY_FILE" ]; then
     pass "SOPS Age key exists: $SOPS_KEY_FILE"
     print_cmd_output "SOPS key permissions" stat -c '%U:%G %a %n' "$SOPS_KEY_FILE"
@@ -312,7 +312,7 @@ if [ -f "$CONFIG_FILE" ] && have_command jq; then
 fi
 
 section "Cleanup Residue"
-for path in /var/lib/forgejo /home/nops "$FLEET_DIR"; do
+for path in /var/lib/forgejo /home/nix-cluster "$FLEET_DIR"; do
     if [ -e "$path" ]; then
         print_cmd_output "State path details for $path" sudo ls -ld "$path"
     else
@@ -385,7 +385,7 @@ else
     warn "Forgejo app.ini does not exist"
 fi
 
-for unit in forgejo nops cloudflared docker; do
+for unit in forgejo nix-cluster cloudflared docker; do
     if have_systemd_unit "$unit.service"; then
         pass "Systemd unit present: $unit.service"
         print_cmd_output "systemctl status $unit" sudo systemctl status "$unit" --no-pager

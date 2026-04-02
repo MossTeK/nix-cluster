@@ -10,7 +10,7 @@
   # nix-cluster daemon config — repoPath and afterPush are set by the installer; override trigger mode per node.
   services."nix-cluster" = {
     enable = true;
-    repoPath = "/home/nops/";
+    repoPath = "/home/nix-cluster/";
     isController = IS_CONTROLLER_PLACEHOLDER;
     modules = {
       caddy.enable = CADDY_ENABLE_PLACEHOLDER;
@@ -74,7 +74,7 @@
 
   security.sudo.extraRules = [
     {
-      users = [ "nops" ];
+      users = [ "nix-cluster" ];
       commands = [
         { command = "ALL"; options = [ "NOPASSWD" ]; }
       ];
@@ -94,20 +94,20 @@
   sops.age.keyFile = "/var/lib/sops-nix/key.txt";
 
   sops.secrets = {
-    matrix_bot_token = { owner = "nops"; };
-    matrix_room_id = { owner = "nops"; };
-    matrix_homeserver = { owner = "nops"; };
-    git_username = { owner = "nops"; };
-    git_password = { owner = "nops"; };
-    webhook_secret = { owner = "nops"; };
-    cloudflare_api_token = { owner = "nops"; };
-    cloudflare_tunnel_name = { owner = "nops"; };
-    cloudflare_tunnel_domain = { owner = "nops"; };
-    cloudflare_zone_id = { owner = "nops"; };
-    cloudflare_account_id = { owner = "nops"; };
+    matrix_bot_token = { owner = "nix-cluster"; };
+    matrix_room_id = { owner = "nix-cluster"; };
+    matrix_homeserver = { owner = "nix-cluster"; };
+    git_username = { owner = "nix-cluster"; };
+    git_password = { owner = "nix-cluster"; };
+    webhook_secret = { owner = "nix-cluster"; };
+    cloudflare_api_token = { owner = "nix-cluster"; };
+    cloudflare_tunnel_name = { owner = "nix-cluster"; };
+    cloudflare_tunnel_domain = { owner = "nix-cluster"; };
+    cloudflare_zone_id = { owner = "nix-cluster"; };
+    cloudflare_account_id = { owner = "nix-cluster"; };
   };
 
-  environment.etc."git-credential-nops" = {
+  environment.etc."git-credential-nix-cluster" = {
     mode = "0555";
     text = builtins.replaceStrings [ "\r" ] [ "" ] ''
       #!${pkgs.runtimeShell}
@@ -119,7 +119,7 @@
   programs.git = {
     enable = true;
     config = {
-      credential.helper = "/etc/git-credential-nops";
+      credential.helper = "/etc/git-credential-nix-cluster";
       safe.directory = "*";
     };
   };

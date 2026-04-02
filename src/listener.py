@@ -7,7 +7,7 @@ from nio import AsyncClient, RoomMessageText, RoomMessageNotice, SyncResponse, S
 from update import UpdateManager
 
 CONFIG_PATH = os.environ.get("NOPS_CONFIG_PATH")
-LOG_FILE = os.environ.get("NOPS_LOG_PATH", "/home/nops/log/main.log")
+LOG_FILE = os.environ.get("NOPS_LOG_PATH", "/home/nix-cluster/log/main.log")
 
 os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
 

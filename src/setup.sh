@@ -8,6 +8,11 @@ trap 'exit 0' EXIT
 HOSTNAME=$(hostname)
 TEMPLATES_DIR="${NOPS_TEMPLATES_DIR:-../templates}"
 DEFAULT_NIX_CLUSTER_REPO_URL="https://git.smallguytech.org/SGT/nix-cluster.git"
+SERVICE_USER="nix-cluster"
+SERVICE_GROUP="nix-cluster"
+SERVICE_HOME="/home/${SERVICE_USER}"
+LEGACY_SERVICE_USER="nops"
+LEGACY_SERVICE_HOME="/home/${LEGACY_SERVICE_USER}"
 
 HELPER_DIR="${NOPS_SRC_DIR:-$(cd "$(dirname "$0")" && pwd)}/lib"
 if [ -f "$HELPER_DIR/install-config.sh" ]; then
@@ -118,7 +123,7 @@ prepare_json_for_edit() {
         return 0
     fi
 
-    sudo -u nops cp --no-preserve=mode "$source_file" "$temp_file"
+    sudo -u "$SERVICE_USER" cp --no-preserve=mode "$source_file" "$temp_file"
 }
 
 # Encrypts plaintext JSON files or rotates keys for already encrypted ones.
@@ -130,13 +135,13 @@ sync_encrypted_json_file() {
     fi
 
     if sudo env SOPS_AGE_KEY_FILE=/var/lib/sops-nix/key.txt sops -d "$target_file" >/dev/null 2>&1; then
-        if ! sudo -u nops sops updatekeys -y "$target_file" 2>/dev/null; then
+        if ! sudo -u "$SERVICE_USER" sops updatekeys -y "$target_file" 2>/dev/null; then
             warn "Manual authorization required on another node for $(basename "$target_file") key rotation."
         fi
         return 0
     fi
 
-    if ! sudo -u nops sops --config "$SOPS_CONFIG" --encrypt --in-place "$target_file" 2>/dev/null; then
+    if ! sudo -u "$SERVICE_USER" sops --config "$SOPS_CONFIG" --encrypt --in-place "$target_file" 2>/dev/null; then
         warn "Could not encrypt $(basename "$target_file") during bootstrap; keeping the plaintext file for now."
         return 0
     fi
@@ -421,36 +426,44 @@ run_cloudflare_provisioning() {
 
 log "Initializing nops Fleet Enrollment for $HOSTNAME..."
 
-# Wipes the nops user, home directory, and age key to allow a clean re-enrollment.
+# Wipes the nix-cluster user, home directory, and age key to allow a clean re-enrollment.
 if [ "$CLEAN" = true ]; then
     log "--clean flag detected. Wiping previous nops state..."
-    if id "nops" &>/dev/null; then
-        sudo userdel -r nops 2>/dev/null || true
-        sudo groupdel nops 2>/dev/null || true
+    if id "$SERVICE_USER" &>/dev/null; then
+        sudo userdel -r "$SERVICE_USER" 2>/dev/null || true
+        sudo groupdel "$SERVICE_GROUP" 2>/dev/null || true
     fi
-    sudo rm -rf /home/nops
+    if id "$LEGACY_SERVICE_USER" &>/dev/null; then
+        sudo userdel -r "$LEGACY_SERVICE_USER" 2>/dev/null || true
+        sudo groupdel "$LEGACY_SERVICE_USER" 2>/dev/null || true
+    fi
+    sudo rm -rf "$SERVICE_HOME" "$LEGACY_SERVICE_HOME"
     sudo rm -f /var/lib/sops-nix/key.txt
     sudo git config --global --unset-all safe.directory 2>/dev/null || true
     log "Clean complete."
 fi
 
-# Creates the nops service user and group if absent; ensures correct home directory ownership.
-if ! id "nops" &>/dev/null; then
-    log "User 'nops' does not exist. Creating temporary service user..."
-    sudo groupadd nops || true
-    sudo useradd -m -g nops -s /run/current-system/sw/bin/bash nops
+# Creates the nix-cluster service user and group if absent; ensures correct home directory ownership.
+if ! id "$SERVICE_USER" &>/dev/null; then
+    log "User '$SERVICE_USER' does not exist. Creating temporary service user..."
+    sudo groupadd "$SERVICE_GROUP" || true
+    sudo useradd -m -d "$SERVICE_HOME" -g "$SERVICE_GROUP" -s /run/current-system/sw/bin/bash "$SERVICE_USER"
 fi
-sudo mkdir -p /home/nops
-sudo chown -R nops:nops /home/nops
-sudo -u nops mkdir -p /home/nops/.ssh
-sudo chmod 700 /home/nops/.ssh
+if [ -d "$LEGACY_SERVICE_HOME" ] && [ ! -L "$LEGACY_SERVICE_HOME" ]; then
+    sudo mkdir -p "$SERVICE_HOME"
+    sudo cp -a "$LEGACY_SERVICE_HOME/." "$SERVICE_HOME/" 2>/dev/null || true
+fi
+sudo mkdir -p "$SERVICE_HOME"
+sudo chown -R "$SERVICE_USER:$SERVICE_GROUP" "$SERVICE_HOME"
+sudo -u "$SERVICE_USER" mkdir -p "$SERVICE_HOME/.ssh"
+sudo chmod 700 "$SERVICE_HOME/.ssh"
 
-if [ ! -f /home/nops/.ssh/id_ed25519 ]; then
+if [ ! -f "$SERVICE_HOME/.ssh/id_ed25519" ]; then
     log "Generating controller SSH key for automated provisioning..."
-    sudo -u nops ssh-keygen -t ed25519 -f /home/nops/.ssh/id_ed25519 -N ""
+    sudo -u "$SERVICE_USER" ssh-keygen -t ed25519 -f "$SERVICE_HOME/.ssh/id_ed25519" -N ""
 fi
 
-CONTROLLER_NODE_SSH_PUB_KEY=$(sudo -u nops cat /home/nops/.ssh/id_ed25519.pub)
+CONTROLLER_NODE_SSH_PUB_KEY=$(sudo -u "$SERVICE_USER" cat "$SERVICE_HOME/.ssh/id_ed25519.pub")
 
 # Reads git credentials, repo URL, group, admin user, trigger mode, and secrets from a JSON config file or interactive prompts.
 if [ "$NON_INTERACTIVE" = true ]; then
@@ -695,7 +708,7 @@ if [ "${IS_BOOTSTRAP:-false}" = "true" ] && echo "$REPO_URL" | grep -Eq '^https?
         warn "With forgejo_public_host set, repo_url should usually be the shared Git host, for example: https://${FORGEJO_PUBLIC_HOST}/${GIT_USER}/${REPO_NAME}.git"
     fi
 fi
-TARGET_DIR="/home/nops/$REPO_NAME"
+TARGET_DIR="$SERVICE_HOME/$REPO_NAME"
 
 # Installs a shared fleet age key if provided, or generates a unique node key if none exists at /var/lib/sops-nix/key.txt.
 KEY_FILE="/var/lib/sops-nix/key.txt"
@@ -717,7 +730,7 @@ fi
 PUB_KEY=$(sudo age-keygen -y "$KEY_FILE")
 log "Active Public Key: $PUB_KEY"
 
-# Clones the fleet repository with URL-encoded credentials into /home/nops/<repo-name>. Marks the directory safe for root rebuilds.
+# Clones the fleet repository with URL-encoded credentials into /home/nix-cluster/<repo-name>. Marks the directory safe for root rebuilds.
 if [ -d "$TARGET_DIR" ]; then
     log "Cleaning existing fleet directory..."
     sudo rm -rf "$TARGET_DIR"
@@ -725,29 +738,29 @@ fi
 
 if [ "$IS_BOOTSTRAP" = "true" ]; then
     log "Bootstrap Mode: Initializing local fleet repository..."
-    sudo -u nops mkdir -p "$TARGET_DIR"
+    sudo -u "$SERVICE_USER" mkdir -p "$TARGET_DIR"
     cd "$TARGET_DIR"
-    sudo -u nops git init
-    sudo -u nops git checkout -b main
+    sudo -u "$SERVICE_USER" git init
+    sudo -u "$SERVICE_USER" git checkout -b main
     ENCODED_TOKEN=$(jq -nr --arg v "$GIT_TOKEN" '$v | @uri')
     CLEAN_REPO_URL=$(echo "$REPO_URL" | sed 's|^https\?://||')
-    sudo -u nops git remote add origin "http://$GIT_USER:$ENCODED_TOKEN@$CLEAN_REPO_URL"
+    sudo -u "$SERVICE_USER" git remote add origin "http://$GIT_USER:$ENCODED_TOKEN@$CLEAN_REPO_URL"
 else
     log "Worker Mode: Cloning Fleet Repository into $TARGET_DIR..."
     ENCODED_TOKEN=$(jq -nr --arg v "$GIT_TOKEN" '$v | @uri')
     CLEAN_REPO_URL=$(echo "$REPO_URL" | sed 's|^https\?://||')
     sudo env GIT_CONFIG_NOSYSTEM=1 git clone "https://$GIT_USER:$ENCODED_TOKEN@$CLEAN_REPO_URL" "$TARGET_DIR"
-    sudo chown -R nops:nops "$TARGET_DIR"
+    sudo chown -R "$SERVICE_USER:$SERVICE_GROUP" "$TARGET_DIR"
     cd "$TARGET_DIR"
 fi
 
 sudo git config --global --add safe.directory "$TARGET_DIR"
-sudo -u nops git config --global --add safe.directory "$TARGET_DIR"
+sudo -u "$SERVICE_USER" git config --global --add safe.directory "$TARGET_DIR"
 
 # Ensures the standard fleet directory structure exists and bootstraps a base flake.nix if the repo is empty.
 log "Ensuring fleet root directory structure..."
-sudo -u nops mkdir -p modules secrets scripts groups nodes
-sudo -u nops touch modules/.keep secrets/.keep scripts/.keep groups/.keep nodes/.keep
+sudo -u "$SERVICE_USER" mkdir -p modules secrets scripts groups nodes
+sudo -u "$SERVICE_USER" touch modules/.keep secrets/.keep scripts/.keep groups/.keep nodes/.keep
 
 normalize_git_flake_url() {
     local url="$1"
@@ -767,24 +780,24 @@ normalize_git_flake_url() {
 
 if [ ! -f "flake.nix" ]; then
     log "Empty fleet repository detected. Initializing base flake..."
-    sudo -u nops cp --no-preserve=mode "$TEMPLATES_DIR/flake.nix" "$TARGET_DIR/flake.nix"
-    sudo -u nops chmod u+w "$TARGET_DIR/flake.nix"
+    sudo -u "$SERVICE_USER" cp --no-preserve=mode "$TEMPLATES_DIR/flake.nix" "$TARGET_DIR/flake.nix"
+    sudo -u "$SERVICE_USER" chmod u+w "$TARGET_DIR/flake.nix"
     if [ -n "${NIX_CLUSTER_REPO_URL:-}" ]; then
         NIX_CLUSTER_FLAKE_URL="$(normalize_git_flake_url "$NIX_CLUSTER_REPO_URL")"
-        sudo -u nops sed -i "s|git+https://git.smallguytech.org/SGT/nix-cluster.git|${NIX_CLUSTER_FLAKE_URL}|" "$TARGET_DIR/flake.nix"
+        sudo -u "$SERVICE_USER" sed -i "s|git+https://git.smallguytech.org/SGT/nix-cluster.git|${NIX_CLUSTER_FLAKE_URL}|" "$TARGET_DIR/flake.nix"
     fi
 fi
 
 if [ ! -f "$TARGET_DIR/deployments.json" ]; then
     log "Initializing deployments.json template..."
-    sudo -u nops cp --no-preserve=mode "$TEMPLATES_DIR/deployments.json" "$TARGET_DIR/deployments.json"
-    sudo -u nops chmod u+w "$TARGET_DIR/deployments.json"
+    sudo -u "$SERVICE_USER" cp --no-preserve=mode "$TEMPLATES_DIR/deployments.json" "$TARGET_DIR/deployments.json"
+    sudo -u "$SERVICE_USER" chmod u+w "$TARGET_DIR/deployments.json"
 fi
 
 if [ ! -f "$TARGET_DIR/nops-config-template.json" ]; then
     log "Initializing nops-config-template.json template..."
-    sudo -u nops cp --no-preserve=mode "$TEMPLATES_DIR/nops-config-template.json" "$TARGET_DIR/nops-config-template.json"
-    sudo -u nops chmod u+w "$TARGET_DIR/nops-config-template.json"
+    sudo -u "$SERVICE_USER" cp --no-preserve=mode "$TEMPLATES_DIR/nops-config-template.json" "$TARGET_DIR/nops-config-template.json"
+    sudo -u "$SERVICE_USER" chmod u+w "$TARGET_DIR/nops-config-template.json"
 fi
 
 if [ "${IS_CONTROLLER:-false}" = "true" ]; then
@@ -862,7 +875,7 @@ if [ "${IS_CONTROLLER:-false}" = "true" ]; then
         "$NOPS_CONFIG_TEMPLATE_SRC" > "$NOPS_CONFIG_TEMPLATE_TMP"
     rm -f "$NOPS_CONFIG_TEMPLATE_SRC"
     sudo mv "$NOPS_CONFIG_TEMPLATE_TMP" "$TARGET_DIR/nops-config-template.json"
-    sudo chown nops:nops "$TARGET_DIR/nops-config-template.json"
+    sudo chown "$SERVICE_USER:$SERVICE_GROUP" "$TARGET_DIR/nops-config-template.json"
     sudo chmod 0644 "$TARGET_DIR/nops-config-template.json"
 
         log "Ensuring deployments.json contains the controller inventory entry..."
@@ -909,7 +922,7 @@ if [ "${IS_CONTROLLER:-false}" = "true" ]; then
 
         rm -f "$CONTROLLER_DEPLOYMENTS_SRC"
         sudo mv "$CONTROLLER_DEPLOYMENTS_TMP" "$TARGET_DIR/deployments.json"
-        sudo chown nops:nops "$TARGET_DIR/deployments.json"
+        sudo chown "$SERVICE_USER:$SERVICE_GROUP" "$TARGET_DIR/deployments.json"
         sudo chmod 0644 "$TARGET_DIR/deployments.json"
     else
         log "Preserving controller-owned install templates from the existing repo."
@@ -934,28 +947,28 @@ validate_custom_file "$CUSTOM_NODE_IMPORTS" "node imports.nix"
 GROUP_DIR="$TARGET_DIR/groups/$NODE_GROUP"
 if [ ! -d "$GROUP_DIR" ]; then
     log "Group '$NODE_GROUP' not found. Initializing group templates..."
-    sudo -u nops mkdir -p "$GROUP_DIR"
+    sudo -u "$SERVICE_USER" mkdir -p "$GROUP_DIR"
 
     if [ -n "$CUSTOM_GROUP_CONFIG" ]; then
         log "Using custom group configuration.nix from $CUSTOM_GROUP_CONFIG"
-        sudo -u nops cp --no-preserve=mode "$CUSTOM_GROUP_CONFIG" "$GROUP_DIR/configuration.nix"
+        sudo -u "$SERVICE_USER" cp --no-preserve=mode "$CUSTOM_GROUP_CONFIG" "$GROUP_DIR/configuration.nix"
     else
         echo "{ config, pkgs, ... }: {
   # Group-level NixOS options for the $NODE_GROUP tier.
-}" | sudo -u nops tee "$GROUP_DIR/configuration.nix" > /dev/null
+}" | sudo -u "$SERVICE_USER" tee "$GROUP_DIR/configuration.nix" > /dev/null
     fi
 
     if [ -n "$CUSTOM_GROUP_IMPORTS" ]; then
         log "Using custom group imports.nix from $CUSTOM_GROUP_IMPORTS"
-        sudo -u nops cp --no-preserve=mode "$CUSTOM_GROUP_IMPORTS" "$GROUP_DIR/imports.nix"
+        sudo -u "$SERVICE_USER" cp --no-preserve=mode "$CUSTOM_GROUP_IMPORTS" "$GROUP_DIR/imports.nix"
     else
-        sudo -u nops cp --no-preserve=mode "$TEMPLATES_DIR/imports.nix" "$GROUP_DIR/imports.nix"
+        sudo -u "$SERVICE_USER" cp --no-preserve=mode "$TEMPLATES_DIR/imports.nix" "$GROUP_DIR/imports.nix"
     fi
-    sudo -u nops chmod -R u+w "$GROUP_DIR"
+    sudo -u "$SERVICE_USER" chmod -R u+w "$GROUP_DIR"
 fi
 
 log "Ensuring standard module files exist..."
-sudo -u nops mkdir -p "$TARGET_DIR/modules/caddy" "$TARGET_DIR/modules/cloudflare" "$TARGET_DIR/modules/backup" "$TARGET_DIR/modules/ingress" "$TARGET_DIR/modules/pxe"
+sudo -u "$SERVICE_USER" mkdir -p "$TARGET_DIR/modules/caddy" "$TARGET_DIR/modules/cloudflare" "$TARGET_DIR/modules/backup" "$TARGET_DIR/modules/ingress" "$TARGET_DIR/modules/pxe"
 for module_spec in \
     "caddy/caddy.nix:caddy.nix" \
     "cloudflare/cloudflared.nix:cloudflared.nix" \
@@ -966,8 +979,8 @@ do
     module_target="${module_spec%%:*}"
     module_template="${module_spec##*:}"
     if [ ! -f "$TARGET_DIR/modules/$module_target" ]; then
-        sudo -u nops cp --no-preserve=mode "$TEMPLATES_DIR/$module_template" "$TARGET_DIR/modules/$module_target"
-        sudo -u nops chmod u+w "$TARGET_DIR/modules/$module_target"
+        sudo -u "$SERVICE_USER" cp --no-preserve=mode "$TEMPLATES_DIR/$module_template" "$TARGET_DIR/modules/$module_target"
+        sudo -u "$SERVICE_USER" chmod u+w "$TARGET_DIR/modules/$module_target"
     fi
 done
 
@@ -977,16 +990,16 @@ if [ "${CADDY_ENABLE:-false}" = "true" ]; then
 
     CADDY_MODULE_DIR="$TARGET_DIR/modules/caddy"
     if [ ! -d "$CADDY_MODULE_DIR" ]; then
-        sudo -u nops mkdir -p "$CADDY_MODULE_DIR"
-        sudo -u nops cp --no-preserve=mode "$TEMPLATES_DIR/caddy.nix" "$CADDY_MODULE_DIR/caddy.nix"
-        sudo -u nops chmod u+w "$CADDY_MODULE_DIR/caddy.nix"
+        sudo -u "$SERVICE_USER" mkdir -p "$CADDY_MODULE_DIR"
+        sudo -u "$SERVICE_USER" cp --no-preserve=mode "$TEMPLATES_DIR/caddy.nix" "$CADDY_MODULE_DIR/caddy.nix"
+        sudo -u "$SERVICE_USER" chmod u+w "$CADDY_MODULE_DIR/caddy.nix"
         log "Created modules/caddy/caddy.nix"
     fi
 
     GROUP_IMPORTS="$TARGET_DIR/groups/$NODE_GROUP/imports.nix"
     if [ -f "$GROUP_IMPORTS" ] && ! grep -q "caddy.nix" "$GROUP_IMPORTS"; then
-        sudo -u nops sed -i 's|CADDY_MODULE_PLACEHOLDER|../../modules/caddy/caddy.nix|' "$GROUP_IMPORTS"
-        sudo -u nops sed -i '/# Add module paths here/a\    ../../modules/caddy/caddy.nix' "$GROUP_IMPORTS"
+        sudo -u "$SERVICE_USER" sed -i 's|CADDY_MODULE_PLACEHOLDER|../../modules/caddy/caddy.nix|' "$GROUP_IMPORTS"
+        sudo -u "$SERVICE_USER" sed -i '/# Add module paths here/a\    ../../modules/caddy/caddy.nix' "$GROUP_IMPORTS"
         log "Added caddy module to group imports"
     fi
 fi
@@ -1013,26 +1026,26 @@ if [ "${KEEPALIVED_ENABLE:-false}" = "true" ]; then
 
     KEEPALIVED_MODULE_DIR="$TARGET_DIR/modules/ingress"
     if [ ! -d "$KEEPALIVED_MODULE_DIR" ]; then
-        sudo -u nops mkdir -p "$KEEPALIVED_MODULE_DIR"
+        sudo -u "$SERVICE_USER" mkdir -p "$KEEPALIVED_MODULE_DIR"
     fi
-    sudo -u nops cp --no-preserve=mode "$TEMPLATES_DIR/keepalived.nix" "$KEEPALIVED_MODULE_DIR/keepalived.nix"
-    sudo -u nops chmod u+w "$KEEPALIVED_MODULE_DIR/keepalived.nix"
-    sudo -u nops sed -i "s|KEEPALIVED_INTERFACE_PLACEHOLDER|${KEEPALIVED_INTERFACE}|" "$KEEPALIVED_MODULE_DIR/keepalived.nix"
+    sudo -u "$SERVICE_USER" cp --no-preserve=mode "$TEMPLATES_DIR/keepalived.nix" "$KEEPALIVED_MODULE_DIR/keepalived.nix"
+    sudo -u "$SERVICE_USER" chmod u+w "$KEEPALIVED_MODULE_DIR/keepalived.nix"
+    sudo -u "$SERVICE_USER" sed -i "s|KEEPALIVED_INTERFACE_PLACEHOLDER|${KEEPALIVED_INTERFACE}|" "$KEEPALIVED_MODULE_DIR/keepalived.nix"
     if [ "${KEEPALIVED_ROLE:-backup}" = "master" ] || [ "${IS_BOOTSTRAP:-false}" = "true" ]; then
         KEEPALIVED_STATE="MASTER"
     else
         KEEPALIVED_STATE="BACKUP"
     fi
-    sudo -u nops sed -i "s|KEEPALIVED_STATE_PLACEHOLDER|${KEEPALIVED_STATE}|" "$KEEPALIVED_MODULE_DIR/keepalived.nix"
-    sudo -u nops sed -i "s|KEEPALIVED_ROUTER_ID_PLACEHOLDER|${KEEPALIVED_ROUTER_ID}|" "$KEEPALIVED_MODULE_DIR/keepalived.nix"
-    sudo -u nops sed -i "s|KEEPALIVED_PRIORITY_PLACEHOLDER|${KEEPALIVED_PRIORITY}|" "$KEEPALIVED_MODULE_DIR/keepalived.nix"
-    sudo -u nops sed -i "s|KEEPALIVED_VIP_CIDR_PLACEHOLDER|${KEEPALIVED_VIP_CIDR}|" "$KEEPALIVED_MODULE_DIR/keepalived.nix"
+    sudo -u "$SERVICE_USER" sed -i "s|KEEPALIVED_STATE_PLACEHOLDER|${KEEPALIVED_STATE}|" "$KEEPALIVED_MODULE_DIR/keepalived.nix"
+    sudo -u "$SERVICE_USER" sed -i "s|KEEPALIVED_ROUTER_ID_PLACEHOLDER|${KEEPALIVED_ROUTER_ID}|" "$KEEPALIVED_MODULE_DIR/keepalived.nix"
+    sudo -u "$SERVICE_USER" sed -i "s|KEEPALIVED_PRIORITY_PLACEHOLDER|${KEEPALIVED_PRIORITY}|" "$KEEPALIVED_MODULE_DIR/keepalived.nix"
+    sudo -u "$SERVICE_USER" sed -i "s|KEEPALIVED_VIP_CIDR_PLACEHOLDER|${KEEPALIVED_VIP_CIDR}|" "$KEEPALIVED_MODULE_DIR/keepalived.nix"
     log "Created modules/ingress/keepalived.nix (interface: $KEEPALIVED_INTERFACE, vip: $KEEPALIVED_VIP_CIDR)"
 
     GROUP_IMPORTS="$TARGET_DIR/groups/$NODE_GROUP/imports.nix"
     if [ -f "$GROUP_IMPORTS" ] && ! grep -q "keepalived.nix" "$GROUP_IMPORTS"; then
-        sudo -u nops sed -i 's|KEEPALIVED_MODULE_PLACEHOLDER|../../modules/ingress/keepalived.nix|' "$GROUP_IMPORTS"
-        sudo -u nops sed -i '/# Add module paths here/a\    ../../modules/ingress/keepalived.nix' "$GROUP_IMPORTS"
+        sudo -u "$SERVICE_USER" sed -i 's|KEEPALIVED_MODULE_PLACEHOLDER|../../modules/ingress/keepalived.nix|' "$GROUP_IMPORTS"
+        sudo -u "$SERVICE_USER" sed -i '/# Add module paths here/a\    ../../modules/ingress/keepalived.nix' "$GROUP_IMPORTS"
         log "Added keepalived module to group imports"
     fi
 fi
@@ -1043,10 +1056,10 @@ if [ "${IS_BOOTSTRAP:-false}" = "true" ]; then
 
     POSTGRES_BACKUP_MODULE_DIR="$TARGET_DIR/modules/backup"
     if [ ! -d "$POSTGRES_BACKUP_MODULE_DIR" ]; then
-        sudo -u nops mkdir -p "$POSTGRES_BACKUP_MODULE_DIR"
+        sudo -u "$SERVICE_USER" mkdir -p "$POSTGRES_BACKUP_MODULE_DIR"
     fi
-    sudo -u nops cp --no-preserve=mode "$TEMPLATES_DIR/postgres-backup.nix" "$POSTGRES_BACKUP_MODULE_DIR/postgres.nix"
-    sudo -u nops chmod u+w "$POSTGRES_BACKUP_MODULE_DIR/postgres.nix"
+    sudo -u "$SERVICE_USER" cp --no-preserve=mode "$TEMPLATES_DIR/postgres-backup.nix" "$POSTGRES_BACKUP_MODULE_DIR/postgres.nix"
+    sudo -u "$SERVICE_USER" chmod u+w "$POSTGRES_BACKUP_MODULE_DIR/postgres.nix"
 
 fi
 
@@ -1057,58 +1070,58 @@ if [ "${CF_TUNNEL:-false}" = "true" ]; then
     # Create cloudflared NixOS module
     CF_MODULE_DIR="$TARGET_DIR/modules/cloudflare"
     if [ ! -d "$CF_MODULE_DIR" ]; then
-        sudo -u nops mkdir -p "$CF_MODULE_DIR"
-        sudo -u nops cp --no-preserve=mode "$TEMPLATES_DIR/cloudflared.nix" "$CF_MODULE_DIR/cloudflared.nix"
-        sudo -u nops chmod u+w "$CF_MODULE_DIR/cloudflared.nix"
+        sudo -u "$SERVICE_USER" mkdir -p "$CF_MODULE_DIR"
+        sudo -u "$SERVICE_USER" cp --no-preserve=mode "$TEMPLATES_DIR/cloudflared.nix" "$CF_MODULE_DIR/cloudflared.nix"
+        sudo -u "$SERVICE_USER" chmod u+w "$CF_MODULE_DIR/cloudflared.nix"
         log "Created modules/cloudflare/cloudflared.nix"
     fi
 
     # Create Terraform config with substituted values
     TF_MODULE_DIR="$TARGET_DIR/modules/terraform"
     if [ ! -d "$TF_MODULE_DIR" ]; then
-        sudo -u nops mkdir -p "$TF_MODULE_DIR"
-        sudo -u nops cp --no-preserve=mode "$TEMPLATES_DIR/main.tf" "$TF_MODULE_DIR/main.tf"
-        sudo -u nops chmod u+w "$TF_MODULE_DIR/main.tf"
-        sudo -u nops sed -i "s|TUNNEL_NAME_PLACEHOLDER|${CF_TUNNEL_NAME}|" "$TF_MODULE_DIR/main.tf"
-        sudo -u nops sed -i "s|TUNNEL_DOMAIN_PLACEHOLDER|${CF_TUNNEL_DOMAIN}|" "$TF_MODULE_DIR/main.tf"
-        sudo -u nops sed -i "s|VIP_ADDRESS_PLACEHOLDER|${CF_TUNNEL_VIP}|" "$TF_MODULE_DIR/main.tf"
+        sudo -u "$SERVICE_USER" mkdir -p "$TF_MODULE_DIR"
+        sudo -u "$SERVICE_USER" cp --no-preserve=mode "$TEMPLATES_DIR/main.tf" "$TF_MODULE_DIR/main.tf"
+        sudo -u "$SERVICE_USER" chmod u+w "$TF_MODULE_DIR/main.tf"
+        sudo -u "$SERVICE_USER" sed -i "s|TUNNEL_NAME_PLACEHOLDER|${CF_TUNNEL_NAME}|" "$TF_MODULE_DIR/main.tf"
+        sudo -u "$SERVICE_USER" sed -i "s|TUNNEL_DOMAIN_PLACEHOLDER|${CF_TUNNEL_DOMAIN}|" "$TF_MODULE_DIR/main.tf"
+        sudo -u "$SERVICE_USER" sed -i "s|VIP_ADDRESS_PLACEHOLDER|${CF_TUNNEL_VIP}|" "$TF_MODULE_DIR/main.tf"
         log "Created modules/terraform/main.tf (tunnel: $CF_TUNNEL_NAME, domain: $CF_TUNNEL_DOMAIN, vip: $CF_TUNNEL_VIP)"
     fi
 
     # Add cloudflared import to group imports.nix if not already present
     GROUP_IMPORTS="$TARGET_DIR/groups/$NODE_GROUP/imports.nix"
     if [ -f "$GROUP_IMPORTS" ] && ! grep -q "cloudflared.nix" "$GROUP_IMPORTS"; then
-        sudo -u nops sed -i 's|CLOUDFLARED_MODULE_PLACEHOLDER|../../modules/cloudflare/cloudflared.nix|' "$GROUP_IMPORTS"
-        sudo -u nops sed -i '/# Add module paths here/a\    ../../modules/cloudflare/cloudflared.nix' "$GROUP_IMPORTS"
+        sudo -u "$SERVICE_USER" sed -i 's|CLOUDFLARED_MODULE_PLACEHOLDER|../../modules/cloudflare/cloudflared.nix|' "$GROUP_IMPORTS"
+        sudo -u "$SERVICE_USER" sed -i '/# Add module paths here/a\    ../../modules/cloudflare/cloudflared.nix' "$GROUP_IMPORTS"
         log "Added cloudflared module to group imports"
     fi
 fi
 
 # Clean up any unused placeholders in the group imports file
 if [ -f "$TARGET_DIR/groups/$NODE_GROUP/imports.nix" ]; then
-    sudo -u nops sed -i '/_MODULE_PLACEHOLDER/d' "$TARGET_DIR/groups/$NODE_GROUP/imports.nix"
+    sudo -u "$SERVICE_USER" sed -i '/_MODULE_PLACEHOLDER/d' "$TARGET_DIR/groups/$NODE_GROUP/imports.nix"
 fi
 
 NODE_DIR="$TARGET_DIR/nodes/$HOSTNAME"
 log "Creating node directory at $NODE_DIR linked to group '$NODE_GROUP'..."
-sudo -u nops mkdir -p "$NODE_DIR"
+sudo -u "$SERVICE_USER" mkdir -p "$NODE_DIR"
 
 if [ -n "$CUSTOM_NODE_CONFIG" ]; then
     log "Using custom node configuration.nix from $CUSTOM_NODE_CONFIG"
-    sudo -u nops cp --no-preserve=mode "$CUSTOM_NODE_CONFIG" "$NODE_DIR/configuration.nix"
+    sudo -u "$SERVICE_USER" cp --no-preserve=mode "$CUSTOM_NODE_CONFIG" "$NODE_DIR/configuration.nix"
 else
-    sudo -u nops cp --no-preserve=mode "$TEMPLATES_DIR/configuration.nix" "$NODE_DIR/configuration.nix"
+    sudo -u "$SERVICE_USER" cp --no-preserve=mode "$TEMPLATES_DIR/configuration.nix" "$NODE_DIR/configuration.nix"
 fi
 
-sudo -u nops cp --no-preserve=mode "$TEMPLATES_DIR/controllerScript-autoprovision.sh" "$NODE_DIR/controllerScript-autoprovision.sh"
-sudo -u nops chmod u+w "$NODE_DIR/controllerScript-autoprovision.sh"
+sudo -u "$SERVICE_USER" cp --no-preserve=mode "$TEMPLATES_DIR/controllerScript-autoprovision.sh" "$NODE_DIR/controllerScript-autoprovision.sh"
+sudo -u "$SERVICE_USER" chmod u+w "$NODE_DIR/controllerScript-autoprovision.sh"
     if [ -n "${NIXOS_INSTALL_REPO_URL:-}" ]; then
         NIXOS_INSTALL_FLAKE_URL="$(normalize_git_flake_url "$NIXOS_INSTALL_REPO_URL")"
-        sudo -u nops sed -i "s|git+https://git.smallguytech.org/SGT/nix-cluster.git|${NIXOS_INSTALL_FLAKE_URL}|" "$NODE_DIR/controllerScript-autoprovision.sh"
+        sudo -u "$SERVICE_USER" sed -i "s|git+https://git.smallguytech.org/SGT/nix-cluster.git|${NIXOS_INSTALL_FLAKE_URL}|" "$NODE_DIR/controllerScript-autoprovision.sh"
     fi
     if [ -n "${NIX_CLUSTER_REPO_URL:-}" ] && [ -z "${NIXOS_INSTALL_REPO_URL:-}" ]; then
         NIX_CLUSTER_INSTALL_FLAKE_URL="$(normalize_git_flake_url "$NIX_CLUSTER_REPO_URL")"
-        sudo -u nops sed -i "s|git+https://git.smallguytech.org/SGT/nix-cluster.git|${NIX_CLUSTER_INSTALL_FLAKE_URL}|" "$NODE_DIR/controllerScript-autoprovision.sh"
+        sudo -u "$SERVICE_USER" sed -i "s|git+https://git.smallguytech.org/SGT/nix-cluster.git|${NIX_CLUSTER_INSTALL_FLAKE_URL}|" "$NODE_DIR/controllerScript-autoprovision.sh"
     fi
 
 
@@ -1122,69 +1135,69 @@ if [ "$IS_BOOTSTRAP" = "true" ]; then
     echo "  ../../modules/forgejo/forgejo.nix" >> "$IMPORTS_FILE"
 fi
 echo "];}" >> "$IMPORTS_FILE"
-sudo chown nops:nops "$IMPORTS_FILE"
+    sudo chown "$SERVICE_USER:$SERVICE_GROUP" "$IMPORTS_FILE"
 sudo chmod u+w "$IMPORTS_FILE"
 
 if [ -f "/etc/nixos/hardware-configuration.nix" ]; then
     sudo cp /etc/nixos/hardware-configuration.nix "$NODE_DIR/hardware-configuration.nix"
-    sudo chown nops:nops "$NODE_DIR/hardware-configuration.nix"
+        sudo chown "$SERVICE_USER:$SERVICE_GROUP" "$NODE_DIR/hardware-configuration.nix"
 elif command -v nixos-generate-config >/dev/null 2>&1; then
     log "Generating hardware-configuration.nix from the current system..."
     sudo nixos-generate-config --show-hardware-config > "$NODE_DIR/hardware-configuration.nix"
-    sudo chown nops:nops "$NODE_DIR/hardware-configuration.nix"
+        sudo chown "$SERVICE_USER:$SERVICE_GROUP" "$NODE_DIR/hardware-configuration.nix"
 fi
 
 # Substitutes installer-collected values into the node config: hostname, admin user, repo path, and trigger mode.
 log "Hydrating node configuration..."
 HOST_ID=$(head -c 4 /dev/urandom | od -A n -t x4 | tr -d ' ' | cut -c 1-8)
-sudo -u nops sed -i "s|HOST_ID_PLACEHOLDER|$HOST_ID|" "$NODE_DIR/configuration.nix"
-sudo -u nops sed -i "s|networking.hostName = \".*\";|networking.hostName = \"$HOSTNAME\";|" "$NODE_DIR/configuration.nix"
-sudo -u nops sed -i "s|users.users.tdavis|users.users.$NODE_ADMIN|" "$NODE_DIR/configuration.nix"
-sudo -u nops sed -i "s|initialPassword = \".*\";|initialPassword = \"$NODE_ADMIN_PASS\";|" "$NODE_DIR/configuration.nix"
-sudo -u nops sed -i "s|repoPath = \".*\";|repoPath = \"$TARGET_DIR\";|" "$NODE_DIR/configuration.nix"
+sudo -u "$SERVICE_USER" sed -i "s|HOST_ID_PLACEHOLDER|$HOST_ID|" "$NODE_DIR/configuration.nix"
+sudo -u "$SERVICE_USER" sed -i "s|networking.hostName = \".*\";|networking.hostName = \"$HOSTNAME\";|" "$NODE_DIR/configuration.nix"
+sudo -u "$SERVICE_USER" sed -i "s|users.users.tdavis|users.users.$NODE_ADMIN|" "$NODE_DIR/configuration.nix"
+sudo -u "$SERVICE_USER" sed -i "s|initialPassword = \".*\";|initialPassword = \"$NODE_ADMIN_PASS\";|" "$NODE_DIR/configuration.nix"
+sudo -u "$SERVICE_USER" sed -i "s|repoPath = \".*\";|repoPath = \"$TARGET_DIR\";|" "$NODE_DIR/configuration.nix"
 
 if [ -n "$NODE_SSH_PUB_KEY" ]; then
     # Safely escape slashes in the key string just in case
     SAFE_SSH_KEY=$(echo "$NODE_SSH_PUB_KEY" | sed 's|/|\\/|g')
-    sudo -u nops sed -i "s|SSH_PUB_KEY_PLACEHOLDER|openssh.authorizedKeys.keys = [ \"$SAFE_SSH_KEY\" ];|" "$NODE_DIR/configuration.nix"
+    sudo -u "$SERVICE_USER" sed -i "s|SSH_PUB_KEY_PLACEHOLDER|openssh.authorizedKeys.keys = [ \"$SAFE_SSH_KEY\" ];|" "$NODE_DIR/configuration.nix"
 else
-    sudo -u nops sed -i "/SSH_PUB_KEY_PLACEHOLDER/d" "$NODE_DIR/configuration.nix"
+    sudo -u "$SERVICE_USER" sed -i "/SSH_PUB_KEY_PLACEHOLDER/d" "$NODE_DIR/configuration.nix"
 fi
 
 if [ "$TRIGGER_CHOICE" == "2" ]; then
-    sudo -u nops sed -i "s|MATRIX_ENABLE_PLACEHOLDER|false|" "$NODE_DIR/configuration.nix"
-    sudo -u nops sed -i "s|WEBHOOK_ENABLE_PLACEHOLDER|true|" "$NODE_DIR/configuration.nix"
+    sudo -u "$SERVICE_USER" sed -i "s|MATRIX_ENABLE_PLACEHOLDER|false|" "$NODE_DIR/configuration.nix"
+    sudo -u "$SERVICE_USER" sed -i "s|WEBHOOK_ENABLE_PLACEHOLDER|true|" "$NODE_DIR/configuration.nix"
 else
-    sudo -u nops sed -i "s|MATRIX_ENABLE_PLACEHOLDER|true|" "$NODE_DIR/configuration.nix"
-    sudo -u nops sed -i "s|WEBHOOK_ENABLE_PLACEHOLDER|false|" "$NODE_DIR/configuration.nix"
+    sudo -u "$SERVICE_USER" sed -i "s|MATRIX_ENABLE_PLACEHOLDER|true|" "$NODE_DIR/configuration.nix"
+    sudo -u "$SERVICE_USER" sed -i "s|WEBHOOK_ENABLE_PLACEHOLDER|false|" "$NODE_DIR/configuration.nix"
 fi
 
-sudo -u nops sed -i "s|IS_CONTROLLER_PLACEHOLDER|${IS_CONTROLLER:-false}|" "$NODE_DIR/configuration.nix"
-sudo -u nops sed -i "s|CADDY_ENABLE_PLACEHOLDER|${CADDY_ENABLE:-false}|" "$NODE_DIR/configuration.nix"
-sudo -u nops sed -i "s|KEEPALIVED_ENABLE_PLACEHOLDER|${KEEPALIVED_ENABLE:-false}|" "$NODE_DIR/configuration.nix"
-sudo -u nops sed -i "s|KEEPALIVED_INTERFACE_PLACEHOLDER|$(nops_escape_sed "${KEEPALIVED_INTERFACE:-}")|" "$NODE_DIR/configuration.nix"
-sudo -u nops sed -i "s|KEEPALIVED_ROUTER_ID_PLACEHOLDER|${KEEPALIVED_ROUTER_ID:-51}|" "$NODE_DIR/configuration.nix"
-sudo -u nops sed -i "s|KEEPALIVED_PRIORITY_PLACEHOLDER|${KEEPALIVED_PRIORITY:-100}|" "$NODE_DIR/configuration.nix"
-sudo -u nops sed -i "s|KEEPALIVED_VIP_CIDR_PLACEHOLDER|$(nops_escape_sed "${KEEPALIVED_VIP_CIDR:-}")|" "$NODE_DIR/configuration.nix"
-sudo -u nops sed -i "s|CLOUDFLARE_ENABLE_PLACEHOLDER|${CF_TUNNEL:-false}|" "$NODE_DIR/configuration.nix"
-sudo -u nops sed -i "s|CLOUDFLARE_TUNNEL_ENABLE_PLACEHOLDER|${CF_TUNNEL:-false}|" "$NODE_DIR/configuration.nix"
-sudo -u nops sed -i "s|CLOUDFLARE_TUNNEL_NAME_PLACEHOLDER|$(nops_escape_sed "${CF_TUNNEL_NAME:-}")|" "$NODE_DIR/configuration.nix"
-sudo -u nops sed -i "s|CLOUDFLARE_TUNNEL_DOMAIN_PLACEHOLDER|$(nops_escape_sed "${CF_TUNNEL_DOMAIN:-}")|" "$NODE_DIR/configuration.nix"
-sudo -u nops sed -i "s|CLOUDFLARE_TUNNEL_VIP_PLACEHOLDER|$(nops_escape_sed "${CF_TUNNEL_VIP:-}")|" "$NODE_DIR/configuration.nix"
-sudo -u nops sed -i "s|CLOUDFLARE_ZONE_ID_PLACEHOLDER|$(nops_escape_sed "${CF_ZONE_ID:-}")|" "$NODE_DIR/configuration.nix"
-sudo -u nops sed -i "s|CLOUDFLARE_ACCOUNT_ID_PLACEHOLDER|$(nops_escape_sed "${CF_ACCOUNT_ID:-}")|" "$NODE_DIR/configuration.nix"
-sudo -u nops sed -i "s|PXE_ENABLE_PLACEHOLDER|${PXE_ENABLE:-false}|" "$NODE_DIR/configuration.nix"
-sudo -u nops sed -i "s|PXE_DHCP_ENABLE_PLACEHOLDER|${PXE_DHCP_ENABLE:-false}|" "$NODE_DIR/configuration.nix"
-sudo -u nops sed -i "s|PXE_INTERFACE_PLACEHOLDER|$(nops_escape_sed "${PXE_INTERFACE:-}")|" "$NODE_DIR/configuration.nix"
-sudo -u nops sed -i "s|PXE_HTTP_PORT_PLACEHOLDER|${PXE_HTTP_PORT:-8081}|" "$NODE_DIR/configuration.nix"
-sudo -u nops sed -i "s|PXE_BOOT_URL_PLACEHOLDER|$(nops_escape_sed "${PXE_BOOT_URL:-}")|" "$NODE_DIR/configuration.nix"
-sudo -u nops sed -i "s|POSTGRES_BACKUP_ENABLE_PLACEHOLDER|${POSTGRES_BACKUP_ENABLE:-false}|" "$NODE_DIR/configuration.nix"
+sudo -u "$SERVICE_USER" sed -i "s|IS_CONTROLLER_PLACEHOLDER|${IS_CONTROLLER:-false}|" "$NODE_DIR/configuration.nix"
+sudo -u "$SERVICE_USER" sed -i "s|CADDY_ENABLE_PLACEHOLDER|${CADDY_ENABLE:-false}|" "$NODE_DIR/configuration.nix"
+sudo -u "$SERVICE_USER" sed -i "s|KEEPALIVED_ENABLE_PLACEHOLDER|${KEEPALIVED_ENABLE:-false}|" "$NODE_DIR/configuration.nix"
+sudo -u "$SERVICE_USER" sed -i "s|KEEPALIVED_INTERFACE_PLACEHOLDER|$(nops_escape_sed "${KEEPALIVED_INTERFACE:-}")|" "$NODE_DIR/configuration.nix"
+sudo -u "$SERVICE_USER" sed -i "s|KEEPALIVED_ROUTER_ID_PLACEHOLDER|${KEEPALIVED_ROUTER_ID:-51}|" "$NODE_DIR/configuration.nix"
+sudo -u "$SERVICE_USER" sed -i "s|KEEPALIVED_PRIORITY_PLACEHOLDER|${KEEPALIVED_PRIORITY:-100}|" "$NODE_DIR/configuration.nix"
+sudo -u "$SERVICE_USER" sed -i "s|KEEPALIVED_VIP_CIDR_PLACEHOLDER|$(nops_escape_sed "${KEEPALIVED_VIP_CIDR:-}")|" "$NODE_DIR/configuration.nix"
+sudo -u "$SERVICE_USER" sed -i "s|CLOUDFLARE_ENABLE_PLACEHOLDER|${CF_TUNNEL:-false}|" "$NODE_DIR/configuration.nix"
+sudo -u "$SERVICE_USER" sed -i "s|CLOUDFLARE_TUNNEL_ENABLE_PLACEHOLDER|${CF_TUNNEL:-false}|" "$NODE_DIR/configuration.nix"
+sudo -u "$SERVICE_USER" sed -i "s|CLOUDFLARE_TUNNEL_NAME_PLACEHOLDER|$(nops_escape_sed "${CF_TUNNEL_NAME:-}")|" "$NODE_DIR/configuration.nix"
+sudo -u "$SERVICE_USER" sed -i "s|CLOUDFLARE_TUNNEL_DOMAIN_PLACEHOLDER|$(nops_escape_sed "${CF_TUNNEL_DOMAIN:-}")|" "$NODE_DIR/configuration.nix"
+sudo -u "$SERVICE_USER" sed -i "s|CLOUDFLARE_TUNNEL_VIP_PLACEHOLDER|$(nops_escape_sed "${CF_TUNNEL_VIP:-}")|" "$NODE_DIR/configuration.nix"
+sudo -u "$SERVICE_USER" sed -i "s|CLOUDFLARE_ZONE_ID_PLACEHOLDER|$(nops_escape_sed "${CF_ZONE_ID:-}")|" "$NODE_DIR/configuration.nix"
+sudo -u "$SERVICE_USER" sed -i "s|CLOUDFLARE_ACCOUNT_ID_PLACEHOLDER|$(nops_escape_sed "${CF_ACCOUNT_ID:-}")|" "$NODE_DIR/configuration.nix"
+sudo -u "$SERVICE_USER" sed -i "s|PXE_ENABLE_PLACEHOLDER|${PXE_ENABLE:-false}|" "$NODE_DIR/configuration.nix"
+sudo -u "$SERVICE_USER" sed -i "s|PXE_DHCP_ENABLE_PLACEHOLDER|${PXE_DHCP_ENABLE:-false}|" "$NODE_DIR/configuration.nix"
+sudo -u "$SERVICE_USER" sed -i "s|PXE_INTERFACE_PLACEHOLDER|$(nops_escape_sed "${PXE_INTERFACE:-}")|" "$NODE_DIR/configuration.nix"
+sudo -u "$SERVICE_USER" sed -i "s|PXE_HTTP_PORT_PLACEHOLDER|${PXE_HTTP_PORT:-8081}|" "$NODE_DIR/configuration.nix"
+sudo -u "$SERVICE_USER" sed -i "s|PXE_BOOT_URL_PLACEHOLDER|$(nops_escape_sed "${PXE_BOOT_URL:-}")|" "$NODE_DIR/configuration.nix"
+sudo -u "$SERVICE_USER" sed -i "s|POSTGRES_BACKUP_ENABLE_PLACEHOLDER|${POSTGRES_BACKUP_ENABLE:-false}|" "$NODE_DIR/configuration.nix"
 
 # Dynamically scaffold Forgejo module if this is the bootstrap node
 if [ "$IS_BOOTSTRAP" = "true" ]; then
     log "Scaffolding Forgejo module..."
     FORGEJO_MODULE_DIR="$TARGET_DIR/modules/forgejo"
-    sudo -u nops mkdir -p "$FORGEJO_MODULE_DIR"
+    sudo -u "$SERVICE_USER" mkdir -p "$FORGEJO_MODULE_DIR"
     FORGEJO_FILE="$FORGEJO_MODULE_DIR/forgejo.nix"
     
     cat > /tmp/forgejo.nix <<EOF
@@ -1227,31 +1240,31 @@ EOF
     fi
     echo "}" >> /tmp/forgejo.nix
     sudo cp /tmp/forgejo.nix "$FORGEJO_FILE"
-    sudo chown nops:nops "$FORGEJO_FILE"
+    sudo chown "$SERVICE_USER:$SERVICE_GROUP" "$FORGEJO_FILE"
     sudo chmod 0644 "$FORGEJO_FILE"
     rm -f /tmp/forgejo.nix
     
-    sudo -u nops sed -i "/FORGEJO_CONFIG_PLACEHOLDER/d" "$NODE_DIR/configuration.nix"
-    sudo -u nops sed -i "s|FIREWALL_FORGEJO_PLACEHOLDER|3000|" "$NODE_DIR/configuration.nix"
+    sudo -u "$SERVICE_USER" sed -i "/FORGEJO_CONFIG_PLACEHOLDER/d" "$NODE_DIR/configuration.nix"
+    sudo -u "$SERVICE_USER" sed -i "s|FIREWALL_FORGEJO_PLACEHOLDER|3000|" "$NODE_DIR/configuration.nix"
     # Prepend forgejo into the existing package array so there's no duplicate systemPackages block.
-    sudo -u nops sed -i "s|CONTROLLER_PACKAGES_PLACEHOLDER|forgejo CONTROLLER_PACKAGES_PLACEHOLDER|" "$NODE_DIR/configuration.nix"
+    sudo -u "$SERVICE_USER" sed -i "s|CONTROLLER_PACKAGES_PLACEHOLDER|forgejo CONTROLLER_PACKAGES_PLACEHOLDER|" "$NODE_DIR/configuration.nix"
 else
     # Delete the Forgejo placeholder line entirely so Nix doesn't crash
-    sudo -u nops sed -i "/FORGEJO_CONFIG_PLACEHOLDER/d" "$NODE_DIR/configuration.nix"
+    sudo -u "$SERVICE_USER" sed -i "/FORGEJO_CONFIG_PLACEHOLDER/d" "$NODE_DIR/configuration.nix"
     # Cleanly strip the firewall placeholder (including the leading space)
-    sudo -u nops sed -i "s| FIREWALL_FORGEJO_PLACEHOLDER||" "$NODE_DIR/configuration.nix"
+    sudo -u "$SERVICE_USER" sed -i "s| FIREWALL_FORGEJO_PLACEHOLDER||" "$NODE_DIR/configuration.nix"
     # Fallback strip just in case
-    sudo -u nops sed -i "s|FIREWALL_FORGEJO_PLACEHOLDER||" "$NODE_DIR/configuration.nix"
+    sudo -u "$SERVICE_USER" sed -i "s|FIREWALL_FORGEJO_PLACEHOLDER||" "$NODE_DIR/configuration.nix"
 fi
 
 # Inject allowUnfree and Terraform on controller nodes; cleanly remove placeholders on agents.
 if [ "${IS_CONTROLLER:-false}" = "true" ]; then
-    sudo -u nops sed -i "s|ALLOW_UNFREE_PLACEHOLDER|nixpkgs.config.allowUnfree = true;|" "$NODE_DIR/configuration.nix"
-    sudo -u nops sed -i "s|CONTROLLER_PACKAGES_PLACEHOLDER|terraform|" "$NODE_DIR/configuration.nix"
+    sudo -u "$SERVICE_USER" sed -i "s|ALLOW_UNFREE_PLACEHOLDER|nixpkgs.config.allowUnfree = true;|" "$NODE_DIR/configuration.nix"
+    sudo -u "$SERVICE_USER" sed -i "s|CONTROLLER_PACKAGES_PLACEHOLDER|terraform|" "$NODE_DIR/configuration.nix"
 else
-    sudo -u nops sed -i "/ALLOW_UNFREE_PLACEHOLDER/d" "$NODE_DIR/configuration.nix"
-    sudo -u nops sed -i "s| CONTROLLER_PACKAGES_PLACEHOLDER||" "$NODE_DIR/configuration.nix"
-    sudo -u nops sed -i "s|CONTROLLER_PACKAGES_PLACEHOLDER||" "$NODE_DIR/configuration.nix"
+    sudo -u "$SERVICE_USER" sed -i "/ALLOW_UNFREE_PLACEHOLDER/d" "$NODE_DIR/configuration.nix"
+    sudo -u "$SERVICE_USER" sed -i "s| CONTROLLER_PACKAGES_PLACEHOLDER||" "$NODE_DIR/configuration.nix"
+    sudo -u "$SERVICE_USER" sed -i "s|CONTROLLER_PACKAGES_PLACEHOLDER||" "$NODE_DIR/configuration.nix"
 fi
 
 # Inject Cloudflare tunnel Terraform provisioning into the controller script when enabled.
@@ -1310,15 +1323,15 @@ CFEOF
     # Write the controller script block to a temp file and use sed to replace the placeholder
     CF_SCRIPT_FILE=$(mktemp)
     echo "$CF_SCRIPT" > "$CF_SCRIPT_FILE"
-    sudo chown nops:nops "$CF_SCRIPT_FILE"
+    sudo chown "$SERVICE_USER:$SERVICE_GROUP" "$CF_SCRIPT_FILE"
     sudo chmod 0644 "$CF_SCRIPT_FILE"
-    sudo -u nops sed -i "/CLOUDFLARE_CONTROLLER_SCRIPT_PLACEHOLDER/{
+    sudo -u "$SERVICE_USER" sed -i "/CLOUDFLARE_CONTROLLER_SCRIPT_PLACEHOLDER/{
         r $CF_SCRIPT_FILE
         d
     }" "$NODE_DIR/configuration.nix"
     rm -f "$CF_SCRIPT_FILE"
 else
-    sudo -u nops sed -i "/CLOUDFLARE_CONTROLLER_SCRIPT_PLACEHOLDER/d" "$NODE_DIR/configuration.nix"
+    sudo -u "$SERVICE_USER" sed -i "/CLOUDFLARE_CONTROLLER_SCRIPT_PLACEHOLDER/d" "$NODE_DIR/configuration.nix"
 fi
 
 # Adds this node's age public key to .sops.yaml and injects its nixosConfiguration into flake.nix via NODES_MARKER.
@@ -1327,18 +1340,18 @@ SECRETS_FILE="$TARGET_DIR/secrets/secrets.yaml"
 
 log "Updating Fleet SOPS configuration..."
 if [ ! -f "$SOPS_CONFIG" ]; then
-    sudo -u nops cp --no-preserve=mode "$TEMPLATES_DIR/.sops.yaml" "$SOPS_CONFIG"
-    sudo -u nops chmod u+w "$SOPS_CONFIG"
+    sudo -u "$SERVICE_USER" cp --no-preserve=mode "$TEMPLATES_DIR/.sops.yaml" "$SOPS_CONFIG"
+    sudo -u "$SERVICE_USER" chmod u+w "$SOPS_CONFIG"
 fi
 
 if ! grep -q "$PUB_KEY" "$SOPS_CONFIG"; then
     log "Adding public key to SOPS config..."
-    sudo -u nops sed -i "s|AGE_PUBLIC_KEY_PLACEHOLDER|$PUB_KEY|g" "$SOPS_CONFIG"
+    sudo -u "$SERVICE_USER" sed -i "s|AGE_PUBLIC_KEY_PLACEHOLDER|$PUB_KEY|g" "$SOPS_CONFIG"
 fi
 
 log "Adding node to Fleet flake.nix..."
 if ! grep -q "nixosConfigurations.$HOSTNAME" "$TARGET_DIR/flake.nix"; then
-    sudo -u nops sed -i "/# NODES_MARKER/a \    nixosConfigurations.$HOSTNAME = nixpkgs.lib.nixosSystem { system = \"x86_64-linux\"; modules = [ ./nodes/$HOSTNAME/configuration.nix nixCluster.nixosModules.default ]; };" "$TARGET_DIR/flake.nix"
+    sudo -u "$SERVICE_USER" sed -i "/# NODES_MARKER/a \    nixosConfigurations.$HOSTNAME = nixpkgs.lib.nixosSystem { system = \"x86_64-linux\"; modules = [ ./nodes/$HOSTNAME/configuration.nix nixCluster.nixosModules.default ]; };" "$TARGET_DIR/flake.nix"
 else
     log "Node $HOSTNAME already exists in flake.nix. Skipping insertion."
 fi
@@ -1346,42 +1359,42 @@ fi
 # Creates and SOPS-encrypts secrets.yaml on first enrollment; updates SOPS keys on subsequent runs.
 if [ ! -f "$SECRETS_FILE" ]; then
     log "Initializing global secrets file..."
-    sudo -u nops mkdir -p "$(dirname "$SECRETS_FILE")"
-    sudo -u nops cp --no-preserve=mode "$TEMPLATES_DIR/secrets.yaml" "$SECRETS_FILE"
+    sudo -u "$SERVICE_USER" mkdir -p "$(dirname "$SECRETS_FILE")"
+    sudo -u "$SERVICE_USER" cp --no-preserve=mode "$TEMPLATES_DIR/secrets.yaml" "$SECRETS_FILE"
 
     # Escapes &, /, and \ so they are treated as literals in sed replacement strings.
     escape_sed() { echo "$1" | sed 's/[&/\]/\\&/g'; }
 
-    sudo -u nops sed -i "s|git_username:.*|git_username: \"$(escape_sed "$GIT_USER")\"|" "$SECRETS_FILE"
-    sudo -u nops sed -i "s|git_password:.*|git_password: \"$(escape_sed "$GIT_TOKEN")\"|" "$SECRETS_FILE"
+    sudo -u "$SERVICE_USER" sed -i "s|git_username:.*|git_username: \"$(escape_sed "$GIT_USER")\"|" "$SECRETS_FILE"
+    sudo -u "$SERVICE_USER" sed -i "s|git_password:.*|git_password: \"$(escape_sed "$GIT_TOKEN")\"|" "$SECRETS_FILE"
 
     # Pre-populate CF tunnel fields collected during prompts so they appear in the editor
     if [ "${CF_TUNNEL:-false}" = "true" ]; then
-        sudo -u nops sed -i "s|cloudflare_tunnel_name:.*|cloudflare_tunnel_name: \"$(escape_sed "$CF_TUNNEL_NAME")\"|" "$SECRETS_FILE"
-        sudo -u nops sed -i "s|cloudflare_tunnel_domain:.*|cloudflare_tunnel_domain: \"$(escape_sed "$CF_TUNNEL_DOMAIN")\"|" "$SECRETS_FILE"
+        sudo -u "$SERVICE_USER" sed -i "s|cloudflare_tunnel_name:.*|cloudflare_tunnel_name: \"$(escape_sed "$CF_TUNNEL_NAME")\"|" "$SECRETS_FILE"
+        sudo -u "$SERVICE_USER" sed -i "s|cloudflare_tunnel_domain:.*|cloudflare_tunnel_domain: \"$(escape_sed "$CF_TUNNEL_DOMAIN")\"|" "$SECRETS_FILE"
     fi
 
     if [ "$NON_INTERACTIVE" = true ]; then
         log "Injecting secrets from config file..."
-        sudo -u nops sed -i "s|matrix_bot_token:.*|matrix_bot_token: \"$(escape_sed "$MATRIX_BOT_TOKEN")\"|" "$SECRETS_FILE"
-        sudo -u nops sed -i "s|matrix_room_id:.*|matrix_room_id: \"$(escape_sed "$MATRIX_ROOM_ID")\"|" "$SECRETS_FILE"
-        sudo -u nops sed -i "s|matrix_homeserver:.*|matrix_homeserver: \"$(escape_sed "$MATRIX_HOMESERVER")\"|" "$SECRETS_FILE"
-        sudo -u nops sed -i "s|webhook_secret:.*|webhook_secret: \"$(escape_sed "$WEBHOOK_SECRET")\"|" "$SECRETS_FILE"
-        sudo -u nops sed -i "s|cloudflare_api_token:.*|cloudflare_api_token: \"$(escape_sed "$CF_API_TOKEN")\"|" "$SECRETS_FILE"
-        sudo -u nops sed -i "s|cloudflare_tunnel_name:.*|cloudflare_tunnel_name: \"$(escape_sed "$CF_TUNNEL_NAME")\"|" "$SECRETS_FILE"
-        sudo -u nops sed -i "s|cloudflare_tunnel_domain:.*|cloudflare_tunnel_domain: \"$(escape_sed "$CF_TUNNEL_DOMAIN")\"|" "$SECRETS_FILE"
-        sudo -u nops sed -i "s|cloudflare_zone_id:.*|cloudflare_zone_id: \"$(escape_sed "$CF_ZONE_ID")\"|" "$SECRETS_FILE"
-        sudo -u nops sed -i "s|cloudflare_account_id:.*|cloudflare_account_id: \"$(escape_sed "$CF_ACCOUNT_ID")\"|" "$SECRETS_FILE"
+        sudo -u "$SERVICE_USER" sed -i "s|matrix_bot_token:.*|matrix_bot_token: \"$(escape_sed "$MATRIX_BOT_TOKEN")\"|" "$SECRETS_FILE"
+        sudo -u "$SERVICE_USER" sed -i "s|matrix_room_id:.*|matrix_room_id: \"$(escape_sed "$MATRIX_ROOM_ID")\"|" "$SECRETS_FILE"
+        sudo -u "$SERVICE_USER" sed -i "s|matrix_homeserver:.*|matrix_homeserver: \"$(escape_sed "$MATRIX_HOMESERVER")\"|" "$SECRETS_FILE"
+        sudo -u "$SERVICE_USER" sed -i "s|webhook_secret:.*|webhook_secret: \"$(escape_sed "$WEBHOOK_SECRET")\"|" "$SECRETS_FILE"
+        sudo -u "$SERVICE_USER" sed -i "s|cloudflare_api_token:.*|cloudflare_api_token: \"$(escape_sed "$CF_API_TOKEN")\"|" "$SECRETS_FILE"
+        sudo -u "$SERVICE_USER" sed -i "s|cloudflare_tunnel_name:.*|cloudflare_tunnel_name: \"$(escape_sed "$CF_TUNNEL_NAME")\"|" "$SECRETS_FILE"
+        sudo -u "$SERVICE_USER" sed -i "s|cloudflare_tunnel_domain:.*|cloudflare_tunnel_domain: \"$(escape_sed "$CF_TUNNEL_DOMAIN")\"|" "$SECRETS_FILE"
+        sudo -u "$SERVICE_USER" sed -i "s|cloudflare_zone_id:.*|cloudflare_zone_id: \"$(escape_sed "$CF_ZONE_ID")\"|" "$SECRETS_FILE"
+        sudo -u "$SERVICE_USER" sed -i "s|cloudflare_account_id:.*|cloudflare_account_id: \"$(escape_sed "$CF_ACCOUNT_ID")\"|" "$SECRETS_FILE"
     else
         log "Opening secrets/secrets.yaml for Matrix setup..."
         read -p "Press Enter to open editor (Ensure Matrix credentials are set)..."
-        sudo -u nops vim "$SECRETS_FILE"
+        sudo -u "$SERVICE_USER" vim "$SECRETS_FILE"
     fi
 
-    sudo -u nops sops --config "$SOPS_CONFIG" --encrypt --in-place "$SECRETS_FILE"
+    sudo -u "$SERVICE_USER" sops --config "$SOPS_CONFIG" --encrypt --in-place "$SECRETS_FILE"
 else
     log "Global secrets file exists. Attempting key update..."
-    if ! sudo -u nops sops updatekeys -y "$SECRETS_FILE" 2>/dev/null; then
+    if ! sudo -u "$SERVICE_USER" sops updatekeys -y "$SECRETS_FILE" 2>/dev/null; then
         warn "Manual authorization required on another node for this key."
     fi
 
@@ -1411,14 +1424,14 @@ if [ "${PXE_ENABLE:-false}" = "true" ]; then
 
     PXE_MODULE_DIR="$TARGET_DIR/modules/pxe"
     if [ ! -d "$PXE_MODULE_DIR" ]; then
-        sudo -u nops mkdir -p "$PXE_MODULE_DIR"
+        sudo -u "$SERVICE_USER" mkdir -p "$PXE_MODULE_DIR"
     fi
-    sudo -u nops cp --no-preserve=mode "$TEMPLATES_DIR/pxe.nix" "$PXE_MODULE_DIR/pxe.nix"
-    sudo -u nops chmod u+w "$PXE_MODULE_DIR/pxe.nix"
-    sudo -u nops sed -i "s|PXE_INTERFACE_PLACEHOLDER|${PXE_INTERFACE:-}|" "$PXE_MODULE_DIR/pxe.nix"
-    sudo -u nops sed -i "s|PXE_HTTP_PORT_PLACEHOLDER|${PXE_HTTP_PORT:-8081}|" "$PXE_MODULE_DIR/pxe.nix"
-    sudo -u nops sed -i "s|PXE_BOOT_URL_PLACEHOLDER|${PXE_BOOT_URL:-}|" "$PXE_MODULE_DIR/pxe.nix"
-    sudo -u nops sed -i "s|PXE_DHCP_ENABLE_PLACEHOLDER|${PXE_DHCP_ENABLE:-false}|" "$PXE_MODULE_DIR/pxe.nix"
+    sudo -u "$SERVICE_USER" cp --no-preserve=mode "$TEMPLATES_DIR/pxe.nix" "$PXE_MODULE_DIR/pxe.nix"
+    sudo -u "$SERVICE_USER" chmod u+w "$PXE_MODULE_DIR/pxe.nix"
+    sudo -u "$SERVICE_USER" sed -i "s|PXE_INTERFACE_PLACEHOLDER|${PXE_INTERFACE:-}|" "$PXE_MODULE_DIR/pxe.nix"
+    sudo -u "$SERVICE_USER" sed -i "s|PXE_HTTP_PORT_PLACEHOLDER|${PXE_HTTP_PORT:-8081}|" "$PXE_MODULE_DIR/pxe.nix"
+    sudo -u "$SERVICE_USER" sed -i "s|PXE_BOOT_URL_PLACEHOLDER|${PXE_BOOT_URL:-}|" "$PXE_MODULE_DIR/pxe.nix"
+    sudo -u "$SERVICE_USER" sed -i "s|PXE_DHCP_ENABLE_PLACEHOLDER|${PXE_DHCP_ENABLE:-false}|" "$PXE_MODULE_DIR/pxe.nix"
 fi
 
 log "Ensuring encrypted repository provisioning metadata..."
@@ -1429,7 +1442,7 @@ sync_encrypted_json_file "$TARGET_DIR/nops-config-template.json"
 if [ "$NON_INTERACTIVE" != true ]; then
     log "Opening node configuration for manual adjustments (e.g., networking, static IP)..."
     read -p "Press Enter to open editor ($NODE_DIR/configuration.nix)..."
-    sudo -u nops vim "$NODE_DIR/configuration.nix"
+    sudo -u "$SERVICE_USER" vim "$NODE_DIR/configuration.nix"
 else
     log "Skipping manual node configuration (Non-interactive mode)."
 fi
@@ -1437,18 +1450,18 @@ fi
 
 # Commits all scaffolded files. Defers push if running in bootstrap mode.
 log "Committing enrollment to Fleet repository..."
-sudo -u nops git config user.email "nops-installer@$HOSTNAME"
-sudo -u nops git config user.name "nops Installer"
-sudo -u nops git add .
-sudo -u nops git commit -m "Enrollment: $HOSTNAME (Group: $NODE_GROUP)" || log "No changes to commit."
+sudo -u "$SERVICE_USER" git config user.email "nops-installer@$HOSTNAME"
+sudo -u "$SERVICE_USER" git config user.name "nops Installer"
+sudo -u "$SERVICE_USER" git add .
+sudo -u "$SERVICE_USER" git commit -m "Enrollment: $HOSTNAME (Group: $NODE_GROUP)" || log "No changes to commit."
 
 if [ "$IS_BOOTSTRAP" = "true" ]; then
     log "Bootstrap mode: Deferring git push until Forgejo is online."
 else
     log "Pushing enrollment to Fleet repository..."
-    sudo -u nops env GIT_CONFIG_NOSYSTEM=1 git push origin main
+    sudo -u "$SERVICE_USER" env GIT_CONFIG_NOSYSTEM=1 git push origin main
     log "Hardening Git security..."
-    sudo -u nops git remote set-url origin "$REPO_URL"
+    sudo -u "$SERVICE_USER" git remote set-url origin "$REPO_URL"
 fi
 
 # Triggers the initial nixos-rebuild to activate the enrolled configuration.
@@ -1537,7 +1550,7 @@ if [ "$IS_BOOTSTRAP" = "true" ]; then
 
     log "Preparing local Forgejo push remote with credentials..."
     ENCODED_TOKEN=$(jq -nr --arg v "$GIT_TOKEN" '$v | @uri')
-    sudo -u nops git remote set-url origin "http://$GIT_USER:$ENCODED_TOKEN@localhost:3000/$GIT_USER/$REPO_NAME.git"
+    sudo -u "$SERVICE_USER" git remote set-url origin "http://$GIT_USER:$ENCODED_TOKEN@localhost:3000/$GIT_USER/$REPO_NAME.git"
 
     log "Deferring repository push until after service provisioning..."
 
@@ -1552,7 +1565,7 @@ if [ "$IS_BOOTSTRAP" = "true" ]; then
     fi
 
     log "Pushing bootstrap repository to local Forgejo as one of the final bootstrap steps..."
-    sudo -u nops env GIT_CONFIG_NOSYSTEM=1 git push -u --force origin main
+    sudo -u "$SERVICE_USER" env GIT_CONFIG_NOSYSTEM=1 git push -u --force origin main
     log "Bootstrap repository push succeeded."
 
     if [ "${CF_TUNNEL:-false}" = "true" ] && [ "${IS_CONTROLLER:-false}" = "true" ]; then
@@ -1561,7 +1574,7 @@ if [ "$IS_BOOTSTRAP" = "true" ]; then
     fi
 
     log "Restoring bootstrap repository remote to configured shared URL..."
-    sudo -u nops git remote set-url origin "$REPO_URL"
+    sudo -u "$SERVICE_USER" git remote set-url origin "$REPO_URL"
     
     log "Bootstrap Complete. Fleet repository is now live at $REPO_URL"
 fi

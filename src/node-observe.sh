@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-NOPS_SSH_KEY="${NOPS_CONTROLLER_SSH_KEY:-/home/nops/.ssh/id_ed25519}"
-NOPS_REMOTE_USER="${NOPS_REMOTE_USER:-nops}"
+NOPS_SSH_KEY="${NOPS_CONTROLLER_SSH_KEY:-/home/nix-cluster/.ssh/id_ed25519}"
+NOPS_REMOTE_USER="${NOPS_REMOTE_USER:-nix-cluster}"
 CONFIG_PATH="${NOPS_RUNTIME_CONFIG_PATH:-${NOPS_CONFIG_PATH:-/etc/nops-runtime-config.json}}"
 SOPS_KEY="${NOPS_SOPS_KEY_FILE:-/var/lib/sops-nix/key.txt}"
 

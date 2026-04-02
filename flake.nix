@@ -116,6 +116,12 @@
     nixosModules.default = { config, lib, pkgs, ... }: 
     let 
       cfg = config.services."nix-cluster";
+      serviceUser = "nix-cluster";
+      serviceGroup = serviceUser;
+      serviceHome = "/home/${serviceUser}";
+      legacyServiceHome = "/home/nops";
+      repoPathString = toString cfg.repoPath;
+      legacyRepoPath = if lib.hasPrefix "${serviceHome}/" repoPathString then "${legacyServiceHome}/${lib.removePrefix "${serviceHome}/" repoPathString}" else "";
       storeCfg = cfg.ha.runtimeStore.localServer;
       storeAdvertisePeerUrl = if storeCfg.initialAdvertisePeerUrls != [] then builtins.elemAt storeCfg.initialAdvertisePeerUrls 0 else "http://${config.networking.hostName}:2380";
       storeInitialCluster = if storeCfg.initialCluster != [] then lib.concatStringsSep "," storeCfg.initialCluster else "${storeCfg.name}=${storeAdvertisePeerUrl}";
@@ -139,7 +145,7 @@
       controller_script = builtins.replaceStrings [ "\r" ] [ "" ] cfg.controllerScript;
       directories = {
         repo = cfg.repoPath;
-        log = "/home/nops/log";
+        log = "${serviceHome}/log";
         state = "/var/lib/nops";
         metrics = "/var/lib/nops/metrics";
       };
@@ -247,7 +253,7 @@
         };
         repoPath = lib.mkOption {
           type = lib.types.path;
-          default = "/home/nops/";
+          default = "${serviceHome}/";
         };
         afterPush = lib.mkOption {
           type = lib.types.listOf lib.types.str;
@@ -530,16 +536,16 @@
           lib.optionals cfg.webhook.enable [ cfg.webhook.port ]
           ++ lib.optionals cfg.ha.runtimeStore.localServer.enable [ 2379 2380 ]
           ++ lib.optionals cfg.observability.prometheus.enable [ cfg.observability.prometheus.port ];
-        users.users.nops = {
+        users.users.${serviceUser} = {
           isNormalUser = true;
           description = "nix-cluster Service Daemon Account";
-          group = "nops";
+          group = serviceGroup;
           extraGroups = [ "wheel" "docker" ];
-          home = "/home/nops";
+          home = serviceHome;
           createHome = true;
           shell = pkgs.bash;
         };
-        users.groups.nops = {};
+        users.groups.${serviceGroup} = {};
         environment.systemPackages = [ 
           self.packages.${system}.default 
           pkgs.git 
@@ -551,15 +557,31 @@
           pkgs.sshpass
           pkgs.mkpasswd
         ] ++ lib.optionals cfg.ha.runtimeStore.localServer.enable [ pkgs.etcd ];
+        system.activationScripts.nix-cluster-account-migration.text = ''
+          install -d -m 0755 ${serviceHome}
+          if [ -d ${legacyServiceHome} ] && [ ! -L ${legacyServiceHome} ]; then
+            cp -a ${legacyServiceHome}/. ${serviceHome}/ 2>/dev/null || true
+          fi
+          ${lib.optionalString (legacyRepoPath != "") ''
+          if [ ! -e ${repoPathString} ] && [ -e ${legacyRepoPath} ]; then
+            install -d -m 0755 "$(dirname ${repoPathString})"
+            cp -a ${legacyRepoPath} ${repoPathString}
+          fi
+          ''}
+          chown -R ${serviceUser}:${serviceGroup} ${serviceHome} 2>/dev/null || true
+          if [ -e ${repoPathString} ]; then
+            chown -R ${serviceUser}:${serviceGroup} ${repoPathString} 2>/dev/null || true
+          fi
+        '';
         environment.etc."nops-runtime-config.json".source = nopsConfig;
         systemd.tmpfiles.rules = [
-          "d /home/nops/log 0755 nops nops -"
-          "d /var/lib/nops 0755 nops nops -"
-          "d /var/lib/nops/ha 0755 nops nops -"
-          "d /var/lib/nops/metrics 0755 nops nops -"
-          "d /var/lib/nops-heartbeat 0755 nops nops -"
+          "d ${serviceHome}/log 0755 ${serviceUser} ${serviceGroup} -"
+          "d /var/lib/nops 0755 ${serviceUser} ${serviceGroup} -"
+          "d /var/lib/nops/ha 0755 ${serviceUser} ${serviceGroup} -"
+          "d /var/lib/nops/metrics 0755 ${serviceUser} ${serviceGroup} -"
+          "d /var/lib/nops-heartbeat 0755 ${serviceUser} ${serviceGroup} -"
         ] ++ lib.optionals cfg.ha.runtimeStore.localServer.enable [
-          "d /var/lib/nops/etcd 0755 nops nops -"
+          "d /var/lib/nops/etcd 0755 ${serviceUser} ${serviceGroup} -"
         ] ++ lib.optionals (cfg.observability.loki.enable && cfg.observability.loki.url != "") [
           "d /var/lib/promtail 0755 promtail promtail -"
         ];
@@ -619,8 +641,8 @@
           after = [ "network-online.target" ];
           wants = [ "network-online.target" ];
           serviceConfig = {
-            User = "nops";
-            Group = "nops";
+            User = serviceUser;
+            Group = serviceGroup;
             Restart = "always";
             RestartSec = "10s";
             StateDirectory = "nops/etcd";
@@ -639,7 +661,7 @@
           '';
         };
         
-        # Runs the nix-cluster listener(s) as the nops user. Spawns the Matrix daemon and/or webhook server based on enabled options.
+        # Runs the nix-cluster listener(s) as the nix-cluster user. Spawns the Matrix daemon and/or webhook server based on enabled options.
         systemd.services."nix-cluster" = {
           description = "nix-cluster Operations Listener Daemon";
           aliases = [ "nops.service" ];
@@ -649,7 +671,7 @@
           path = [ pkgs.git pkgs.nixos-rebuild pkgs.inetutils pkgs.systemd pkgs.bash pkgs.openssl pkgs.sops pkgs.age pkgs.openssh pkgs.jq pkgs.sshpass pkgs.mkpasswd ]
             ++ lib.optionals cfg.isController [ pkgs.terraform ];
           serviceConfig = {
-            User = "nops";
+            User = serviceUser;
             Restart = "always";
             RestartSec = "10s";
             WorkingDirectory = cfg.repoPath;
@@ -657,7 +679,7 @@
           
           environment = {
             NOPS_CONFIG_PATH = "${nopsConfig}";
-            NOPS_LOG_PATH = "/home/nops/log/main.log";
+            NOPS_LOG_PATH = "${serviceHome}/log/main.log";
             MATRIX_BOT_TOKEN_FILE = config.sops.secrets.matrix_bot_token.path;
             MATRIX_ROOM_ID_FILE = config.sops.secrets.matrix_room_id.path;
             MATRIX_HOMESERVER_FILE = config.sops.secrets.matrix_homeserver.path;
@@ -718,8 +740,8 @@
           wants = [ "network-online.target" ];
           serviceConfig = {
             Type = "oneshot";
-            User = "nops";
-            Group = "nops";
+            User = serviceUser;
+            Group = serviceGroup;
           };
           environment = {
             NOPS_RUNTIME_CONFIG_PATH = "/etc/nops-runtime-config.json";
