@@ -22,7 +22,7 @@
         src = ./.;
         nativeBuildInputs = [ pkgs.makeWrapper pkgs.dos2unix ];
         postPatch = ''
-          dos2unix src/* templates/* flake.nix ||
+          dos2unix src/*.sh src/lib/* src/scripts/* templates/* flake.nix ||
           true
         '';
 
@@ -44,23 +44,23 @@
             --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.git pkgs.inetutils pkgs.nixos-rebuild pkgs.systemd pkgs.bash pkgs.sops pkgs.age pkgs.jq pkgs.openssh pkgs.sshpass pkgs.mkpasswd ]}
 
           makeWrapper ${pkgs.bash}/bin/bash $out/bin/nix-cluster-observe \
-            --add-flags "$out/lib/observe.sh" \
+            --add-flags "$out/lib/scripts/observe.sh" \
             --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.systemd pkgs.jq pkgs.bash ]}
 
           makeWrapper ${pkgs.bash}/bin/bash $out/bin/nix-cluster-node \
-            --add-flags "$out/lib/node-observe.sh" \
+            --add-flags "$out/lib/scripts/node-observe.sh" \
             --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.openssh pkgs.sshpass pkgs.sops pkgs.age pkgs.jq pkgs.bash ]}
 
           makeWrapper ${pkgs.bash}/bin/bash $out/bin/nix-cluster-fleet-status \
-            --add-flags "$out/lib/fleet-status.sh" \
+            --add-flags "$out/lib/scripts/fleet-status.sh" \
             --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.sops pkgs.age pkgs.jq pkgs.openssh pkgs.bash ]}
 
           makeWrapper ${pkgs.bash}/bin/bash $out/bin/nix-cluster-fleet-watch \
-            --add-flags "$out/lib/fleet-watch.sh" \
+            --add-flags "$out/lib/scripts/fleet-watch.sh" \
             --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.jq pkgs.coreutils pkgs.bash ]}
 
           makeWrapper ${pkgs.bash}/bin/bash $out/bin/nix-cluster-controller-heartbeat \
-            --add-flags "$out/lib/controller-heartbeat.sh" \
+            --add-flags "$out/lib/scripts/controller-heartbeat.sh" \
             --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.iputils pkgs.inetutils pkgs.systemd pkgs.jq pkgs.coreutils pkgs.bash ]}
 
           makeWrapper ${pythonEnv}/bin/python3 $out/bin/nix-cluster-reporter \
@@ -92,16 +92,16 @@
         nativeBuildInputs = [ pkgs.makeWrapper pkgs.dos2unix ];
         
         postPatch = ''
-          dos2unix src/* templates/* flake.nix ||
+          dos2unix src/*.sh src/lib/* src/scripts/* templates/* flake.nix ||
           true
         '';
 
         installPhase = ''
           mkdir -p $out/share/nix-cluster/src $out/bin
           cp src/setup.sh $out/share/nix-cluster/src/setup.sh
-          cp src/deploy.sh $out/share/nix-cluster/src/deploy.sh 2>/dev/null || true
+          mkdir -p $out/share/nix-cluster/src/scripts
           cp -r src/lib $out/share/nix-cluster/src/lib 2>/dev/null || true
-          chmod +x $out/share/nix-cluster/src/*.sh
+          chmod +x $out/share/nix-cluster/src/setup.sh $out/share/nix-cluster/src/scripts/*.sh 2>/dev/null || true
           cp -r templates $out/share/nix-cluster/templates
 
           makeWrapper ${pkgs.bash}/bin/bash $out/bin/nix-cluster-install \
@@ -116,14 +116,7 @@
               pkgs.systemd pkgs.jq pkgs.mkpasswd
             ]}
 
-          makeWrapper ${pkgs.bash}/bin/bash $out/bin/nix-cluster-deploy \
-            --add-flags "$out/share/nix-cluster/src/deploy.sh" \
-            --prefix PATH : ${pkgs.lib.makeBinPath [ 
-              pkgs.git pkgs.openssh pkgs.nix pkgs.mkpasswd
-            ]}
-
           ln -s nix-cluster-install $out/bin/nops-install
-          ln -s nix-cluster-deploy $out/bin/nops-deploy
         '';
       };
     };
@@ -914,10 +907,6 @@
       install = { 
         type = "app"; 
         program = "${self.packages.${system}.install}/bin/nix-cluster-install"; 
-      };
-      deploy = { 
-        type = "app"; 
-        program = "${self.packages.${system}.install}/bin/nix-cluster-deploy"; 
       };
     };
   };

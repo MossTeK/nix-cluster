@@ -3,7 +3,7 @@
 ## Project shape
 - `nix-cluster` is a GitOps deployment system for NixOS fleets.
 - The main control flow is: Matrix room message or webhook POST → `src/update.py` → `git fetch`/change detection → `nixos-rebuild`.
-- `flake.nix` packages the daemons (`nix-cluster-daemon`, `nix-cluster-webhook`) and exposes `nix-cluster-install`/`nix-cluster-deploy` apps while keeping legacy `nops-*` aliases.
+- `flake.nix` packages the daemons (`nix-cluster-daemon`, `nix-cluster-webhook`) and exposes the `nix-cluster-install` app while keeping legacy `nops-*` aliases where they still exist.
 - The deployed systemd service name is `nix-cluster`; use `nix-cluster.service` in operational docs and troubleshooting steps.
 
 ## Read first

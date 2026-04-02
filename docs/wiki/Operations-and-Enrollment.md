@@ -14,7 +14,7 @@ This page explains what each operational script does and how the installer/enrol
 
 Backing script:
 
-- `src/observe.sh`
+- `src/scripts/observe.sh`
 
 Purpose:
 
@@ -33,7 +33,7 @@ If no units are provided, it uses tracked units from runtime config.
 
 Backing script:
 
-- `src/node-observe.sh`
+- `src/scripts/node-observe.sh`
 
 Purpose:
 
@@ -49,7 +49,7 @@ Behavior:
 
 Backing script:
 
-- `src/fleet-status.sh`
+- `src/scripts/fleet-status.sh`
 
 Purpose:
 
@@ -66,7 +66,7 @@ Behavior:
 
 Backing script:
 
-- `src/fleet-watch.sh`
+- `src/scripts/fleet-watch.sh`
 
 Purpose:
 
@@ -79,7 +79,7 @@ It is a watch tool, not a daemon.
 
 Backing script:
 
-- `src/controller-heartbeat.sh`
+- `src/scripts/controller-heartbeat.sh`
 
 Purpose:
 
@@ -91,20 +91,6 @@ Behavior:
 - pings them in order
 - writes JSON state
 - emits a journal event when reachability changes
-
-## `nix-cluster-deploy`
-
-Backing script:
-
-- `src/deploy.sh`
-
-Status:
-
-- deprecated compatibility stub
-
-It is not part of the normal modern workflow.
-
----
 
 ## Installer model
 

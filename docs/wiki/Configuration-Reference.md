@@ -291,9 +291,9 @@ flowchart TD
     B --> D["webhook.py"]
     B --> E["update.py"]
     B --> F["ha.py"]
-    B --> G["observe.sh"]
-    B --> H["fleet-status.sh"]
-    B --> I["controller-heartbeat.sh"]
+    B --> G["scripts/observe.sh"]
+    B --> H["scripts/fleet-status.sh"]
+    B --> I["scripts/controller-heartbeat.sh"]
 ```
 
 ---

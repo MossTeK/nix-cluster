@@ -43,12 +43,11 @@ There are 8 Python files in the runtime package:
 |---|---|
 | [src/setup.sh](../src/setup.sh) | Main installer and enrollment workflow used by `nix-cluster-install` |
 | [src/lib/install-config.sh](../src/lib/install-config.sh) | CLI/config parsing helper for `setup.sh` |
-| [src/observe.sh](../src/observe.sh) | Local node observability CLI for service status and journals |
-| [src/node-observe.sh](../src/node-observe.sh) | Remote wrapper that runs `nix-cluster-observe` on another node |
-| [src/fleet-status.sh](../src/fleet-status.sh) | Fleet-wide status collection across nodes |
-| [src/fleet-watch.sh](../src/fleet-watch.sh) | Repeated fleet polling and change display |
-| [src/controller-heartbeat.sh](../src/controller-heartbeat.sh) | Worker-side controller reachability monitor |
-| [src/deploy.sh](../src/deploy.sh) | Deprecated stub kept for compatibility |
+| [src/scripts/observe.sh](../src/scripts/observe.sh) | Local node observability CLI for service status and journals |
+| [src/scripts/node-observe.sh](../src/scripts/node-observe.sh) | Remote wrapper that runs `nix-cluster-observe` on another node |
+| [src/scripts/fleet-status.sh](../src/scripts/fleet-status.sh) | Fleet-wide status collection across nodes |
+| [src/scripts/fleet-watch.sh](../src/scripts/fleet-watch.sh) | Repeated fleet polling and change display |
+| [src/scripts/controller-heartbeat.sh](../src/scripts/controller-heartbeat.sh) | Worker-side controller reachability monitor |
 
 ---
 
@@ -231,7 +230,7 @@ The controller monitor:
 
 Workers can run a timer-backed heartbeat monitor:
 
-- service script: [src/controller-heartbeat.sh](../src/controller-heartbeat.sh)
+- service script: [src/scripts/controller-heartbeat.sh](../src/scripts/controller-heartbeat.sh)
 - systemd service and timer wiring: [flake.nix](../flake.nix)
 
 ### Heartbeat flow
@@ -284,15 +283,9 @@ It provides:
 
 It exists so `setup.sh` does not need to hold all override parsing inline.
 
-### [src/deploy.sh](../src/deploy.sh)
-
-This file is deprecated. It prints a compatibility message and exits.
-
-It is not part of the active runtime path.
-
 ## Observability and fleet shell tools
 
-### [src/observe.sh](../src/observe.sh)
+### [src/scripts/observe.sh](../src/scripts/observe.sh)
 
 `nix-cluster-observe` is a local inspection utility.
 
@@ -303,7 +296,7 @@ It supports:
 
 It reads `observability.tracked_units` from runtime config when no explicit units are provided.
 
-### [src/node-observe.sh](../src/node-observe.sh)
+### [src/scripts/node-observe.sh](../src/scripts/node-observe.sh)
 
 `nix-cluster-node` is a remote wrapper around `nix-cluster-observe`.
 
@@ -314,7 +307,7 @@ It:
 - falls back to deployment inventory credentials if needed
 - executes `nix-cluster-observe` remotely through `sudo`
 
-### [src/fleet-status.sh](../src/fleet-status.sh)
+### [src/scripts/fleet-status.sh](../src/scripts/fleet-status.sh)
 
 `nix-cluster-fleet-status` iterates the deployment inventory and collects node status using `nix-cluster-node`.
 
@@ -326,7 +319,7 @@ It:
 - skips the local controller host
 - returns either human output or JSON
 
-### [src/fleet-watch.sh](../src/fleet-watch.sh)
+### [src/scripts/fleet-watch.sh](../src/scripts/fleet-watch.sh)
 
 `nix-cluster-fleet-watch` repeatedly runs `nix-cluster-fleet-status --json`, normalizes the output, and prints changes over time.
 
@@ -472,17 +465,16 @@ If you want the shortest mental model, it is this:
 | Command | Backing script | Purpose |
 |---|---|---|
 | `nix-cluster-install` | [src/setup.sh](../src/setup.sh) | Enroll or bootstrap a node |
-| `nix-cluster-observe` | [src/observe.sh](../src/observe.sh) | Inspect local node service state |
-| `nix-cluster-node` | [src/node-observe.sh](../src/node-observe.sh) | Inspect another node remotely |
-| `nix-cluster-fleet-status` | [src/fleet-status.sh](../src/fleet-status.sh) | Summarize remote node status across fleet |
-| `nix-cluster-fleet-watch` | [src/fleet-watch.sh](../src/fleet-watch.sh) | Poll and display changes in fleet status |
-| `nix-cluster-controller-heartbeat` | [src/controller-heartbeat.sh](../src/controller-heartbeat.sh) | Record controller reachability from workers |
+| `nix-cluster-observe` | [src/scripts/observe.sh](../src/scripts/observe.sh) | Inspect local node service state |
+| `nix-cluster-node` | [src/scripts/node-observe.sh](../src/scripts/node-observe.sh) | Inspect another node remotely |
+| `nix-cluster-fleet-status` | [src/scripts/fleet-status.sh](../src/scripts/fleet-status.sh) | Summarize remote node status across fleet |
+| `nix-cluster-fleet-watch` | [src/scripts/fleet-watch.sh](../src/scripts/fleet-watch.sh) | Poll and display changes in fleet status |
+| `nix-cluster-controller-heartbeat` | [src/scripts/controller-heartbeat.sh](../src/scripts/controller-heartbeat.sh) | Record controller reachability from workers |
 
 ---
 
 ## Notes and Caveats
 
 - `setup.sh` is intentionally large because it is both installer and bootstrap orchestrator.
-- `deploy.sh` is deprecated and not part of the active architecture.
 - The runtime is now compact on the Python side, but the shell side still includes both runtime utilities and installer workflows.
 - Most behavior is option-driven through `services."nix-cluster".*`, not hidden in arbitrary constants.
