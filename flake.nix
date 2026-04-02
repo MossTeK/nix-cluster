@@ -34,13 +34,13 @@
           # Wraps the Matrix daemon with required binaries for fleet operations.
           # Injects git, nixos-rebuild, and secret management tools into the execution environment.
           makeWrapper ${pythonEnv}/bin/python3 $out/bin/nops-daemon \
-            --add-flags "$out/lib/listener.py" \
+            --add-flags "$out/lib/nix_cluster/listener.py" \
             --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.git pkgs.inetutils pkgs.nixos-rebuild pkgs.systemd pkgs.bash pkgs.sops pkgs.age pkgs.jq pkgs.openssh pkgs.sshpass pkgs.mkpasswd ]}
 
           # Wraps the Webhook server with required binaries for fleet operations.
           # Injects git, nixos-rebuild, and secret management tools into the execution environment.
           makeWrapper ${pythonEnv}/bin/python3 $out/bin/nops-webhook \
-            --add-flags "$out/lib/webhook.py" \
+            --add-flags "$out/lib/nix_cluster/webhook.py" \
             --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.git pkgs.inetutils pkgs.nixos-rebuild pkgs.systemd pkgs.bash pkgs.sops pkgs.age pkgs.jq pkgs.openssh pkgs.sshpass pkgs.mkpasswd ]}
 
           makeWrapper ${pkgs.bash}/bin/bash $out/bin/nops-observe \
@@ -64,11 +64,13 @@
             --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.iputils pkgs.inetutils pkgs.systemd pkgs.jq pkgs.coreutils pkgs.bash ]}
 
           makeWrapper ${pythonEnv}/bin/python3 $out/bin/nops-reporter \
-            --add-flags "$out/lib/reporter.py" \
+            --add-flags "$out/lib/nix_cluster/ha.py" \
+            --add-flags "reporter" \
             --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.systemd pkgs.coreutils pkgs.bash ]}
 
           makeWrapper ${pythonEnv}/bin/python3 $out/bin/nops-monitor \
-            --add-flags "$out/lib/monitor.py" \
+            --add-flags "$out/lib/nix_cluster/ha.py" \
+            --add-flags "monitor" \
             --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.systemd pkgs.coreutils pkgs.bash ]}
         '';
       };
@@ -120,6 +122,8 @@
       serviceGroup = serviceUser;
       serviceHome = "/home/${serviceUser}";
       legacyServiceHome = "/home/nops";
+      runtimeConfigEtcPath = lib.removePrefix "/etc/" cfg.paths.runtimeConfigPath;
+      serviceLogFile = "${cfg.paths.logDir}/main.log";
       repoPathString = toString cfg.repoPath;
       legacyRepoPath = if lib.hasPrefix "${serviceHome}/" repoPathString then "${legacyServiceHome}/${lib.removePrefix "${serviceHome}/" repoPathString}" else "";
       storeCfg = cfg.ha.runtimeStore.localServer;
@@ -141,17 +145,28 @@
       # Serializes repo path and rebuild commands to a JSON file the Python daemon reads at startup.
     nopsConfig = pkgs.writeText "nops-config.json" (builtins.toJSON {
       is_controller = cfg.isController;
+      hostname = config.networking.hostName;
       # AUTOMATIC SANITIZATION: Strip \r from the controller script
       controller_script = builtins.replaceStrings [ "\r" ] [ "" ] cfg.controllerScript;
       directories = {
         repo = cfg.repoPath;
-        log = "${serviceHome}/log";
-        state = "/var/lib/nops";
-        metrics = "/var/lib/nops/metrics";
+        log = cfg.paths.logDir;
+        state = cfg.paths.stateDir;
+        metrics = cfg.paths.metricsDir;
+        heartbeat = cfg.paths.heartbeatStateDir;
+        runtime_config = cfg.paths.runtimeConfigPath;
+        controller_script_dir = cfg.paths.controllerScriptDir;
       };
       commands = {
         # AUTOMATIC SANITIZATION: Strip \r from every command in the update list
         update = builtins.map (cmd: builtins.replaceStrings [ "\r" ] [ "" ] cmd) cfg.afterPush;
+      };
+      update = {
+        update = builtins.map (cmd: builtins.replaceStrings [ "\r" ] [ "" ] cmd) cfg.afterPush;
+        remote_name = cfg.update.remoteName;
+        branch_ref = cfg.update.branchRef;
+        relevant_paths = cfg.update.relevantPaths;
+        worker_wait_seconds = cfg.update.workerWaitSeconds;
       };
       controller = {
         reconcile_interval_seconds = cfg.controller.reconcileIntervalSeconds;
@@ -235,6 +250,18 @@
           enable = cfg.modules.postgresBackup.enable;
         };
       };
+      matrix = {
+        enable = cfg.matrix.enable;
+        trigger_keywords = cfg.matrix.triggerKeywords;
+      };
+      webhook = {
+        enable = cfg.webhook.enable;
+        bind_address = cfg.webhook.bindAddress;
+        port = cfg.webhook.port;
+        ssl_cert = if cfg.webhook.sslCert != null then cfg.webhook.sslCert else "";
+        ssl_key = if cfg.webhook.sslKey != null then cfg.webhook.sslKey else "";
+        skip_commit_marker = cfg.webhook.skipCommitMarker;
+      };
     });
     in {
       imports = [
@@ -256,6 +283,69 @@
         repoPath = lib.mkOption {
           type = lib.types.path;
           default = "${serviceHome}/";
+        };
+        paths = {
+          logDir = lib.mkOption {
+            type = lib.types.str;
+            default = "${serviceHome}/log";
+            description = "Directory used for nix-cluster log files.";
+          };
+          stateDir = lib.mkOption {
+            type = lib.types.str;
+            default = "/var/lib/nops";
+            description = "State directory used for runtime snapshots and HA data.";
+          };
+          metricsDir = lib.mkOption {
+            type = lib.types.str;
+            default = "/var/lib/nops/metrics";
+            description = "Directory used for Prometheus textfile metrics.";
+          };
+          heartbeatStateDir = lib.mkOption {
+            type = lib.types.str;
+            default = "/var/lib/nops-heartbeat";
+            description = "Directory used by the worker controller-heartbeat timer.";
+          };
+          runtimeConfigPath = lib.mkOption {
+            type = lib.types.str;
+            default = "/etc/nops-runtime-config.json";
+            description = "Path to the generated runtime configuration JSON consumed by the nix-cluster daemons.";
+          };
+          controllerScriptDir = lib.mkOption {
+            type = lib.types.str;
+            default = "/var/lib/nops";
+            description = "Directory where the controller hook script is materialized before execution.";
+          };
+        };
+        update = {
+          remoteName = lib.mkOption {
+            type = lib.types.str;
+            default = "origin";
+            description = "Git remote used by the update manager.";
+          };
+          branchRef = lib.mkOption {
+            type = lib.types.str;
+            default = "origin/main";
+            description = "Git ref that the update manager resets to before rebuilding.";
+          };
+          relevantPaths = lib.mkOption {
+            type = lib.types.listOf lib.types.str;
+            default = [
+              "nodes/${config.networking.hostName}/"
+              "groups/"
+              "modules/"
+              "deployments.json"
+              "secrets/"
+              "scripts/"
+              "flake.nix"
+              "flake.lock"
+            ];
+            description = "Repo paths that should trigger a rebuild on this node when changed upstream.";
+          };
+          workerWaitSeconds = lib.mkOption {
+            type = lib.types.int;
+            default = 30;
+            description = "Seconds a worker waits before re-fetching after controller-side provisioning.";
+          };
         };
         afterPush = lib.mkOption {
           type = lib.types.listOf lib.types.str;
@@ -518,12 +608,22 @@
             default = true;
             description = "Enable the Matrix bot listener.";
           };
+          triggerKeywords = lib.mkOption {
+            type = lib.types.listOf lib.types.str;
+            default = [ "push" "commit" "update" ];
+            description = "Case-insensitive message fragments that trigger updates from the Matrix listener.";
+          };
         };
         webhook = {
           enable = lib.mkOption {
             type = lib.types.bool;
             default = false;
             description = "Enable the Webhook listener (Forgejo/GitLab/GitHub).";
+          };
+          bindAddress = lib.mkOption {
+            type = lib.types.str;
+            default = "0.0.0.0";
+            description = "Address for the webhook listener to bind to.";
           };
           port = lib.mkOption {
             type = lib.types.int;
@@ -540,10 +640,21 @@
             default = null;
             description = "Path to the SSL private key file for the webhook listener.";
           };
+          skipCommitMarker = lib.mkOption {
+            type = lib.types.str;
+            default = "[skip nops]";
+            description = "Commit message marker that causes webhook-triggered updates to be ignored.";
+          };
         };
       };
 
       config = lib.mkIf cfg.enable {
+        assertions = [
+          {
+            assertion = lib.hasPrefix "/etc/" cfg.paths.runtimeConfigPath;
+            message = "services.nix-cluster.paths.runtimeConfigPath must live under /etc so it can be generated declaratively.";
+          }
+        ];
         networking.firewall.allowedTCPPorts =
           lib.optionals cfg.webhook.enable [ cfg.webhook.port ]
           ++ lib.optionals cfg.ha.runtimeStore.localServer.enable [ 2379 2380 ]
@@ -586,15 +697,16 @@
             chown -R ${serviceUser}:${serviceGroup} ${repoPathString} 2>/dev/null || true
           fi
         '';
-        environment.etc."nops-runtime-config.json".source = nopsConfig;
+        environment.etc.${runtimeConfigEtcPath}.source = nopsConfig;
         systemd.tmpfiles.rules = [
-          "d ${serviceHome}/log 0755 ${serviceUser} ${serviceGroup} -"
-          "d /var/lib/nops 0755 ${serviceUser} ${serviceGroup} -"
-          "d /var/lib/nops/ha 0755 ${serviceUser} ${serviceGroup} -"
-          "d /var/lib/nops/metrics 0755 ${serviceUser} ${serviceGroup} -"
-          "d /var/lib/nops-heartbeat 0755 ${serviceUser} ${serviceGroup} -"
+          "d ${cfg.paths.logDir} 0755 ${serviceUser} ${serviceGroup} -"
+          "d ${cfg.paths.stateDir} 0755 ${serviceUser} ${serviceGroup} -"
+          "d ${cfg.paths.stateDir}/ha 0755 ${serviceUser} ${serviceGroup} -"
+          "d ${cfg.paths.metricsDir} 0755 ${serviceUser} ${serviceGroup} -"
+          "d ${cfg.paths.heartbeatStateDir} 0755 ${serviceUser} ${serviceGroup} -"
+          "d ${cfg.paths.controllerScriptDir} 0755 ${serviceUser} ${serviceGroup} -"
         ] ++ lib.optionals cfg.ha.runtimeStore.localServer.enable [
-          "d /var/lib/nops/etcd 0755 ${serviceUser} ${serviceGroup} -"
+          "d ${cfg.paths.stateDir}/etcd 0755 ${serviceUser} ${serviceGroup} -"
         ] ++ lib.optionals (cfg.observability.loki.enable && cfg.observability.loki.url != "") [
           "d /var/lib/promtail 0755 promtail promtail -"
         ];
@@ -604,7 +716,7 @@
           port = cfg.observability.prometheus.port;
           listenAddress = "0.0.0.0";
           enabledCollectors = [ "systemd" "textfile" ];
-          extraFlags = [ "--collector.textfile.directory=/var/lib/nops/metrics" ];
+          extraFlags = [ "--collector.textfile.directory=${cfg.paths.metricsDir}" ];
         };
 
         services.promtail = lib.mkIf (cfg.observability.loki.enable && cfg.observability.loki.url != "") {
@@ -658,13 +770,12 @@
             Group = serviceGroup;
             Restart = "always";
             RestartSec = "10s";
-            StateDirectory = "nops/etcd";
-            WorkingDirectory = "/var/lib/nops/etcd";
+            WorkingDirectory = "${cfg.paths.stateDir}/etcd";
           };
           script = ''
             exec ${pkgs.etcd}/bin/etcd \
               --name=${lib.escapeShellArg storeCfg.name} \
-              --data-dir=/var/lib/nops/etcd \
+              --data-dir=${lib.escapeShellArg "${cfg.paths.stateDir}/etcd"} \
               --listen-client-urls=${lib.escapeShellArg (lib.concatStringsSep "," storeCfg.listenClientUrls)} \
               --advertise-client-urls=${lib.escapeShellArg (lib.concatStringsSep "," storeCfg.advertiseClientUrls)} \
               --listen-peer-urls=${lib.escapeShellArg (lib.concatStringsSep "," storeCfg.listenPeerUrls)} \
@@ -691,14 +802,11 @@
           };
           
           environment = {
-            NOPS_CONFIG_PATH = "${nopsConfig}";
-            NOPS_LOG_PATH = "${serviceHome}/log/main.log";
+            NOPS_CONFIG_PATH = cfg.paths.runtimeConfigPath;
+            NOPS_LOG_PATH = serviceLogFile;
             MATRIX_BOT_TOKEN_FILE = config.sops.secrets.matrix_bot_token.path;
             MATRIX_ROOM_ID_FILE = config.sops.secrets.matrix_room_id.path;
             MATRIX_HOMESERVER_FILE = config.sops.secrets.matrix_homeserver.path;
-            WEBHOOK_PORT = builtins.toString cfg.webhook.port;
-            WEBHOOK_SSL_CERT = if cfg.webhook.sslCert != null then cfg.webhook.sslCert else "";
-            WEBHOOK_SSL_KEY = if cfg.webhook.sslKey != null then cfg.webhook.sslKey else "";
           };
 
           # Generates a self-signed TLS cert at the configured path if SSL is enabled and no cert exists yet.
@@ -757,8 +865,8 @@
             Group = serviceGroup;
           };
           environment = {
-            NOPS_RUNTIME_CONFIG_PATH = "/etc/nops-runtime-config.json";
-            NOPS_HEARTBEAT_STATE_DIR = "/var/lib/nops-heartbeat";
+            NOPS_RUNTIME_CONFIG_PATH = cfg.paths.runtimeConfigPath;
+            NOPS_HEARTBEAT_STATE_DIR = cfg.paths.heartbeatStateDir;
           };
           script = ''
             exec ${self.packages.${system}.default}/bin/nops-controller-heartbeat

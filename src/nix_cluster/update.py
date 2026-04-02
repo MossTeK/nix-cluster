@@ -7,11 +7,10 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import List
+from typing import Sequence
 
-from .logging_utils import configure_logging
-from .process_runner import ProcessRunner
-from .runtime_config import RuntimeConfig
+from .config import RuntimeConfig
+from .core import ProcessRunner, configure_logging
 
 logger = configure_logging("nops-update")
 UPDATE_LOCK = threading.Lock()
@@ -26,27 +25,25 @@ class UpdateManager:
         self.hostname = socket.gethostname()
         self.runner = ProcessRunner(logger)
 
-    def _run_command(self, cmd: List[str], cwd: str, stage: str) -> str:
+    @property
+    def branch_ref(self) -> str:
+        return self.runtime_config.update.branch_ref
+
+    @property
+    def remote_name(self) -> str:
+        return self.runtime_config.update.remote_name
+
+    def _run_command(self, cmd: Sequence[str], cwd: str, stage: str) -> str:
         command_str = " ".join(cmd)
         logger.info("%s START: %s", stage, command_str)
         result = self.runner.run(cmd, cwd=cwd, check=True, capture_output=True)
-
-        if result.returncode != 0:
-            logger.error("%s FAILED WITH CODE %s", stage, result.returncode)
-            raise subprocess.CalledProcessError(
-                result.returncode,
-                cmd,
-                output=result.stdout,
-                stderr=result.stderr,
-            )
-
         logger.info("%s SUCCESS: %s", stage, command_str)
         return (result.stdout or "").strip()
 
-    def _get_changed_files(self, repo_dir: str) -> List[str]:
+    def _get_changed_files(self, repo_dir: str) -> list[str]:
         try:
             output = self._run_command(
-                ["git", "diff", "--name-only", "HEAD", "origin/main"],
+                ["git", "diff", "--name-only", "HEAD", self.branch_ref],
                 cwd=repo_dir,
                 stage="GIT-DIFF",
             )
@@ -54,11 +51,11 @@ class UpdateManager:
         except Exception:
             return []
 
-    def _should_rebuild(self, changed_files: List[str]) -> bool:
+    def _should_rebuild(self, changed_files: list[str]) -> bool:
         if not changed_files:
             return False
 
-        relevant_paths = [
+        relevant_paths = self.runtime_config.update.relevant_paths or [
             f"nodes/{self.hostname}/",
             "groups/",
             "modules/",
@@ -73,11 +70,10 @@ class UpdateManager:
             if any(changed_file.startswith(path) for path in relevant_paths):
                 logger.info("RELEVANT CHANGE DETECTED: %s", changed_file)
                 return True
-
         return False
 
     def _write_controller_script(self, controller_script: str) -> str:
-        runtime_dir = Path("/var/lib/nops")
+        runtime_dir = Path(self.runtime_config.directories.controller_script_dir)
         runtime_dir.mkdir(parents=True, exist_ok=True)
         fd, script_path = tempfile.mkstemp(
             prefix="nix-cluster-controller-",
@@ -90,6 +86,12 @@ class UpdateManager:
         os.chmod(script_path, 0o755)
         return script_path
 
+    def _fetch(self, repo_dir: str, stage: str) -> None:
+        self._run_command(["git", "fetch", self.remote_name], cwd=repo_dir, stage=stage)
+
+    def _reset(self, repo_dir: str, stage: str) -> None:
+        self._run_command(["git", "reset", "--hard", self.branch_ref], cwd=repo_dir, stage=stage)
+
     def perform_update(self, trigger_id: str) -> str:
         if not UPDATE_LOCK.acquire(blocking=False):
             logger.info("NOPS UPDATE ALREADY RUNNING. SKIPPING TRIGGER: %s", trigger_id)
@@ -101,45 +103,41 @@ class UpdateManager:
         controller_script = self.runtime_config.controller_script
 
         try:
-            self._run_command(["git", "fetch", "origin"], cwd=repo_dir, stage="GIT-FETCH")
+            self._fetch(repo_dir, "GIT-FETCH")
             changed_files = self._get_changed_files(repo_dir)
             needs_rebuild = self._should_rebuild(changed_files)
 
             if is_controller and controller_script:
                 logger.info("NODE IS CONTROLLER. SYNCING REPO BEFORE CONTROLLER SCRIPT...")
-                self._run_command(["git", "reset", "--hard", "origin/main"], cwd=repo_dir, stage="GIT-RESET-PRE")
-
+                self._reset(repo_dir, "GIT-RESET-PRE")
                 logger.info("EXECUTING CONTROLLER SCRIPT...")
                 script_path = self._write_controller_script(controller_script)
-
                 try:
                     self._run_command(["bash", "-c", script_path], cwd=repo_dir, stage="CONTROLLER-HOOK")
                 except subprocess.CalledProcessError as error:
                     logger.warning("CONTROLLER-HOOK FAILED (non-fatal, continuing with rebuild): %s", error)
-
-                self._run_command(["git", "fetch", "origin"], cwd=repo_dir, stage="GIT-FETCH-POST")
+                self._fetch(repo_dir, "GIT-FETCH-POST")
                 needs_rebuild = True
             elif not is_controller:
-                logger.info("NODE IS WORKER. PAUSING 30s FOR CONTROLLER TO PROVISION SECRETS...")
-                time.sleep(30)
-                self._run_command(["git", "fetch", "origin"], cwd=repo_dir, stage="GIT-FETCH-POST")
+                logger.info(
+                    "NODE IS WORKER. PAUSING %ss FOR CONTROLLER TO PROVISION SECRETS...",
+                    self.runtime_config.update.worker_wait_seconds,
+                )
+                time.sleep(self.runtime_config.update.worker_wait_seconds)
+                self._fetch(repo_dir, "GIT-FETCH-POST")
                 changed_files = self._get_changed_files(repo_dir)
                 needs_rebuild = self._should_rebuild(changed_files)
 
             if not needs_rebuild:
-                self._run_command(["git", "reset", "--hard", "origin/main"], cwd=repo_dir, stage="GIT-RESET")
+                self._reset(repo_dir, "GIT-RESET")
                 logger.info("NO RELEVANT CHANGES FOUND. RESETTING REPO.")
                 return "SKIPPED"
 
-            self._run_command(["git", "reset", "--hard", "origin/main"], cwd=repo_dir, stage="GIT-RESET")
-
-            output_log: list[str] = []
-            for command in self.runtime_config.update_commands:
-                sanitized_cmd = command.replace("\r", "")
-                output_log.append(
-                    self._run_command(["bash", "-c", sanitized_cmd], cwd=repo_dir, stage="REBUILD")
-                )
-
+            self._reset(repo_dir, "GIT-RESET")
+            output_log = [
+                self._run_command(["bash", "-c", command.replace("\r", "")], cwd=repo_dir, stage="REBUILD")
+                for command in self.runtime_config.update.commands
+            ]
             logger.info("NOPS REBUILD TASK COMPLETED: %s", trigger_id)
             return "\n".join(filter(None, output_log)).strip()
         except Exception as error:
@@ -152,7 +150,7 @@ class UpdateManager:
         repo_dir = self.runtime_config.repo_dir
         logger.info("INITIALIZING BOOT SYNCHRONIZATION...")
         try:
-            self._run_command(["git", "fetch", "origin"], cwd=repo_dir, stage="BOOT")
-            self._run_command(["git", "reset", "--hard", "origin/main"], cwd=repo_dir, stage="BOOT")
+            self._fetch(repo_dir, "BOOT")
+            self._reset(repo_dir, "BOOT")
         except Exception as error:
             logger.error("BOOT SYNC FAILED: %s", error)

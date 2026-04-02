@@ -7,12 +7,12 @@ from typing import Optional
 
 from nio import AsyncClient, RoomMessageNotice, RoomMessageText, SyncError, SyncResponse
 
-from .logging_utils import configure_logging
-from .update_manager import UpdateManager
+from .core import configure_logging
+from .update import UpdateManager
 
 
 class MatrixListener:
-    __slots__ = ("updater", "client", "hostname", "next_batch", "logger", "room_id")
+    __slots__ = ("updater", "client", "hostname", "next_batch", "logger", "room_id", "trigger_keywords")
 
     def __init__(self, config_path: str, log_file: str):
         self.logger = configure_logging("nops-listener", log_file=log_file)
@@ -27,15 +27,19 @@ class MatrixListener:
         self.hostname = socket.gethostname()
         self.next_batch: Optional[str] = None
         self.room_id = os.environ.get("MATRIX_ROOM_ID", "").strip().strip("'").strip('"')
+        self.trigger_keywords = self.updater.runtime_config.matrix.trigger_keywords
+
+    def should_trigger_update(self, body: str) -> bool:
+        normalized = body.lower()
+        return any(keyword in normalized for keyword in self.trigger_keywords)
 
     async def handle_message(self, room_id: str, event: object) -> None:
         if room_id != self.room_id:
             return
-
         try:
             body = getattr(event, "body", "")
             sender = getattr(event, "sender", "Unknown")
-            if any(keyword in body.lower() for keyword in ["push", "commit", "update"]):
+            if self.should_trigger_update(body):
                 self.logger.info("UPDATE TRIGGER DETECTED FROM %s", sender)
                 loop = asyncio.get_event_loop()
                 await loop.run_in_executor(None, self.updater.perform_update, event.event_id)
@@ -44,7 +48,6 @@ class MatrixListener:
 
     async def run(self) -> None:
         self.logger.info("STARTING NOPS-LISTENER ON %s", self.client.homeserver)
-
         try:
             self.updater.run_boot_sequence()
         except Exception as error:

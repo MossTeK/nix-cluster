@@ -7,18 +7,19 @@ import ssl
 
 from aiohttp import web
 
-from .logging_utils import configure_logging
-from .update_manager import UpdateManager
+from .core import configure_logging
+from .update import UpdateManager
 
 
 class WebhookServer:
     def __init__(self, config_path: str, log_file: str):
         self.logger = configure_logging("nops-webhook", log_file=log_file)
         self.updater = UpdateManager(config_path)
+        self.config = self.updater.runtime_config
 
     async def periodic_reconcile(self) -> None:
-        interval = self.updater.runtime_config.controller_reconcile_interval_seconds
-        if not self.updater.runtime_config.is_controller or interval <= 0:
+        interval = self.config.controller.reconcile_interval_seconds
+        if not self.config.is_controller or interval <= 0:
             self.logger.info("PERIODIC CONTROLLER RECONCILIATION DISABLED")
             return
 
@@ -44,8 +45,8 @@ class WebhookServer:
             trigger_id = payload.get("after", "webhook-push")
             if payload.get("commits"):
                 commit_msg = payload["commits"][0].get("message", "")
-                if "[skip nops]" in commit_msg:
-                    self.logger.info("DETECTED '[skip nops]' IN COMMIT. IGNORING WEBHOOK.")
+                if self.config.webhook.skip_commit_marker in commit_msg:
+                    self.logger.info("DETECTED '%s' IN COMMIT. IGNORING WEBHOOK.", self.config.webhook.skip_commit_marker)
                     return web.Response(text="Ignored due to skip flag.\n", status=200)
         except Exception:
             trigger_id = "webhook-push"
@@ -71,19 +72,20 @@ class WebhookServer:
 def main() -> None:
     config_path = os.environ.get("NOPS_CONFIG_PATH", "")
     log_file = os.environ.get("NOPS_LOG_PATH", "/home/nix-cluster/log/main.log")
-    port = int(os.environ.get("WEBHOOK_PORT", "8080"))
-    cert_file = os.environ.get("WEBHOOK_SSL_CERT", "")
-    key_file = os.environ.get("WEBHOOK_SSL_KEY", "")
-
     server = WebhookServer(config_path, log_file)
 
     ssl_context = None
-    if cert_file and key_file:
-        server.logger.info("CONFIGURING SSL WITH CERT: %s", cert_file)
+    if server.config.webhook.ssl_cert and server.config.webhook.ssl_key:
+        server.logger.info("CONFIGURING SSL WITH CERT: %s", server.config.webhook.ssl_cert)
         ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
-        ssl_context.load_cert_chain(certfile=cert_file, keyfile=key_file)
-        server.logger.info("STARTING NOPS-WEBHOOK ON PORT %s WITH SSL", port)
+        ssl_context.load_cert_chain(certfile=server.config.webhook.ssl_cert, keyfile=server.config.webhook.ssl_key)
+        server.logger.info("STARTING NOPS-WEBHOOK ON %s:%s WITH SSL", server.config.webhook.bind_address, server.config.webhook.port)
     else:
-        server.logger.info("STARTING NOPS-WEBHOOK ON PORT %s (HTTP ONLY)", port)
+        server.logger.info("STARTING NOPS-WEBHOOK ON %s:%s (HTTP ONLY)", server.config.webhook.bind_address, server.config.webhook.port)
 
-    web.run_app(server.init_app(), host="0.0.0.0", port=port, ssl_context=ssl_context)
+    web.run_app(
+        server.init_app(),
+        host=server.config.webhook.bind_address,
+        port=server.config.webhook.port,
+        ssl_context=ssl_context,
+    )
