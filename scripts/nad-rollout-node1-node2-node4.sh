@@ -12,6 +12,7 @@ if [[ "${NIX_CLUSTER_BOOTSTRAPPED:-0}" != "1" ]]; then
       nixpkgs#jq \
       nixpkgs#openssh \
       nixpkgs#python3 \
+      nixpkgs#sshpass \
       --command env NIX_CLUSTER_BOOTSTRAPPED=1 bash "$0" "$@"
   fi
 fi
@@ -95,7 +96,12 @@ build_fleet_locked() {
 ssh_as_local_user() {
   local target="$1"
   shift
-  run_local_user ssh "${SSH_OPTS[@]}" "$target" "$@"
+  if [[ -n "${REMOTE_LOGIN_PASSWORD_B64:-}" ]]; then
+    run_local_user env SSHPASS="$(printf '%s' "$REMOTE_LOGIN_PASSWORD_B64" | base64 -d)" \
+      sshpass -e ssh "${SSH_OPTS[@]}" "$target" "$@"
+  else
+    run_local_user ssh "${SSH_OPTS[@]}" "$target" "$@"
+  fi
 }
 
 remote_action() {
@@ -124,6 +130,81 @@ sudo_run() {
 
 fleet_origin() {
   printf '%s' "${FLEET_ORIGIN_B64}" | base64 -d
+}
+
+have_user() {
+  getent passwd "$1" >/dev/null 2>&1
+}
+
+service_user() {
+  if have_user nix-cluster; then
+    echo nix-cluster
+  elif have_user nops; then
+    echo nops
+  else
+    echo ""
+  fi
+}
+
+service_group() {
+  local user
+  user="$(service_user)"
+  if [[ -n "$user" ]]; then
+    id -gn "$user"
+  else
+    echo root
+  fi
+}
+
+service_home() {
+  local user
+  user="$(service_user)"
+  if [[ -n "$user" ]]; then
+    getent passwd "$user" | cut -d: -f6
+  else
+    echo /root
+  fi
+}
+
+desired_service_user() {
+  echo nix-cluster
+}
+
+desired_service_home() {
+  echo /home/nix-cluster
+}
+
+desired_repo_path() {
+  echo /home/nix-cluster/homelab-fleet
+}
+
+current_repo_path() {
+  if [[ -f /etc/nops-runtime-config.json ]]; then
+    if command -v python3 >/dev/null 2>&1; then
+      python3 - <<'PY'
+import json
+with open('/etc/nops-runtime-config.json', 'r', encoding='utf-8') as f:
+    data = json.load(f)
+print(data.get('directories', {}).get('repo') or '')
+PY
+    else
+      nix shell nixpkgs#python3 --command python3 - <<'PY'
+import json
+with open('/etc/nops-runtime-config.json', 'r', encoding='utf-8') as f:
+    data = json.load(f)
+print(data.get('directories', {}).get('repo') or '')
+PY
+    fi
+    return
+  fi
+
+  local home
+  home="$(service_home)"
+  if [[ -n "$home" ]]; then
+    echo "$home/homelab-fleet"
+  else
+    echo "$(desired_repo_path)"
+  fi
 }
 
 print_runtime_summary() {
@@ -169,14 +250,22 @@ PY
 }
 
 print_path_state() {
+  local current_repo current_home desired_repo desired_home
+  current_repo="$(current_repo_path)"
+  current_home="$(service_home)"
+  desired_repo="$(desired_repo_path)"
+  desired_home="$(desired_service_home)"
+
   for p in \
-    /home/nix-cluster \
-    /home/nix-cluster/homelab-fleet \
-    /home/nix-cluster/.ssh \
-    /home/nix-cluster/.ssh/id_ed25519 \
-    /home/nix-cluster/log \
+    "$desired_home" \
+    "$desired_repo" \
+    "$desired_home/.ssh" \
+    "$desired_home/.ssh/id_ed25519" \
+    "$desired_home/log" \
     /home/nops \
     /home/nops/homelab-fleet \
+    "$current_home" \
+    "$current_repo" \
     /var/lib/nops \
     /var/lib/nops/ha \
     /var/lib/nops/metrics \
@@ -184,7 +273,7 @@ print_path_state() {
     /etc/nops-runtime-config.json
   do
     if [[ -e "$p" ]]; then
-      stat -c "%A %U:%G %n" "$p"
+      sudo_run stat -c "%A %U:%G %n" "$p"
     else
       echo "MISSING $p"
     fi
@@ -192,13 +281,16 @@ print_path_state() {
 }
 
 print_repo_state() {
-  if [[ -d /home/nix-cluster/homelab-fleet/.git ]]; then
-    sudo_run -u nix-cluster git -C /home/nix-cluster/homelab-fleet remote -v || true
-    sudo_run -u nix-cluster git -C /home/nix-cluster/homelab-fleet branch --show-current || true
-    sudo_run -u nix-cluster git -C /home/nix-cluster/homelab-fleet status --short || true
-    sudo_run -u nix-cluster git -C /home/nix-cluster/homelab-fleet rev-parse HEAD || true
+  local user repo
+  user="$(service_user)"
+  repo="$(current_repo_path)"
+  if [[ -n "$user" && -d "$repo/.git" ]]; then
+    sudo_run -u "$user" git -C "$repo" remote -v || true
+    sudo_run -u "$user" git -C "$repo" branch --show-current || true
+    sudo_run -u "$user" git -C "$repo" status --short || true
+    sudo_run -u "$user" git -C "$repo" rev-parse HEAD || true
   else
-    echo "MISSING /home/nix-cluster/homelab-fleet/.git"
+    echo "MISSING $repo/.git"
   fi
 }
 
@@ -265,59 +357,82 @@ collect_state() {
 }
 
 prepare_node() {
-  local origin
+  local origin current_user current_group current_home current_repo desired_repo
   origin="$(fleet_origin)"
+  current_user="$(service_user)"
+  current_group="$(service_group)"
+  current_home="$(service_home)"
+  current_repo="$(current_repo_path)"
+  desired_repo="$(desired_repo_path)"
 
-  sudo_run install -d -o nix-cluster -g nix-cluster -m 0755 /home/nix-cluster
-  sudo_run install -d -o nix-cluster -g nix-cluster -m 0700 /home/nix-cluster/.ssh
-  sudo_run install -d -o nix-cluster -g nix-cluster -m 0755 /home/nix-cluster/log
-  sudo_run install -d -o nix-cluster -g nix-cluster -m 0755 /var/lib/nops
-  sudo_run install -d -o nix-cluster -g nix-cluster -m 0755 /var/lib/nops/ha
-  sudo_run install -d -o nix-cluster -g nix-cluster -m 0755 /var/lib/nops/metrics
-  sudo_run install -d -o nix-cluster -g nix-cluster -m 0755 /var/lib/nops-heartbeat
-
-  if [[ -d /home/nops/homelab-fleet && ! -e /home/nix-cluster/homelab-fleet ]]; then
-    sudo_run cp -a /home/nops/homelab-fleet /home/nix-cluster/homelab-fleet
+  if [[ -z "$current_user" ]]; then
+    echo "No existing service user found; will stage using root-owned paths until rebuild"
+    current_user="root"
+    current_group="root"
+    current_home="/root"
+    current_repo="$desired_repo"
   fi
 
-  if [[ -d /home/nops/.ssh && ! -e /home/nix-cluster/.ssh/id_ed25519 ]]; then
-    sudo_run cp -a /home/nops/.ssh/. /home/nix-cluster/.ssh/
+  sudo_run install -d -o "$current_user" -g "$current_group" -m 0755 "$current_home"
+  sudo_run install -d -o "$current_user" -g "$current_group" -m 0700 "$current_home/.ssh"
+  sudo_run install -d -o "$current_user" -g "$current_group" -m 0755 "$current_home/log"
+  sudo_run install -d -o "$current_user" -g "$current_group" -m 0755 /var/lib/nops
+  sudo_run install -d -o "$current_user" -g "$current_group" -m 0755 /var/lib/nops/ha
+  sudo_run install -d -o "$current_user" -g "$current_group" -m 0755 /var/lib/nops/metrics
+  sudo_run install -d -o "$current_user" -g "$current_group" -m 0755 /var/lib/nops-heartbeat
+
+  if [[ "$current_home" != "/home/nops" && -d /home/nops/.ssh && ! -e "$current_home/.ssh/id_ed25519" ]]; then
+    sudo_run cp -a /home/nops/.ssh/. "$current_home/.ssh/"
   fi
 
-  if [[ ! -d /home/nix-cluster/homelab-fleet/.git ]]; then
-    sudo_run rm -rf /home/nix-cluster/homelab-fleet
-    sudo_run -u nix-cluster git clone "$origin" /home/nix-cluster/homelab-fleet
+  if [[ ! -d "$current_repo/.git" && -d /home/nops/homelab-fleet/.git && "$current_repo" != "/home/nops/homelab-fleet" ]]; then
+    sudo_run cp -a /home/nops/homelab-fleet "$current_repo"
   fi
 
-  sudo_run chown -R nix-cluster:nix-cluster /home/nix-cluster
-  sudo_run chown -R nix-cluster:nix-cluster /var/lib/nops /var/lib/nops-heartbeat
-  sudo_run chmod 700 /home/nix-cluster/.ssh 2>/dev/null || true
-  sudo_run chmod 600 /home/nix-cluster/.ssh/id_ed25519 2>/dev/null || true
-  sudo_run chmod 644 /home/nix-cluster/.ssh/id_ed25519.pub 2>/dev/null || true
+  if [[ ! -d "$current_repo/.git" ]]; then
+    sudo_run rm -rf "$current_repo"
+    sudo_run -u "$current_user" git clone "$origin" "$current_repo"
+  fi
 
-  sudo_run -u nix-cluster git -C /home/nix-cluster/homelab-fleet remote set-url origin "$origin" || true
-  sudo_run -u nix-cluster git -C /home/nix-cluster/homelab-fleet config --global --add safe.directory /home/nix-cluster/homelab-fleet || true
-  sudo_run -u nix-cluster git -C /home/nix-cluster/homelab-fleet status --short || true
+  sudo_run find "$current_repo/.git" -name '*.lock' -delete 2>/dev/null || true
+  sudo_run chown -R "$current_user:$current_group" "$current_home"
+  sudo_run chown -R "$current_user:$current_group" "$current_repo"
+  sudo_run chown -R "$current_user:$current_group" /var/lib/nops /var/lib/nops-heartbeat
+  sudo_run chmod 700 "$current_home/.ssh" 2>/dev/null || true
+  sudo_run chmod 600 "$current_home/.ssh/id_ed25519" 2>/dev/null || true
+  sudo_run chmod 644 "$current_home/.ssh/id_ed25519.pub" 2>/dev/null || true
+
+  sudo_run -u "$current_user" git -C "$current_repo" remote set-url origin "$origin" || true
+  sudo_run -u "$current_user" git -C "$current_repo" config --global --add safe.directory "$current_repo" || true
+  sudo_run -u "$current_user" git -C "$current_repo" status --short || true
 }
 
 refresh_repo() {
-  sudo_run find /home/nix-cluster/homelab-fleet/.git -name '*.lock' -delete 2>/dev/null || true
-  sudo_run chown -R nix-cluster:nix-cluster /home/nix-cluster/homelab-fleet
-  sudo_run -u nix-cluster git -C /home/nix-cluster/homelab-fleet fetch origin
-  sudo_run -u nix-cluster git -C /home/nix-cluster/homelab-fleet reset --hard origin/main
+  local user group repo
+  user="$(service_user)"
+  group="$(service_group)"
+  repo="$(current_repo_path)"
+  sudo_run find "$repo/.git" -name '*.lock' -delete 2>/dev/null || true
+  sudo_run chown -R "$user:$group" "$repo"
+  sudo_run -u "$user" git -C "$repo" fetch origin
+  sudo_run -u "$user" git -C "$repo" reset --hard origin/main
 }
 
 rebuild_node() {
+  local flake_repo
   refresh_repo
-  sudo_run nixos-rebuild switch --flake "/home/nix-cluster/homelab-fleet#${node_name}" --impure
+  flake_repo="$(current_repo_path)"
+  sudo_run nixos-rebuild switch --flake "${flake_repo}#${node_name}" --impure
   sudo_run systemctl restart nix-cluster
   sudo_run systemctl status nix-cluster --no-pager -l || true
   sudo_run journalctl -u nix-cluster -n 200 --no-pager || true
 }
 
 verify_controller() {
-  sudo_run -u nix-cluster /run/current-system/sw/bin/nops-fleet-status
-  sudo_run -u nix-cluster /run/current-system/sw/bin/nops-controller-heartbeat || true
+  local user
+  user="$(service_user)"
+  sudo_run -u "$user" /run/current-system/sw/bin/nops-fleet-status
+  sudo_run -u "$user" /run/current-system/sw/bin/nops-controller-heartbeat || true
   sudo_run systemctl status nix-cluster --no-pager || true
   sudo_run systemctl status caddy --no-pager || true
   sudo_run systemctl status cloudflared --no-pager || true
@@ -401,7 +516,7 @@ verify_node_remote() {
 
 main() {
   require_root
-  require_cmd git nix ssh base64 python3 sudo
+  require_cmd git nix ssh base64 sudo sshpass
 
   LOCAL_USER="${SUDO_USER:-moss}"
   LOCAL_HOME="$(getent passwd "$LOCAL_USER" | cut -d: -f6)"
@@ -435,6 +550,7 @@ main() {
   echo
   [[ -n "$password" ]] || fail "Password is required"
   REMOTE_SUDO_PASSWORD_B64="$(printf '%s' "$password" | base64 -w0)"
+  REMOTE_LOGIN_PASSWORD_B64="$REMOTE_SUDO_PASSWORD_B64"
   unset password
 
   FLEET_ORIGIN_B64="$(run_local_shell "cd '$FLEET_REPO' && git remote get-url origin" | tr -d '\n' | base64 -w0)"

@@ -6,6 +6,7 @@ set -euo pipefail
 DEPLOYMENTS_JSON="deployments.json"
 NOPS_SSH_KEY="/home/nix-cluster/.ssh/id_ed25519"
 SOPS_KEY="/var/lib/sops-nix/key.txt"
+RUNTIME_CONFIG="/etc/nops-runtime-config.json"
 
 SSH_BASE_OPTS=(
   -o StrictHostKeyChecking=no
@@ -13,6 +14,26 @@ SSH_BASE_OPTS=(
   -o ConnectTimeout=5
 )
 TEMP_FILES=()
+
+timestamp_utc() {
+  date -u +"%Y-%m-%dT%H:%M:%SZ"
+}
+
+detect_primary_ip() {
+  local primary_ip
+
+  primary_ip=$(ip -4 -o addr show scope global 2>/dev/null | awk '{split($4,a,"/"); print a[1]; exit}')
+  if [ -n "$primary_ip" ]; then
+    printf '%s\n' "$primary_ip"
+    return 0
+  fi
+
+  ip route get 1.1.1.1 2>/dev/null | awk '{for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit }}'
+}
+
+base64_nowrap() {
+  printf '%s' "$1" | base64 | tr -d '\n'
+}
 
 cleanup() {
   if [ "${#TEMP_FILES[@]}" -gt 0 ]; then
@@ -51,11 +72,61 @@ fi
 
 echo "[nops] === Auto-Provisioning Fleet Nodes ==="
 
+ETCD_ENDPOINT=""
+ETCD_HEALTH_PREFIX="/nix-cluster/health"
+ETCD_INVENTORY_PREFIX="/nix-cluster/inventory"
+ETCD_JOIN_PREFIX="/nix-cluster/join"
+if [ -r "$RUNTIME_CONFIG" ]; then
+  ETCD_ENDPOINT=$(jq -r '.ha.runtime_store.endpoint // empty' "$RUNTIME_CONFIG" 2>/dev/null || true)
+  ETCD_HEALTH_PREFIX=$(jq -r '.ha.runtime_store.key_prefix // "/nix-cluster/health"' "$RUNTIME_CONFIG" 2>/dev/null || true)
+  ETCD_INVENTORY_PREFIX=$(jq -r '.ha.runtime_store.inventory_prefix // "/nix-cluster/inventory"' "$RUNTIME_CONFIG" 2>/dev/null || true)
+  ETCD_JOIN_PREFIX=$(jq -r '.ha.runtime_store.join_prefix // "/nix-cluster/join"' "$RUNTIME_CONFIG" 2>/dev/null || true)
+fi
+
+etcd_enabled() {
+  [ -n "$ETCD_ENDPOINT" ]
+}
+
+etcd_put_json() {
+  local key="$1"
+  local payload="$2"
+  local request_body
+
+  if ! etcd_enabled; then
+    return 0
+  fi
+
+  request_body=$(jq -nc \
+    --arg key "$(base64_nowrap "$key")" \
+    --arg value "$(base64_nowrap "$payload")" \
+    '{key: $key, value: $value}')
+
+  curl -fsS \
+    -H 'Content-Type: application/json' \
+    -d "$request_body" \
+    "$ETCD_ENDPOINT/v3/kv/put" >/dev/null || echo "[nops] warning: failed to publish runtime state for $key" >&2
+}
+
+publish_inventory_record() {
+  local node_name="$1"
+  local payload="$2"
+  etcd_put_json "$ETCD_INVENTORY_PREFIX/$node_name" "$payload"
+}
+
+publish_join_record() {
+  local node_name="$1"
+  local payload="$2"
+  etcd_put_json "$ETCD_JOIN_PREFIX/$node_name" "$payload"
+}
+
 # Ensure SSH key exists for the Controller to access new nodes
 if [ ! -f "$NOPS_SSH_KEY" ]; then
   mkdir -p "$(dirname "$NOPS_SSH_KEY")"
   ssh-keygen -t ed25519 -f "$NOPS_SSH_KEY" -N ""
 fi
+
+CONTROLLER_HOSTNAME=$(hostname -s)
+CONTROLLER_PRIMARY_IP=$(detect_primary_ip)
 
 ssh_with_key() {
   local remote="$1"
@@ -212,6 +283,75 @@ wait_for_login() {
   return 0
 }
 
+seed_installer_authorized_key() {
+  local ssh_pub_key_escaped="$1"
+
+  if [ -z "$ssh_pub_key_escaped" ]; then
+    return 1
+  fi
+
+  run_remote "$INSTALLER_USER" "$INSTALLER_IP" "$INSTALLER_PASSWORD" "$INSTALLER_AUTH_MODE" \
+    "mkdir -p ~/.ssh && chmod 700 ~/.ssh && touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && grep -qxF $ssh_pub_key_escaped ~/.ssh/authorized_keys 2>/dev/null || printf '%s\\n' $ssh_pub_key_escaped >> ~/.ssh/authorized_keys"
+}
+
+publish_controller_inventory() {
+  local controller_payload
+
+  controller_payload=$(jq -nc \
+    --arg hostname "$CONTROLLER_HOSTNAME" \
+    --arg installer_ip "$CONTROLLER_PRIMARY_IP" \
+    --arg node_role "controller" \
+    --arg keepalived_role "master" \
+    --arg source "controller-runtime" \
+    --arg state "active" \
+    --arg seen_at "$(timestamp_utc)" \
+    '{hostname: $hostname, installer_ip: $installer_ip, node_role: $node_role, keepalived_role: $keepalived_role, source: $source, state: $state, seen_at: $seen_at}')
+
+  publish_inventory_record "$CONTROLLER_HOSTNAME" "$controller_payload"
+}
+
+publish_node_inventory() {
+  local source_name="$1"
+  local state_name="$2"
+  local inventory_payload
+
+  inventory_payload=$(jq -nc \
+    --arg hostname "$HOSTNAME" \
+    --arg installer_ip "$INSTALLER_IP" \
+    --arg installer_user "$INSTALLER_USER" \
+    --arg installer_auth_mode "$INSTALLER_AUTH_MODE" \
+    --arg disk "$DISK" \
+    --arg fs "$FS" \
+    --arg node_group "$NODE_GROUP" \
+    --arg node_role "$NODE_ROLE" \
+    --arg keepalived_role "$KEEPALIVED_ROLE" \
+    --arg node_admin "$NODE_ADMIN" \
+    --arg source "$source_name" \
+    --arg state "$state_name" \
+    --arg controller "$CONTROLLER_HOSTNAME" \
+    --arg seen_at "$(timestamp_utc)" \
+    '{hostname: $hostname, installer_ip: $installer_ip, installer_user: $installer_user, installer_auth_mode: $installer_auth_mode, disk: $disk, fs: $fs, node_group: $node_group, node_role: $node_role, keepalived_role: $keepalived_role, node_admin: $node_admin, source: $source, state: $state, controller: $controller, seen_at: $seen_at}')
+
+  publish_inventory_record "$HOSTNAME" "$inventory_payload"
+}
+
+publish_join_state() {
+  local phase="$1"
+  local detail="$2"
+  local join_payload
+
+  join_payload=$(jq -nc \
+    --arg hostname "$HOSTNAME" \
+    --arg installer_ip "$INSTALLER_IP" \
+    --arg controller "$CONTROLLER_HOSTNAME" \
+    --arg phase "$phase" \
+    --arg detail "$detail" \
+    --arg updated_at "$(timestamp_utc)" \
+    '{hostname: $hostname, installer_ip: $installer_ip, controller: $controller, phase: $phase, detail: $detail, updated_at: $updated_at}')
+
+  publish_join_record "$HOSTNAME" "$join_payload"
+}
+
 provision_live_installer() {
   local PXE_TEMP_DISABLED=0
   local TMP_DIR
@@ -220,14 +360,18 @@ provision_live_installer() {
 
   if [ -z "$DISK" ] || [ -z "$FS" ]; then
     echo "[nops] $HOSTNAME is missing disk or fs in deployments.json. Skipping."
+    publish_join_state "invalid-config" "missing disk or fs"
     return 1
   fi
 
   if ! run_remote "$INSTALLER_USER" "$INSTALLER_IP" "$INSTALLER_PASSWORD" "$INSTALLER_AUTH_MODE" "test -b '$DISK'"; then
     echo "[nops] $HOSTNAME configured disk $DISK does not exist on the live installer. Available disks:"
     run_remote "$INSTALLER_USER" "$INSTALLER_IP" "$INSTALLER_PASSWORD" "$INSTALLER_AUTH_MODE" "lsblk -dn -o NAME,PATH,SIZE,MODEL,TYPE | awk '\$5 == \"disk\" { print }'" || true
+    publish_join_state "invalid-config" "configured disk missing on installer"
     return 1
   fi
+
+  publish_join_state "provisioning-live-installer" "running nixos-anywhere"
 
   TMP_DIR=$(mktemp -d)
   HOST_ID=$(head -c 4 /dev/urandom | od -A n -t x4 | tr -d ' ' | cut -c 1-8)
@@ -329,6 +473,7 @@ EOF
 
   echo "[nops] Rebooting $HOSTNAME into the installed system..."
   run_remote "$INSTALLER_USER" "$INSTALLER_IP" "$INSTALLER_PASSWORD" "$INSTALLER_AUTH_MODE" "sudo nohup sh -c 'sleep 2; reboot' >/dev/null 2>&1 &" || true
+  publish_join_state "waiting-for-installed-os" "waiting for first boot after install"
 
   echo "[nops] Waiting for $HOSTNAME to reboot..."
   if ! wait_for_login "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" 36; then
@@ -337,8 +482,10 @@ EOF
     fi
     if can_login "$INSTALLER_USER" "$INSTALLER_IP" "$INSTALLER_PASSWORD" "$INSTALLER_AUTH_MODE"; then
       echo "[nops] $HOSTNAME rebooted back into the live installer instead of the installed system. Boot from the local disk to continue enrollment."
+      publish_join_state "installer-returned" "node rebooted back into live installer"
     else
       echo "[nops] $HOSTNAME did not become reachable after installation. Skipping enrollment."
+      publish_join_state "install-failed" "node did not become reachable after install"
     fi
     return 1
   fi
@@ -346,6 +493,8 @@ EOF
   if [ "$PXE_TEMP_DISABLED" -eq 1 ]; then
     start_pixiecore_after_disk_boot
   fi
+
+  publish_join_state "installed-os-online" "installed system is reachable"
 
   return 0
 }
@@ -356,6 +505,9 @@ GIT_PASS=$(sudo env SOPS_AGE_KEY_FILE=$SOPS_KEY sops -d --extract '["git_passwor
 WEBHOOK_SECRET=$(sudo env SOPS_AGE_KEY_FILE=$SOPS_KEY sops -d --extract '["webhook_secret"]' secrets/secrets.yaml)
 REPO_URL=$(git remote get-url origin | sed -E 's|^https?://[^/@]+:[^/@]+@|https://|')
 CONTROLLER_SSH_PUB_KEY=$(cat "${NOPS_SSH_KEY}.pub")
+CONTROLLER_SSH_PUB_KEY_ESCAPED=$(printf "%q" "$CONTROLLER_SSH_PUB_KEY")
+
+publish_controller_inventory
 
 while read -r node; do
   HOSTNAME=$(echo "$node" | jq -r '.hostname')
@@ -379,12 +531,18 @@ while read -r node; do
     continue
   fi
 
+  publish_node_inventory "deployments.json" "desired"
+  publish_join_state "desired" "inventory record loaded from deployments.json"
+
   # State 1: Already active (answers as nix-cluster)
   if can_login_with_key nix-cluster "$INSTALLER_IP"; then
+    publish_node_inventory "controller-probe" "active"
     if [ "$REINSTALL" = "true" ]; then
       echo "[nops] $HOSTNAME already active, but reinstall=true so a reprovision will be attempted."
+      publish_join_state "reinstall-requested" "node active but reinstall=true"
     else
     echo "[nops] $HOSTNAME already active, skipping."
+    publish_join_state "active" "node reachable with controller key"
     continue
     fi
   fi
@@ -392,6 +550,9 @@ while read -r node; do
   # State 2: Live ISO (answers as the installer user)
   if can_login "$INSTALLER_USER" "$INSTALLER_IP" "$INSTALLER_PASSWORD" "$INSTALLER_AUTH_MODE"; then
     echo "[nops] $HOSTNAME detected as Live ISO, provisioning through $INSTALLER_USER@$INSTALLER_IP..."
+    publish_node_inventory "controller-probe" "live-installer"
+    publish_join_state "live-installer" "live installer reachable"
+    seed_installer_authorized_key "$CONTROLLER_SSH_PUB_KEY_ESCAPED" || true
     if ! provision_live_installer; then
       continue
     fi
@@ -399,32 +560,41 @@ while read -r node; do
 
   # State 3: Base OS (answers as admin user)
   if can_login "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS"; then
+    publish_node_inventory "controller-probe" "base-os"
+    publish_join_state "base-os" "base operating system reachable"
     if [ "$REINSTALL" != "true" ] && run_remote "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" auto "printf '%s\n' $NODE_ADMIN_PASS_ESCAPED | sudo -S systemctl cat nix-cluster.service >/dev/null 2>&1 || printf '%s\n' $NODE_ADMIN_PASS_ESCAPED | sudo -S systemctl cat nops.service >/dev/null 2>&1"; then
       echo "[nops] $HOSTNAME detected as Base OS and already enrolled, skipping."
+      publish_join_state "enrolled" "nix-cluster service already present"
       continue
     fi
 
     if [ "$REINSTALL" = "true" ]; then
       echo "[nops] $HOSTNAME detected as Base OS, but reinstall=true so rebooting into netboot for a fresh install..."
+      publish_join_state "rebooting-for-reinstall" "base os reachable and reinstall requested"
       run_remote "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" auto "printf '%s\n' '$NODE_ADMIN_PASS' | sudo -S nohup sh -c 'sleep 2; reboot' >/dev/null 2>&1 &" || true
 
       echo "[nops] Waiting for $HOSTNAME to come back on the live installer..."
       if ! wait_for_login "$INSTALLER_USER" "$INSTALLER_IP" "$INSTALLER_PASSWORD" 18; then
         if can_login "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS"; then
           echo "[nops] $HOSTNAME came back on the installed system instead of netboot. Ensure PXE/network boot is selected first, then rerun the controller."
+          publish_join_state "reinstall-blocked" "node rebooted back into installed system instead of installer"
         else
           echo "[nops] $HOSTNAME did not become reachable on the live installer after reboot. Skipping reinstall."
+          publish_join_state "reinstall-failed" "node did not return on live installer"
         fi
         continue
       fi
 
       echo "[nops] $HOSTNAME is back on the live installer. Reinstalling..."
+      publish_join_state "live-installer" "node returned on live installer for reinstall"
+      seed_installer_authorized_key "$CONTROLLER_SSH_PUB_KEY_ESCAPED" || true
       if ! provision_live_installer; then
         continue
       fi
     fi
 
     echo "[nops] $HOSTNAME detected as Base OS, enrolling..."
+    publish_join_state "enrolling" "copying runtime config and running installer"
 
     CONFIG_JSON=$(mktemp)
     if [ -n "$NOPS_CONFIG_TEMPLATE_INPUT" ]; then
@@ -478,10 +648,16 @@ while read -r node; do
 
     if copy_to_remote "$CONFIG_JSON" "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" /tmp/nops-config.json auto; then
       run_remote "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" auto "printf '%s\n' $NODE_ADMIN_PASS_ESCAPED | sudo -S nix --extra-experimental-features 'nix-command flakes' shell nixpkgs#git -c nix --extra-experimental-features 'nix-command flakes' run git+https://git.smallguytech.org/SGT/nix-cluster.git#install -- --config /tmp/nops-config.json"
+      publish_join_state "install-triggered" "remote nix-cluster install command started"
     else
       echo "[nops] Failed to copy worker config to $HOSTNAME. Skipping enrollment."
+      publish_join_state "enroll-failed" "failed to copy installer config to target"
     fi
 
     rm -f "$CONFIG_JSON"
+    continue
   fi
+
+  publish_node_inventory "controller-probe" "unreachable"
+  publish_join_state "unreachable" "installer and base os both unreachable"
 done < <(jq -c '.[]' "$DEPLOYMENTS_INPUT")

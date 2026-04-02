@@ -185,6 +185,8 @@
           type = cfg.ha.runtimeStore.type;
           endpoint = cfg.ha.runtimeStore.endpoint;
           key_prefix = cfg.ha.runtimeStore.keyPrefix;
+          inventory_prefix = cfg.ha.runtimeStore.inventoryPrefix;
+          join_prefix = cfg.ha.runtimeStore.joinPrefix;
           stale_after_seconds = cfg.ha.runtimeStore.staleAfterSeconds;
           local_server = {
             enable = cfg.ha.runtimeStore.localServer.enable;
@@ -343,6 +345,16 @@
               type = lib.types.str;
               default = "/nix-cluster/health";
               description = "Prefix used for service health keys in the runtime store.";
+            };
+            inventoryPrefix = lib.mkOption {
+              type = lib.types.str;
+              default = "/nix-cluster/inventory";
+              description = "Prefix used for node inventory records in the runtime store.";
+            };
+            joinPrefix = lib.mkOption {
+              type = lib.types.str;
+              default = "/nix-cluster/join";
+              description = "Prefix used for controller-driven join and provisioning state in the runtime store.";
             };
             staleAfterSeconds = lib.mkOption {
               type = lib.types.int;
@@ -549,6 +561,7 @@
         environment.systemPackages = [ 
           self.packages.${system}.default 
           pkgs.git 
+          pkgs.curl
           pkgs.sops 
           pkgs.inetutils
           pkgs.iputils
@@ -668,7 +681,7 @@
           wantedBy = [ "multi-user.target" ];
           after = [ "network-online.target" ];
           wants = [ "network-online.target" ];
-          path = [ pkgs.git pkgs.nixos-rebuild pkgs.inetutils pkgs.systemd pkgs.bash pkgs.openssl pkgs.sops pkgs.age pkgs.openssh pkgs.jq pkgs.sshpass pkgs.mkpasswd ]
+          path = [ pkgs.git pkgs.curl pkgs.nixos-rebuild pkgs.inetutils pkgs.systemd pkgs.bash pkgs.openssl pkgs.sops pkgs.age pkgs.openssh pkgs.jq pkgs.sshpass pkgs.mkpasswd ]
             ++ lib.optionals cfg.isController [ pkgs.terraform ];
           serviceConfig = {
             User = serviceUser;
