@@ -34,13 +34,15 @@
           # Wraps the Matrix daemon with required binaries for fleet operations.
           # Injects git, nixos-rebuild, and secret management tools into the execution environment.
           makeWrapper ${pythonEnv}/bin/python3 $out/bin/nix-cluster-daemon \
-            --add-flags "$out/lib/nix_cluster/listener.py" \
+            --prefix PYTHONPATH : "$out/lib" \
+            --add-flags "-m nix_cluster.listener" \
             --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.git pkgs.inetutils pkgs.nixos-rebuild pkgs.systemd pkgs.bash pkgs.sops pkgs.age pkgs.jq pkgs.openssh pkgs.sshpass pkgs.mkpasswd ]}
 
           # Wraps the Webhook server with required binaries for fleet operations.
           # Injects git, nixos-rebuild, and secret management tools into the execution environment.
           makeWrapper ${pythonEnv}/bin/python3 $out/bin/nix-cluster-webhook \
-            --add-flags "$out/lib/nix_cluster/webhook.py" \
+            --prefix PYTHONPATH : "$out/lib" \
+            --add-flags "-m nix_cluster.webhook" \
             --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.git pkgs.inetutils pkgs.nixos-rebuild pkgs.systemd pkgs.bash pkgs.sops pkgs.age pkgs.jq pkgs.openssh pkgs.sshpass pkgs.mkpasswd ]}
 
           makeWrapper ${pkgs.bash}/bin/bash $out/bin/nix-cluster-observe \
@@ -64,13 +66,13 @@
             --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.iputils pkgs.inetutils pkgs.systemd pkgs.jq pkgs.coreutils pkgs.bash ]}
 
           makeWrapper ${pythonEnv}/bin/python3 $out/bin/nix-cluster-reporter \
-            --add-flags "$out/lib/nix_cluster/ha.py" \
-            --add-flags "reporter" \
+            --prefix PYTHONPATH : "$out/lib" \
+            --add-flags "-m nix_cluster.ha reporter" \
             --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.systemd pkgs.coreutils pkgs.bash ]}
 
           makeWrapper ${pythonEnv}/bin/python3 $out/bin/nix-cluster-monitor \
-            --add-flags "$out/lib/nix_cluster/ha.py" \
-            --add-flags "monitor" \
+            --prefix PYTHONPATH : "$out/lib" \
+            --add-flags "-m nix_cluster.ha monitor" \
             --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.systemd pkgs.coreutils pkgs.bash ]}
 
           ln -s nix-cluster-daemon $out/bin/nops-daemon

@@ -1196,6 +1196,7 @@ HOST_ID=$(head -c 4 /dev/urandom | od -A n -t x4 | tr -d ' ' | cut -c 1-8)
 sudo -u "$SERVICE_USER" sed -i "s|HOST_ID_PLACEHOLDER|$HOST_ID|" "$NODE_DIR/configuration.nix"
 sudo -u "$SERVICE_USER" sed -i "s|networking.hostName = \".*\";|networking.hostName = \"$HOSTNAME\";|" "$NODE_DIR/configuration.nix"
 sudo -u "$SERVICE_USER" sed -i "s|users.users.tdavis|users.users.$NODE_ADMIN|" "$NODE_DIR/configuration.nix"
+sudo -u "$SERVICE_USER" sed -i "s|NODE_ADMIN_PLACEHOLDER|$NODE_ADMIN|" "$NODE_DIR/configuration.nix"
 sudo -u "$SERVICE_USER" sed -i "s|repoPath = \".*\";|repoPath = \"$TARGET_DIR\";|" "$NODE_DIR/configuration.nix"
 sudo -u "$SERVICE_USER" sed -i "s|SSH_PASSWORD_AUTH_PLACEHOLDER|${SSH_PASSWORD_AUTH:-false}|" "$NODE_DIR/configuration.nix"
 

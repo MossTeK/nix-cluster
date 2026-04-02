@@ -97,3 +97,7 @@ def main() -> None:
         listener.logger.info("DAEMON STOPPING.")
     except Exception as error:
         listener.logger.critical("DAEMON CRASHED: %s", error)
+
+
+if __name__ == "__main__":
+    main()

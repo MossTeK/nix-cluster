@@ -90,7 +90,10 @@
     }
   ];
 
-  nix.settings.experimental-features = [ "flakes" "nix-command" ];
+  nix.settings = {
+    experimental-features = [ "flakes" "nix-command" ];
+    trusted-users = [ "root" "NODE_ADMIN_PLACEHOLDER" ];
+  };
   environment.systemPackages = with pkgs; [
     git
     vim

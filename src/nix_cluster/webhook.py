@@ -95,3 +95,7 @@ def main() -> None:
         port=server.config.webhook.port,
         ssl_context=ssl_context,
     )
+
+
+if __name__ == "__main__":
+    main()

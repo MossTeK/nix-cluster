@@ -448,7 +448,10 @@ provision_live_installer() {
             };
 
             security.sudo.wheelNeedsPassword = false;
-            nix.settings.experimental-features = [ "nix-command" "flakes" ];
+            nix.settings = {
+              experimental-features = [ "nix-command" "flakes" ];
+              trusted-users = [ "root" "$NODE_ADMIN" ];
+            };
             system.stateVersion = "25.11";
           }
           (lib.mkIf ("$FS" == "zfs") {
