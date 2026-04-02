@@ -8,6 +8,17 @@
 
 When a trigger is received, the nodes pull the repository, determine if their specific configurations are affected, and apply the updates automatically via systemd.
 
+## 📚 Documentation
+
+Public project documentation is available in the wiki-style docs under `docs/wiki/`:
+
+- `docs/wiki/Home.md`
+- `docs/wiki/Architecture-and-Data-Flow.md`
+- `docs/wiki/Configuration-Reference.md`
+- `docs/wiki/Operations-and-Enrollment.md`
+
+If you are using `nix-cluster` with a private fleet repository, keep environment-specific inventory, secrets, rollout steps, and migration runbooks in that private repo.
+
 ---
 
 ## ✨ Key Features
