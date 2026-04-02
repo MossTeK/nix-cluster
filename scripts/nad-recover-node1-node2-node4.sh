@@ -118,6 +118,15 @@ sync_fleet_tree() {
     ssh_as_local_user "moss@${node_ip}" "rm -rf /home/moss/homelab-fleet-recovery && mkdir -p /home/moss/homelab-fleet-recovery && tar -xf - -C /home/moss/homelab-fleet-recovery"
 }
 
+sync_nix_cluster_tree() {
+  local node_name="$1"
+  local node_ip="$2"
+
+  log "Syncing nix-cluster checkout to ${node_name} staging path"
+  run_local_shell "tar --exclude=result --exclude=.direnv -cf - -C '$NIX_CLUSTER_REPO' ." | \
+    ssh_as_local_user "moss@${node_ip}" "rm -rf /home/moss/nix-cluster-recovery && mkdir -p /home/moss/nix-cluster-recovery && tar -xf - -C /home/moss/nix-cluster-recovery"
+}
+
 remote_action() {
   local node_name="$1"
   local node_ip="$2"
@@ -170,7 +179,10 @@ install_service_repo_from_stage() {
 
 rebuild_from_stage() {
   sudo_run systemctl stop nix-cluster || true
-  sudo_run nixos-rebuild switch --flake /home/moss/homelab-fleet-recovery#${node_name} --impure
+  sudo_run nixos-rebuild switch \
+    --flake /home/moss/homelab-fleet-recovery#${node_name} \
+    --override-input nixCluster path:/home/moss/nix-cluster-recovery \
+    --impure
 }
 
 repair_node1() {
@@ -304,16 +316,19 @@ main() {
   FLEET_ORIGIN_B64="$(run_local_shell "cd '$FLEET_REPO' && git remote get-url origin | sed -E 's|^https?://[^/@]+:[^/@]+@|https://|'" | tr -d '\n' | base64 -w0)"
 
   sync_fleet_tree node1 192.168.2.201
+  sync_nix_cluster_tree node1 192.168.2.201
   remote_action node1 192.168.2.201 rebuild-from-stage "$LOG_ROOT/node1-rebuild.log"
   remote_action node1 192.168.2.201 repair-node1 "$LOG_ROOT/node1-repair.log"
   remote_action node1 192.168.2.201 verify-controller "$LOG_ROOT/node1-verify.log"
 
   sync_fleet_tree node2 192.168.2.202
+  sync_nix_cluster_tree node2 192.168.2.202
   remote_action node2 192.168.2.202 rebuild-from-stage "$LOG_ROOT/node2-rebuild.log"
   remote_action node2 192.168.2.202 bootstrap-worker "$LOG_ROOT/node2-bootstrap.log"
   remote_action node2 192.168.2.202 verify-worker "$LOG_ROOT/node2-verify.log"
 
   sync_fleet_tree node4 192.168.2.204
+  sync_nix_cluster_tree node4 192.168.2.204
   remote_action node4 192.168.2.204 rebuild-from-stage "$LOG_ROOT/node4-rebuild.log"
   remote_action node4 192.168.2.204 bootstrap-worker "$LOG_ROOT/node4-bootstrap.log"
   remote_action node4 192.168.2.204 verify-worker "$LOG_ROOT/node4-verify.log"

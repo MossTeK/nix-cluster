@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import socket
 import subprocess
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -76,8 +77,16 @@ class UpdateManager:
         return False
 
     def _write_controller_script(self, controller_script: str) -> str:
-        script_path = "/tmp/nops_controller.sh"
-        Path(script_path).write_text(controller_script.replace("\r", ""), encoding="utf-8", newline="\n")
+        runtime_dir = Path("/var/lib/nops")
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        fd, script_path = tempfile.mkstemp(
+            prefix="nix-cluster-controller-",
+            suffix=".sh",
+            dir=runtime_dir,
+            text=True,
+        )
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(controller_script.replace("\r", ""))
         os.chmod(script_path, 0o755)
         return script_path
 
