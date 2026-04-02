@@ -54,7 +54,7 @@ The important parts of the repository are:
 ```mermaid
 flowchart TD
     A["services.nix-cluster.* options"] --> B["flake.nix NixOS module"]
-    B --> C["/etc/nops-runtime-config.json"]
+    B --> C["/etc/nix-cluster-runtime-config.json"]
     C --> D["Matrix listener"]
     C --> E["Webhook listener"]
     C --> F["Update manager"]
@@ -110,7 +110,7 @@ A worker usually:
 
 The runtime does not infer behavior from many separate files at startup.
 
-Instead, the NixOS module serializes service options into `/etc/nops-runtime-config.json`, and the runtime reads that file as the single normalized source for operational settings.
+Instead, the NixOS module serializes service options into `/etc/nix-cluster-runtime-config.json`, and the runtime reads that file as the single normalized source for operational settings.
 
 ---
 

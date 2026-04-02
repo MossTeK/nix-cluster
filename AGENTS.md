@@ -1,4 +1,4 @@
-# nops — Nix Operations Daemon
+# nix-cluster — Nix Cluster Controller
 
 Open-source GitOps deployment library for NixOS fleets. Version 2.2.0.
 
@@ -10,12 +10,12 @@ src/
   listener.py            # Async Matrix client — triggers updates on room messages
   webhook.py             # Async aiohttp server — triggers updates on POST webhooks
   update.py              # Synchronous UpdateManager — git fetch, change detection, rebuild
-  setup.sh               # Interactive/JSON enrollment CLI (nops-install)
+  setup.sh               # Interactive/JSON enrollment CLI (nix-cluster-install)
 templates/
   configuration.nix      # Node config template with placeholder substitution
   flake.nix              # Fleet flake template with NODES_MARKER
   imports.nix            # Group imports template
-  nops-config-template.json  # Reference JSON for non-interactive enrollment
+  nix-cluster-config-template.json  # Reference JSON for non-interactive enrollment
   secrets.yaml           # SOPS secrets template (plaintext, encrypted during setup)
   cloudflared.nix        # Cloudflare tunnel daemon module (Docker-based)
   main.tf                # Terraform template for CF tunnel provisioning
@@ -80,7 +80,7 @@ Changes to other nodes' `nodes/` dirs are ignored.
 5. Rebuild only if relevant changes detected
 6. Execute `afterPush` only if rebuild ran
 
-## Installer Flow (setup.sh / nops-install)
+## Installer Flow (setup.sh / nix-cluster-install)
 
 Supports `--config <file.json>` for non-interactive mode or interactive prompts.
 
@@ -97,7 +97,7 @@ Supports `--config <file.json>` for non-interactive mode or interactive prompts.
 - Commit + push (or defer push if bootstrap mode)
 - First `nixos-rebuild switch`
 - Bootstrap-only: create Forgejo admin user + repo via API, push
-- `deployments.json` and `nops-config-template.json` now carry `installer_auth_mode`, `installer_ssh_pub_key`, `node_role`, and `keepalived_role` fields for live USB and HA enrollment.
+- `deployments.json` and `nix-cluster-config-template.json` now carry `installer_auth_mode`, `installer_ssh_pub_key`, `node_role`, and `keepalived_role` fields for live USB and HA enrollment.
 
 ## Cloudflare Tunnel (Built-in Option)
 
@@ -149,8 +149,8 @@ The cloudflared module (when enabled) declares: `cloudflare_tunnel_token`
 ## Build Commands
 
 ```bash
-nix build .#default       # Daemon package (nops-daemon + nops-webhook)
-nix build .#install       # Installer CLI (nops-install)
+nix build .#default       # Daemon package (nix-cluster-daemon + nix-cluster-webhook)
+nix build .#install       # Installer CLI (nix-cluster-install)
 nix run .#install         # Run installer directly
 ```
 

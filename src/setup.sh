@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Enrolls a new node into the fleet: creates the nops user, clones the repo, scaffolds node config, configures SOPS, and pushes the enrollment commit.
+# Enrolls a new node into the fleet: creates the nix-cluster user, clones the repo, scaffolds node config, configures SOPS, and pushes the enrollment commit.
 set -e
 
 # Ensure clean exit after git push (for Controller automation)
 trap 'exit 0' EXIT
 
 HOSTNAME=$(hostname)
-TEMPLATES_DIR="${NOPS_TEMPLATES_DIR:-../templates}"
+TEMPLATES_DIR="${NIX_CLUSTER_TEMPLATES_DIR:-${NOPS_TEMPLATES_DIR:-../templates}}"
 DEFAULT_NIX_CLUSTER_REPO_URL="https://git.smallguytech.org/SGT/nix-cluster.git"
 SERVICE_USER="nix-cluster"
 SERVICE_GROUP="nix-cluster"
@@ -14,7 +14,7 @@ SERVICE_HOME="/home/${SERVICE_USER}"
 LEGACY_SERVICE_USER="nops"
 LEGACY_SERVICE_HOME="/home/${LEGACY_SERVICE_USER}"
 
-HELPER_DIR="${NOPS_SRC_DIR:-$(cd "$(dirname "$0")" && pwd)}/lib"
+HELPER_DIR="${NIX_CLUSTER_SRC_DIR:-${NOPS_SRC_DIR:-$(cd "$(dirname "$0")" && pwd)}}/lib"
 if [ -f "$HELPER_DIR/install-config.sh" ]; then
     # shellcheck source=./lib/install-config.sh
     . "$HELPER_DIR/install-config.sh"
@@ -39,13 +39,15 @@ if [ -n "$CONFIG_FILE" ]; then
     NON_INTERACTIVE=true
 fi
 
-LOG_FILE="/var/log/nops-setup.log"
+LOG_FILE="/var/log/nix-cluster-setup.log"
+CONFIG_TEMPLATE_NAME="nix-cluster-config-template.json"
+LEGACY_CONFIG_TEMPLATE_NAME="nops-config-template.json"
 
 # Writes a timestamped INFO entry to both stdout and the log file.
 log() { 
-    echo -e "${BLUE}[nops-setup]${NC} $1"
+    echo -e "${BLUE}[nix-cluster-setup]${NC} $1"
     sudo mkdir -p "$(dirname "$LOG_FILE")"
-    echo "$(date '+%Y-%m-%d %H:%M:%S') [nops-setup] [INFO] $1" | sudo tee -a "$LOG_FILE" > /dev/null
+    echo "$(date '+%Y-%m-%d %H:%M:%S') [nix-cluster-setup] [INFO] $1" | sudo tee -a "$LOG_FILE" > /dev/null
 }
 
 # Prints a yellow warning to stdout only.
@@ -247,7 +249,7 @@ reuse_existing_cloudflare_tunnel() {
     set_sops_string_secret "cloudflare_tunnel_token" "$tunnel_token" "secrets/secrets.yaml"
 
     git add secrets/secrets.yaml
-    git commit -m "chore: reuse CF tunnel token [skip nops]" || true
+    git commit -m "chore: reuse CF tunnel token [skip nix-cluster]" || true
     git push origin main || true
 
     log "Reused existing Cloudflare tunnel. Tunnel ID: ${tunnel_id}, Tunnel Name: ${tunnel_name}"
@@ -417,18 +419,18 @@ run_cloudflare_provisioning() {
             log "Cloudflare tunnel token changed. Updating encrypted secrets..."
             set_sops_string_secret "cloudflare_tunnel_token" "$TOKEN" "secrets/secrets.yaml"
             git add secrets/secrets.yaml
-            git commit -m "chore: update CF tunnel token [skip nops]" || true
+            git commit -m "chore: update CF tunnel token [skip nix-cluster]" || true
             log "Pushing updated tunnel token back to origin..."
             git push origin main || warn "Could not push tunnel token update immediately; it will be included in the final bootstrap push."
         fi
     )
 }
 
-log "Initializing nops Fleet Enrollment for $HOSTNAME..."
+log "Initializing nix-cluster fleet enrollment for $HOSTNAME..."
 
 # Wipes the nix-cluster user, home directory, and age key to allow a clean re-enrollment.
 if [ "$CLEAN" = true ]; then
-    log "--clean flag detected. Wiping previous nops state..."
+    log "--clean flag detected. Wiping previous nix-cluster state..."
     if id "$SERVICE_USER" &>/dev/null; then
         sudo userdel -r "$SERVICE_USER" 2>/dev/null || true
         sudo groupdel "$SERVICE_GROUP" 2>/dev/null || true
@@ -478,8 +480,10 @@ if [ "$NON_INTERACTIVE" = true ]; then
     NODE_GROUP=$(jq -r '.node_group // "default"' "$CONFIG_FILE")
     NODE_ADMIN=$(jq -r '.node_admin // empty' "$CONFIG_FILE")
     NODE_ADMIN_PASS=$(jq -r '.node_admin_pass // empty' "$CONFIG_FILE")
+    NODE_ADMIN_PASSWORD_HASH=$(jq -r '.node_admin_password_hash // empty' "$CONFIG_FILE")
     NODE_SSH_PUB_KEY=$(jq -r '.node_ssh_pub_key // empty' "$CONFIG_FILE")
-    INSTALLER_AUTH_MODE=$(jq -r '.installer_auth_mode // "auto"' "$CONFIG_FILE")
+    SSH_PASSWORD_AUTH=$(jq -r '.ssh_password_auth // "false"' "$CONFIG_FILE")
+    INSTALLER_AUTH_MODE=$(jq -r '.installer_auth_mode // "ssh_key"' "$CONFIG_FILE")
     INSTALLER_SSH_PUB_KEY=$(jq -r '.installer_ssh_pub_key // empty' "$CONFIG_FILE")
     NODE_ROLE=$(jq -r '.node_role // "worker"' "$CONFIG_FILE")
     KEEPALIVED_ROLE=$(jq -r '.keepalived_role // "backup"' "$CONFIG_FILE")
@@ -517,7 +521,7 @@ if [ "$NON_INTERACTIVE" = true ]; then
     CUSTOM_NODE_CONFIG=$(jq -r '.custom_node_config // ""' "$CONFIG_FILE")
     CUSTOM_NODE_IMPORTS=$(jq -r '.custom_node_imports // ""' "$CONFIG_FILE")
 
-    if [ -z "$GIT_USER" ] || [ -z "$GIT_TOKEN" ] || [ -z "$REPO_URL" ] || [ -z "$NODE_ADMIN" ] || [ -z "$NODE_ADMIN_PASS" ]; then
+    if [ -z "$GIT_USER" ] || [ -z "$GIT_TOKEN" ] || [ -z "$REPO_URL" ] || [ -z "$NODE_ADMIN" ]; then
         echo "Error: Missing required fields in config file."
         exit 1
     fi
@@ -545,10 +549,17 @@ else
     NODE_GROUP=${NODE_GROUP:-default}
 
     read -p "SETUP ADMIN USERNAME (for this node): " NODE_ADMIN
-    read -s -p "SETUP PASSWORD FOR $NODE_ADMIN: " NODE_ADMIN_PASS
-    echo ""
     read -p "Optional: Enter SSH Public Key for $NODE_ADMIN (Leave blank to skip): " NODE_SSH_PUB_KEY
     echo ""
+    read -p "Enable SSH password authentication for $NODE_ADMIN? (y/N): " SSH_PASSWORD_AUTH_PROMPT
+    if [[ "$SSH_PASSWORD_AUTH_PROMPT" =~ ^[Yy]$ ]]; then
+        SSH_PASSWORD_AUTH="true"
+    else
+        SSH_PASSWORD_AUTH="false"
+    fi
+    read -s -p "Optional password for $NODE_ADMIN (leave blank for key-only access): " NODE_ADMIN_PASS
+    echo ""
+    NODE_ADMIN_PASSWORD_HASH=""
     read -p "Node role [controller/worker/service/backup] [worker]: " NODE_ROLE
     NODE_ROLE=${NODE_ROLE:-worker}
     if [ "$NODE_ROLE" = "controller" ]; then
@@ -558,8 +569,8 @@ else
     else
         KEEPALIVED_ROLE="backup"
     fi
-    read -p "Installer auth mode for live-USB/netboot deployments [auto/password/ssh_key] [auto]: " INSTALLER_AUTH_MODE
-    INSTALLER_AUTH_MODE=${INSTALLER_AUTH_MODE:-auto}
+    read -p "Installer auth mode for live-USB/netboot deployments [ssh_key/auto/password] [ssh_key]: " INSTALLER_AUTH_MODE
+    INSTALLER_AUTH_MODE=${INSTALLER_AUTH_MODE:-ssh_key}
     read -p "Installer SSH public key for live-USB/netboot access (optional): " INSTALLER_SSH_PUB_KEY
     echo ""
     read -s -p "Enter Shared Fleet Private Age Key (Leave blank to generate a new unique key): " FLEET_PRIVATE_KEY
@@ -664,6 +675,24 @@ fi
 
 if [ "${IS_CONTROLLER:-false}" = "true" ] && { [ -z "${NIX_CLUSTER_REPO_URL:-}" ] || [ -z "${NIXOS_INSTALL_REPO_URL:-}" ]; }; then
     echo "Error: nix_cluster_repo_url and nixos_install_repo_url must be set for controller/bootstrap installs."
+    exit 1
+fi
+
+if [ -z "${SSH_PASSWORD_AUTH:-}" ]; then
+    SSH_PASSWORD_AUTH="false"
+fi
+
+if [ -n "${NODE_ADMIN_PASS:-}" ] && [ -z "${NODE_ADMIN_PASSWORD_HASH:-}" ]; then
+    NODE_ADMIN_PASSWORD_HASH=$(mkpasswd -m sha-512 -s <<< "$NODE_ADMIN_PASS")
+fi
+
+if [ "${SSH_PASSWORD_AUTH:-false}" = "true" ] && [ -z "${NODE_ADMIN_PASSWORD_HASH:-}" ]; then
+    echo "Error: ssh_password_auth=true requires node_admin_pass or node_admin_password_hash."
+    exit 1
+fi
+
+if [ -z "${NODE_SSH_PUB_KEY:-}" ] && [ -z "${NODE_ADMIN_PASSWORD_HASH:-}" ]; then
+    echo "Error: Provide node_ssh_pub_key or an admin password/hash so the node remains accessible."
     exit 1
 fi
 
@@ -794,17 +823,23 @@ if [ ! -f "$TARGET_DIR/deployments.json" ]; then
     sudo -u "$SERVICE_USER" chmod u+w "$TARGET_DIR/deployments.json"
 fi
 
-if [ ! -f "$TARGET_DIR/nops-config-template.json" ]; then
-    log "Initializing nops-config-template.json template..."
-    sudo -u "$SERVICE_USER" cp --no-preserve=mode "$TEMPLATES_DIR/nops-config-template.json" "$TARGET_DIR/nops-config-template.json"
-    sudo -u "$SERVICE_USER" chmod u+w "$TARGET_DIR/nops-config-template.json"
+CONFIG_TEMPLATE_PATH="$TARGET_DIR/$CONFIG_TEMPLATE_NAME"
+if [ ! -f "$CONFIG_TEMPLATE_PATH" ]; then
+    if [ -f "$TARGET_DIR/$LEGACY_CONFIG_TEMPLATE_NAME" ]; then
+        CONFIG_TEMPLATE_PATH="$TARGET_DIR/$LEGACY_CONFIG_TEMPLATE_NAME"
+        log "Using legacy $LEGACY_CONFIG_TEMPLATE_NAME template..."
+    else
+        log "Initializing $CONFIG_TEMPLATE_NAME template..."
+        sudo -u "$SERVICE_USER" cp --no-preserve=mode "$TEMPLATES_DIR/$CONFIG_TEMPLATE_NAME" "$CONFIG_TEMPLATE_PATH"
+        sudo -u "$SERVICE_USER" chmod u+w "$CONFIG_TEMPLATE_PATH"
+    fi
 fi
 
 if [ "${IS_CONTROLLER:-false}" = "true" ]; then
     log "Hydrating repository-level install templates..."
-    NOPS_CONFIG_TEMPLATE_SRC=$(mktemp)
-    NOPS_CONFIG_TEMPLATE_TMP=$(mktemp)
-    prepare_json_for_edit "$TARGET_DIR/nops-config-template.json" "$NOPS_CONFIG_TEMPLATE_SRC"
+    NIX_CLUSTER_CONFIG_TEMPLATE_SRC=$(mktemp)
+    NIX_CLUSTER_CONFIG_TEMPLATE_TMP=$(mktemp)
+    prepare_json_for_edit "$CONFIG_TEMPLATE_PATH" "$NIX_CLUSTER_CONFIG_TEMPLATE_SRC"
     jq \
         --arg git_user "$GIT_USER" \
         --arg git_token "$GIT_TOKEN" \
@@ -812,11 +847,13 @@ if [ "${IS_CONTROLLER:-false}" = "true" ]; then
         --arg repo_host_ip "$REPO_HOST_IP" \
         --arg node_group "$NODE_GROUP" \
         --arg node_admin "$NODE_ADMIN" \
+        --arg node_admin_password_hash "${NODE_ADMIN_PASSWORD_HASH:-}" \
         --arg node_ssh_pub_key "$CONTROLLER_NODE_SSH_PUB_KEY" \
         --arg node_role "${NODE_ROLE:-worker}" \
         --arg keepalived_role "${KEEPALIVED_ROLE:-backup}" \
-        --arg installer_auth_mode "${INSTALLER_AUTH_MODE:-auto}" \
+        --arg installer_auth_mode "${INSTALLER_AUTH_MODE:-ssh_key}" \
         --arg installer_ssh_pub_key "${INSTALLER_SSH_PUB_KEY:-}" \
+        --argjson ssh_password_auth "${SSH_PASSWORD_AUTH:-false}" \
         --arg trigger_choice "$TRIGGER_CHOICE" \
         --arg webhook_secret "$WEBHOOK_SECRET" \
         --arg cloudflare_api_token "$CF_API_TOKEN" \
@@ -845,7 +882,10 @@ if [ "${IS_CONTROLLER:-false}" = "true" ]; then
          .repo_host_ip = $repo_host_ip |
          .node_group = $node_group |
          .node_admin = $node_admin |
+         .node_admin_pass = "" |
+         .node_admin_password_hash = $node_admin_password_hash |
          .node_ssh_pub_key = $node_ssh_pub_key |
+         .ssh_password_auth = $ssh_password_auth |
          .node_role = $node_role |
          .keepalived_role = $keepalived_role |
          .installer_auth_mode = $installer_auth_mode |
@@ -872,11 +912,11 @@ if [ "${IS_CONTROLLER:-false}" = "true" ]; then
          .pxe_http_port = ($pxe_http_port | tonumber) |
          .pxe_boot_url = $pxe_boot_url |
          .postgres_backup_enable = $postgres_backup_enable' \
-        "$NOPS_CONFIG_TEMPLATE_SRC" > "$NOPS_CONFIG_TEMPLATE_TMP"
-    rm -f "$NOPS_CONFIG_TEMPLATE_SRC"
-    sudo mv "$NOPS_CONFIG_TEMPLATE_TMP" "$TARGET_DIR/nops-config-template.json"
-    sudo chown "$SERVICE_USER:$SERVICE_GROUP" "$TARGET_DIR/nops-config-template.json"
-    sudo chmod 0644 "$TARGET_DIR/nops-config-template.json"
+        "$NIX_CLUSTER_CONFIG_TEMPLATE_SRC" > "$NIX_CLUSTER_CONFIG_TEMPLATE_TMP"
+    rm -f "$NIX_CLUSTER_CONFIG_TEMPLATE_SRC"
+    sudo mv "$NIX_CLUSTER_CONFIG_TEMPLATE_TMP" "$CONFIG_TEMPLATE_PATH"
+    sudo chown "$SERVICE_USER:$SERVICE_GROUP" "$CONFIG_TEMPLATE_PATH"
+    sudo chmod 0644 "$CONFIG_TEMPLATE_PATH"
 
         log "Ensuring deployments.json contains the controller inventory entry..."
         CONTROLLER_DEPLOYMENTS_SRC=$(mktemp)
@@ -893,10 +933,11 @@ if [ "${IS_CONTROLLER:-false}" = "true" ]; then
                 --arg installer_ip "$CONTROLLER_PRIMARY_IP" \
                 --arg node_group "$NODE_GROUP" \
                 --arg node_admin "$NODE_ADMIN" \
-                --arg node_admin_pass "$NODE_ADMIN_PASS" \
+                --arg node_admin_password_hash "${NODE_ADMIN_PASSWORD_HASH:-}" \
                 --arg fs "$CONTROLLER_ROOT_FS" \
-                --arg installer_auth_mode "${INSTALLER_AUTH_MODE:-auto}" \
+                --arg installer_auth_mode "${INSTALLER_AUTH_MODE:-ssh_key}" \
                 --arg installer_ssh_pub_key "${INSTALLER_SSH_PUB_KEY:-}" \
+                --argjson ssh_password_auth "${SSH_PASSWORD_AUTH:-false}" \
                 --arg node_role "${NODE_ROLE:-controller}" \
                 --arg keepalived_role "${KEEPALIVED_ROLE:-master}" \
                 'if any(.[]; .hostname == $hostname) then
@@ -915,7 +956,9 @@ if [ "${IS_CONTROLLER:-false}" = "true" ]; then
                          node_role: $node_role,
                          keepalived_role: $keepalived_role,
                          node_admin: $node_admin,
-                         node_admin_pass: $node_admin_pass
+                         ssh_password_auth: $ssh_password_auth,
+                         node_admin_pass: "",
+                         node_admin_password_hash: $node_admin_password_hash
                      }]
                  end' \
                 "$CONTROLLER_DEPLOYMENTS_SRC" > "$CONTROLLER_DEPLOYMENTS_TMP"
@@ -1143,8 +1186,8 @@ if [ -f "/etc/nixos/hardware-configuration.nix" ]; then
         sudo chown "$SERVICE_USER:$SERVICE_GROUP" "$NODE_DIR/hardware-configuration.nix"
 elif command -v nixos-generate-config >/dev/null 2>&1; then
     log "Generating hardware-configuration.nix from the current system..."
-    sudo nixos-generate-config --show-hardware-config > "$NODE_DIR/hardware-configuration.nix"
-        sudo chown "$SERVICE_USER:$SERVICE_GROUP" "$NODE_DIR/hardware-configuration.nix"
+    sudo nixos-generate-config --show-hardware-config | sudo tee "$NODE_DIR/hardware-configuration.nix" >/dev/null
+    sudo chown "$SERVICE_USER:$SERVICE_GROUP" "$NODE_DIR/hardware-configuration.nix"
 fi
 
 # Substitutes installer-collected values into the node config: hostname, admin user, repo path, and trigger mode.
@@ -1153,8 +1196,15 @@ HOST_ID=$(head -c 4 /dev/urandom | od -A n -t x4 | tr -d ' ' | cut -c 1-8)
 sudo -u "$SERVICE_USER" sed -i "s|HOST_ID_PLACEHOLDER|$HOST_ID|" "$NODE_DIR/configuration.nix"
 sudo -u "$SERVICE_USER" sed -i "s|networking.hostName = \".*\";|networking.hostName = \"$HOSTNAME\";|" "$NODE_DIR/configuration.nix"
 sudo -u "$SERVICE_USER" sed -i "s|users.users.tdavis|users.users.$NODE_ADMIN|" "$NODE_DIR/configuration.nix"
-sudo -u "$SERVICE_USER" sed -i "s|initialPassword = \".*\";|initialPassword = \"$NODE_ADMIN_PASS\";|" "$NODE_DIR/configuration.nix"
 sudo -u "$SERVICE_USER" sed -i "s|repoPath = \".*\";|repoPath = \"$TARGET_DIR\";|" "$NODE_DIR/configuration.nix"
+sudo -u "$SERVICE_USER" sed -i "s|SSH_PASSWORD_AUTH_PLACEHOLDER|${SSH_PASSWORD_AUTH:-false}|" "$NODE_DIR/configuration.nix"
+
+if [ -n "${NODE_ADMIN_PASSWORD_HASH:-}" ]; then
+    SAFE_NODE_ADMIN_PASSWORD_HASH=$(nix_cluster_escape_sed "$NODE_ADMIN_PASSWORD_HASH")
+    sudo -u "$SERVICE_USER" sed -i "s|ADMIN_PASSWORD_CONFIG_PLACEHOLDER|hashedPassword = \"$SAFE_NODE_ADMIN_PASSWORD_HASH\";|" "$NODE_DIR/configuration.nix"
+else
+    sudo -u "$SERVICE_USER" sed -i 's|ADMIN_PASSWORD_CONFIG_PLACEHOLDER|hashedPassword = "!";|' "$NODE_DIR/configuration.nix"
+fi
 
 if [ -n "$NODE_SSH_PUB_KEY" ]; then
     # Safely escape slashes in the key string just in case
@@ -1163,6 +1213,9 @@ if [ -n "$NODE_SSH_PUB_KEY" ]; then
 else
     sudo -u "$SERVICE_USER" sed -i "/SSH_PUB_KEY_PLACEHOLDER/d" "$NODE_DIR/configuration.nix"
 fi
+
+SAFE_CONTROLLER_PXE_KEY=$(nix_cluster_escape_sed "$CONTROLLER_NODE_SSH_PUB_KEY")
+sudo -u "$SERVICE_USER" sed -i "s|PXE_AUTHORIZED_KEYS_PLACEHOLDER|[ \"$SAFE_CONTROLLER_PXE_KEY\" ]|" "$NODE_DIR/configuration.nix"
 
 if [ "$TRIGGER_CHOICE" == "2" ]; then
     sudo -u "$SERVICE_USER" sed -i "s|MATRIX_ENABLE_PLACEHOLDER|false|" "$NODE_DIR/configuration.nix"
@@ -1175,22 +1228,22 @@ fi
 sudo -u "$SERVICE_USER" sed -i "s|IS_CONTROLLER_PLACEHOLDER|${IS_CONTROLLER:-false}|" "$NODE_DIR/configuration.nix"
 sudo -u "$SERVICE_USER" sed -i "s|CADDY_ENABLE_PLACEHOLDER|${CADDY_ENABLE:-false}|" "$NODE_DIR/configuration.nix"
 sudo -u "$SERVICE_USER" sed -i "s|KEEPALIVED_ENABLE_PLACEHOLDER|${KEEPALIVED_ENABLE:-false}|" "$NODE_DIR/configuration.nix"
-sudo -u "$SERVICE_USER" sed -i "s|KEEPALIVED_INTERFACE_PLACEHOLDER|$(nops_escape_sed "${KEEPALIVED_INTERFACE:-}")|" "$NODE_DIR/configuration.nix"
+sudo -u "$SERVICE_USER" sed -i "s|KEEPALIVED_INTERFACE_PLACEHOLDER|$(nix_cluster_escape_sed "${KEEPALIVED_INTERFACE:-}")|" "$NODE_DIR/configuration.nix"
 sudo -u "$SERVICE_USER" sed -i "s|KEEPALIVED_ROUTER_ID_PLACEHOLDER|${KEEPALIVED_ROUTER_ID:-51}|" "$NODE_DIR/configuration.nix"
 sudo -u "$SERVICE_USER" sed -i "s|KEEPALIVED_PRIORITY_PLACEHOLDER|${KEEPALIVED_PRIORITY:-100}|" "$NODE_DIR/configuration.nix"
-sudo -u "$SERVICE_USER" sed -i "s|KEEPALIVED_VIP_CIDR_PLACEHOLDER|$(nops_escape_sed "${KEEPALIVED_VIP_CIDR:-}")|" "$NODE_DIR/configuration.nix"
+sudo -u "$SERVICE_USER" sed -i "s|KEEPALIVED_VIP_CIDR_PLACEHOLDER|$(nix_cluster_escape_sed "${KEEPALIVED_VIP_CIDR:-}")|" "$NODE_DIR/configuration.nix"
 sudo -u "$SERVICE_USER" sed -i "s|CLOUDFLARE_ENABLE_PLACEHOLDER|${CF_TUNNEL:-false}|" "$NODE_DIR/configuration.nix"
 sudo -u "$SERVICE_USER" sed -i "s|CLOUDFLARE_TUNNEL_ENABLE_PLACEHOLDER|${CF_TUNNEL:-false}|" "$NODE_DIR/configuration.nix"
-sudo -u "$SERVICE_USER" sed -i "s|CLOUDFLARE_TUNNEL_NAME_PLACEHOLDER|$(nops_escape_sed "${CF_TUNNEL_NAME:-}")|" "$NODE_DIR/configuration.nix"
-sudo -u "$SERVICE_USER" sed -i "s|CLOUDFLARE_TUNNEL_DOMAIN_PLACEHOLDER|$(nops_escape_sed "${CF_TUNNEL_DOMAIN:-}")|" "$NODE_DIR/configuration.nix"
-sudo -u "$SERVICE_USER" sed -i "s|CLOUDFLARE_TUNNEL_VIP_PLACEHOLDER|$(nops_escape_sed "${CF_TUNNEL_VIP:-}")|" "$NODE_DIR/configuration.nix"
-sudo -u "$SERVICE_USER" sed -i "s|CLOUDFLARE_ZONE_ID_PLACEHOLDER|$(nops_escape_sed "${CF_ZONE_ID:-}")|" "$NODE_DIR/configuration.nix"
-sudo -u "$SERVICE_USER" sed -i "s|CLOUDFLARE_ACCOUNT_ID_PLACEHOLDER|$(nops_escape_sed "${CF_ACCOUNT_ID:-}")|" "$NODE_DIR/configuration.nix"
+sudo -u "$SERVICE_USER" sed -i "s|CLOUDFLARE_TUNNEL_NAME_PLACEHOLDER|$(nix_cluster_escape_sed "${CF_TUNNEL_NAME:-}")|" "$NODE_DIR/configuration.nix"
+sudo -u "$SERVICE_USER" sed -i "s|CLOUDFLARE_TUNNEL_DOMAIN_PLACEHOLDER|$(nix_cluster_escape_sed "${CF_TUNNEL_DOMAIN:-}")|" "$NODE_DIR/configuration.nix"
+sudo -u "$SERVICE_USER" sed -i "s|CLOUDFLARE_TUNNEL_VIP_PLACEHOLDER|$(nix_cluster_escape_sed "${CF_TUNNEL_VIP:-}")|" "$NODE_DIR/configuration.nix"
+sudo -u "$SERVICE_USER" sed -i "s|CLOUDFLARE_ZONE_ID_PLACEHOLDER|$(nix_cluster_escape_sed "${CF_ZONE_ID:-}")|" "$NODE_DIR/configuration.nix"
+sudo -u "$SERVICE_USER" sed -i "s|CLOUDFLARE_ACCOUNT_ID_PLACEHOLDER|$(nix_cluster_escape_sed "${CF_ACCOUNT_ID:-}")|" "$NODE_DIR/configuration.nix"
 sudo -u "$SERVICE_USER" sed -i "s|PXE_ENABLE_PLACEHOLDER|${PXE_ENABLE:-false}|" "$NODE_DIR/configuration.nix"
 sudo -u "$SERVICE_USER" sed -i "s|PXE_DHCP_ENABLE_PLACEHOLDER|${PXE_DHCP_ENABLE:-false}|" "$NODE_DIR/configuration.nix"
-sudo -u "$SERVICE_USER" sed -i "s|PXE_INTERFACE_PLACEHOLDER|$(nops_escape_sed "${PXE_INTERFACE:-}")|" "$NODE_DIR/configuration.nix"
+sudo -u "$SERVICE_USER" sed -i "s|PXE_INTERFACE_PLACEHOLDER|$(nix_cluster_escape_sed "${PXE_INTERFACE:-}")|" "$NODE_DIR/configuration.nix"
 sudo -u "$SERVICE_USER" sed -i "s|PXE_HTTP_PORT_PLACEHOLDER|${PXE_HTTP_PORT:-8081}|" "$NODE_DIR/configuration.nix"
-sudo -u "$SERVICE_USER" sed -i "s|PXE_BOOT_URL_PLACEHOLDER|$(nops_escape_sed "${PXE_BOOT_URL:-}")|" "$NODE_DIR/configuration.nix"
+sudo -u "$SERVICE_USER" sed -i "s|PXE_BOOT_URL_PLACEHOLDER|$(nix_cluster_escape_sed "${PXE_BOOT_URL:-}")|" "$NODE_DIR/configuration.nix"
 sudo -u "$SERVICE_USER" sed -i "s|POSTGRES_BACKUP_ENABLE_PLACEHOLDER|${POSTGRES_BACKUP_ENABLE:-false}|" "$NODE_DIR/configuration.nix"
 
 # Dynamically scaffold Forgejo module if this is the bootstrap node
@@ -1272,51 +1325,51 @@ if [ "${CF_TUNNEL:-false}" = "true" ] && [ "${IS_CONTROLLER:-false}" = "true" ];
     log "Injecting Cloudflare tunnel provisioning into controller script..."
     CF_SCRIPT=$(cat <<'CFEOF'
       if [ -d "modules/terraform" ]; then
-          echo "[NOPS] === Cloudflare Tunnel Provisioning ==="
+          echo "[NIX-CLUSTER] === Cloudflare Tunnel Provisioning ==="
           export TF_VAR_cloudflare_api_token=$(sudo env SOPS_AGE_KEY_FILE=/var/lib/sops-nix/key.txt sops -d --extract '["cloudflare_api_token"]' secrets/secrets.yaml)
           export TF_VAR_tunnel_name=$(sudo env SOPS_AGE_KEY_FILE=/var/lib/sops-nix/key.txt sops -d --extract '["cloudflare_tunnel_name"]' secrets/secrets.yaml)
           export TF_VAR_tunnel_domain=$(sudo env SOPS_AGE_KEY_FILE=/var/lib/sops-nix/key.txt sops -d --extract '["cloudflare_tunnel_domain"]' secrets/secrets.yaml)
           export TF_VAR_cloudflare_account_id=$(sudo env SOPS_AGE_KEY_FILE=/var/lib/sops-nix/key.txt sops -d --extract '["cloudflare_account_id"]' secrets/secrets.yaml)
           export TF_VAR_cloudflare_zone_id=$(sudo env SOPS_AGE_KEY_FILE=/var/lib/sops-nix/key.txt sops -d --extract '["cloudflare_zone_id"]' secrets/secrets.yaml)
-          echo "[NOPS] Tunnel name: $TF_VAR_tunnel_name"
-          echo "[NOPS] Tunnel domain: $TF_VAR_tunnel_domain"
+          echo "[NIX-CLUSTER] Tunnel name: $TF_VAR_tunnel_name"
+          echo "[NIX-CLUSTER] Tunnel domain: $TF_VAR_tunnel_domain"
           cd modules/terraform
-          echo "[NOPS] Running terraform init..."
+          echo "[NIX-CLUSTER] Running terraform init..."
           terraform init -input=false
-          echo "[NOPS] Running terraform plan..."
+          echo "[NIX-CLUSTER] Running terraform plan..."
           terraform plan -input=false -out=tfplan 2>&1 | tee /tmp/tf-plan.log
           PLAN_EXIT=$?
           if [ $PLAN_EXIT -ne 0 ]; then
-              echo "[NOPS] ERROR: terraform plan failed (exit $PLAN_EXIT)."
+              echo "[NIX-CLUSTER] ERROR: terraform plan failed (exit $PLAN_EXIT)."
               cd ../..
           else
-              echo "[NOPS] Running terraform apply..."
+              echo "[NIX-CLUSTER] Running terraform apply..."
               terraform apply -input=false tfplan 2>&1 | tee /tmp/tf-apply.log
               APPLY_EXIT=$?
               rm -f tfplan
               if [ $APPLY_EXIT -ne 0 ]; then
-                  echo "[NOPS] ERROR: terraform apply failed (exit $APPLY_EXIT)."
+                  echo "[NIX-CLUSTER] ERROR: terraform apply failed (exit $APPLY_EXIT)."
                   cd ../..
               else
-                  echo "[NOPS] Terraform apply succeeded."
-                  echo "[NOPS] Tunnel ID: $(terraform output -raw tunnel_id 2>/dev/null || echo 'N/A')"
-                  echo "[NOPS] Tunnel Name: $(terraform output -raw tunnel_name 2>/dev/null || echo 'N/A')"
+                  echo "[NIX-CLUSTER] Terraform apply succeeded."
+                  echo "[NIX-CLUSTER] Tunnel ID: $(terraform output -raw tunnel_id 2>/dev/null || echo 'N/A')"
+                  echo "[NIX-CLUSTER] Tunnel Name: $(terraform output -raw tunnel_name 2>/dev/null || echo 'N/A')"
                   TOKEN=$(terraform output -raw tunnel_token)
                   cd ../..
                   if [ -n "$TOKEN" ] && [[ "$TOKEN" != *"No outputs found" ]] && ! sudo env SOPS_AGE_KEY_FILE=/var/lib/sops-nix/key.txt sops -d secrets/secrets.yaml | grep -q "$TOKEN"; then
-                      echo "[NOPS] Tunnel token changed — updating SOPS..."
+                      echo "[NIX-CLUSTER] Tunnel token changed — updating SOPS..."
                       JSON_TOKEN=$(jq -Rn --arg value "$TOKEN" '$value')
                       sudo env SOPS_AGE_KEY_FILE=/var/lib/sops-nix/key.txt sops --set "[\"cloudflare_tunnel_token\"] $JSON_TOKEN" secrets/secrets.yaml
                       git add secrets/secrets.yaml
-                      git commit -m "chore: update CF tunnel token [skip nops]"
+                      git commit -m "chore: update CF tunnel token [skip nix-cluster]"
                       git push
                   else
-                      echo "[NOPS] Tunnel token unchanged — no update needed."
+                      echo "[NIX-CLUSTER] Tunnel token unchanged — no update needed."
                   fi
               fi
           fi
       else
-          echo "[NOPS] Terraform directory not present. Skipping tunnel provisioning."
+          echo "[NIX-CLUSTER] Terraform directory not present. Skipping tunnel provisioning."
       fi
 CFEOF
 )
@@ -1436,7 +1489,7 @@ fi
 
 log "Ensuring encrypted repository provisioning metadata..."
 sync_encrypted_json_file "$TARGET_DIR/deployments.json"
-sync_encrypted_json_file "$TARGET_DIR/nops-config-template.json"
+sync_encrypted_json_file "$CONFIG_TEMPLATE_PATH"
 
 # Opens the node config in an editor before committing, allowing manual adjustments such as static IP.
 if [ "$NON_INTERACTIVE" != true ]; then
@@ -1450,8 +1503,8 @@ fi
 
 # Commits all scaffolded files. Defers push if running in bootstrap mode.
 log "Committing enrollment to Fleet repository..."
-sudo -u "$SERVICE_USER" git config user.email "nops-installer@$HOSTNAME"
-sudo -u "$SERVICE_USER" git config user.name "nops Installer"
+sudo -u "$SERVICE_USER" git config user.email "nix-cluster-installer@$HOSTNAME"
+sudo -u "$SERVICE_USER" git config user.name "nix-cluster Installer"
 sudo -u "$SERVICE_USER" git add .
 sudo -u "$SERVICE_USER" git commit -m "Enrollment: $HOSTNAME (Group: $NODE_GROUP)" || log "No changes to commit."
 
@@ -1491,7 +1544,7 @@ if [ "$IS_BOOTSTRAP" = "true" ]; then
     log "Creating '$REPO_NAME' repository via Forgejo API..."
     # Forgejo runs on port 3000 by default locally
     set +e
-    REPO_CREATE_STATUS=$(curl -sS --max-time 20 -o /tmp/nops-forgejo-create.log -w "%{http_code}" -X POST "http://localhost:3000/api/v1/user/repos" \
+    REPO_CREATE_STATUS=$(curl -sS --max-time 20 -o /tmp/nix-cluster-forgejo-create.log -w "%{http_code}" -X POST "http://localhost:3000/api/v1/user/repos" \
          -H "Content-Type: application/json" \
          -u "$GIT_USER:$GIT_TOKEN" \
          -d "{\"name\": \"$REPO_NAME\", \"private\": true}")
@@ -1500,18 +1553,18 @@ if [ "$IS_BOOTSTRAP" = "true" ]; then
 
     if [ "$REPO_CREATE_EXIT" -ne 0 ]; then
         warn "Forgejo repository API call failed with exit code $REPO_CREATE_EXIT."
-        if [ -f /tmp/nops-forgejo-create.log ]; then
+        if [ -f /tmp/nix-cluster-forgejo-create.log ]; then
             log "Forgejo repository API response body:"
-            cat /tmp/nops-forgejo-create.log || true
+            cat /tmp/nix-cluster-forgejo-create.log || true
         fi
         log_unit_diagnostics forgejo
         exit 1
     fi
 
     log "Forgejo repository API response: HTTP $REPO_CREATE_STATUS"
-    if [ -f /tmp/nops-forgejo-create.log ]; then
+    if [ -f /tmp/nix-cluster-forgejo-create.log ]; then
         log "Forgejo repository API response body:"
-        cat /tmp/nops-forgejo-create.log || true
+        cat /tmp/nix-cluster-forgejo-create.log || true
     fi
 
     if [ "$REPO_CREATE_STATUS" != "201" ] && [ "$REPO_CREATE_STATUS" != "409" ]; then
@@ -1520,7 +1573,7 @@ if [ "$IS_BOOTSTRAP" = "true" ]; then
         exit 1
     fi
 
-    log "Creating nops automation webhook via Forgejo API..."
+    log "Creating nix-cluster automation webhook via Forgejo API..."
     WEBHOOK_PAYLOAD=$(jq -n \
         --arg url "http://${CF_TUNNEL_VIP:-localhost}:8080/webhook" \
         --arg secret "$WEBHOOK_SECRET" \
@@ -1535,7 +1588,7 @@ if [ "$IS_BOOTSTRAP" = "true" ]; then
             active: true
         }')
 
-    HOOK_STATUS=$(curl -sS --max-time 20 -o /tmp/nops-hook.log -w "%{http_code}" -X POST "http://localhost:3000/api/v1/repos/$GIT_USER/$REPO_NAME/hooks" \
+    HOOK_STATUS=$(curl -sS --max-time 20 -o /tmp/nix-cluster-hook.log -w "%{http_code}" -X POST "http://localhost:3000/api/v1/repos/$GIT_USER/$REPO_NAME/hooks" \
          -H "Content-Type: application/json" \
          -u "$GIT_USER:$GIT_TOKEN" \
          -d "$WEBHOOK_PAYLOAD")

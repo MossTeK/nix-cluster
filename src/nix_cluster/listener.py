@@ -15,7 +15,7 @@ class MatrixListener:
     __slots__ = ("updater", "client", "hostname", "next_batch", "logger", "room_id", "trigger_keywords")
 
     def __init__(self, config_path: str, log_file: str):
-        self.logger = configure_logging("nops-listener", log_file=log_file)
+        self.logger = configure_logging("nix-cluster-listener", log_file=log_file)
         self.updater = UpdateManager(config_path)
 
         raw_url = os.environ.get("MATRIX_HOMESERVER", "").strip().rstrip("/")
@@ -47,7 +47,7 @@ class MatrixListener:
             self.logger.error("FAILED TO PROCESS MESSAGE: %s", error, exc_info=True)
 
     async def run(self) -> None:
-        self.logger.info("STARTING NOPS-LISTENER ON %s", self.client.homeserver)
+        self.logger.info("STARTING NIX-CLUSTER-LISTENER ON %s", self.client.homeserver)
         try:
             self.updater.run_boot_sequence()
         except Exception as error:
@@ -84,8 +84,12 @@ class MatrixListener:
 
 
 def main() -> None:
-    config_path = os.environ.get("NOPS_CONFIG_PATH", "")
-    log_file = os.environ.get("NOPS_LOG_PATH", "/home/nix-cluster/log/main.log")
+    config_path = (
+        os.environ.get("NIX_CLUSTER_CONFIG_PATH")
+        or os.environ.get("NOPS_CONFIG_PATH")
+        or ("/etc/nix-cluster-runtime-config.json" if os.path.exists("/etc/nix-cluster-runtime-config.json") else "/etc/nops-runtime-config.json")
+    )
+    log_file = os.environ.get("NIX_CLUSTER_LOG_PATH", os.environ.get("NOPS_LOG_PATH", "/home/nix-cluster/log/main.log"))
     listener = MatrixListener(config_path, log_file)
     try:
         asyncio.run(listener.run())

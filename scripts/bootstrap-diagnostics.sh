@@ -2,7 +2,7 @@
 
 set -u
 
-CONFIG_FILE="${1:-$HOME/nops-config.json}"
+CONFIG_FILE="${1:-$HOME/nix-cluster-config.json}"
 FLEET_DIR="${FLEET_DIR:-/home/nix-cluster/homelab-fleet}"
 SOPS_KEY_FILE="${SOPS_KEY_FILE:-/var/lib/sops-nix/key.txt}"
 FORGEJO_APP_INI="/var/lib/forgejo/custom/conf/app.ini"
@@ -299,7 +299,25 @@ if [ -f "$CONFIG_FILE" ] && have_command jq; then
     check_json_field "repo_url"
     check_json_field "node_group"
     check_json_field "node_admin"
-    check_json_field "node_admin_pass"
+
+    SSH_PASSWORD_AUTH_VALUE="$(json_value '.ssh_password_auth // false')"
+    NODE_ADMIN_PASS_VALUE="$(json_value '.node_admin_pass // empty')"
+    NODE_ADMIN_PASSWORD_HASH_VALUE="$(json_value '.node_admin_password_hash // empty')"
+    NODE_SSH_PUB_KEY_VALUE="$(json_value '.node_ssh_pub_key // empty')"
+    INSTALLER_AUTH_MODE_VALUE="$(json_value '.installer_auth_mode // "ssh_key"')"
+    INSTALLER_PASSWORD_VALUE="$(json_value '.installer_password // empty')"
+
+    if [ "$SSH_PASSWORD_AUTH_VALUE" = "true" ] && [ -z "$NODE_ADMIN_PASS_VALUE" ] && [ -z "$NODE_ADMIN_PASSWORD_HASH_VALUE" ]; then
+        fail "Config JSON missing admin password material while ssh_password_auth=true"
+    fi
+
+    if [ -z "$NODE_SSH_PUB_KEY_VALUE" ] && [ -z "$NODE_ADMIN_PASS_VALUE" ] && [ -z "$NODE_ADMIN_PASSWORD_HASH_VALUE" ]; then
+        fail "Config JSON must include node_ssh_pub_key or admin password material"
+    fi
+
+    if [ "$INSTALLER_AUTH_MODE_VALUE" = "password" ] && [ -z "$INSTALLER_PASSWORD_VALUE" ]; then
+        fail "Config JSON missing installer_password while installer_auth_mode=password"
+    fi
 
     if [ "$(json_value '.cloudflare_tunnel')" = "true" ]; then
         check_json_field "cloudflare_api_token"
@@ -353,7 +371,7 @@ fi
 
 section "SOPS And Secret Material"
 if [ -f "$FLEET_DIR/secrets/secrets.yaml" ] && [ -f "$SOPS_KEY_FILE" ] && have_command sops; then
-    if sudo sh -c "SOPS_AGE_KEY_FILE='$SOPS_KEY_FILE' sops -d '$FLEET_DIR/secrets/secrets.yaml' >/dev/null" 2>/tmp/nops-secrets-dec.err; then
+    if sudo sh -c "SOPS_AGE_KEY_FILE='$SOPS_KEY_FILE' sops -d '$FLEET_DIR/secrets/secrets.yaml' >/dev/null" 2>/tmp/nix-cluster-secrets-dec.err; then
         pass "Fleet secrets decrypt successfully"
         for key_name in git_username git_password cloudflare_api_token cloudflare_account_id cloudflare_zone_id cloudflare_tunnel_name cloudflare_tunnel_domain cloudflare_tunnel_token; do
             if [ -n "$(extract_secret_value "$key_name")" ]; then
@@ -364,7 +382,7 @@ if [ -f "$FLEET_DIR/secrets/secrets.yaml" ] && [ -f "$SOPS_KEY_FILE" ] && have_c
         done
     else
         fail "Fleet secrets failed to decrypt"
-        sed 's/^/    /' /tmp/nops-secrets-dec.err
+        sed 's/^/    /' /tmp/nix-cluster-secrets-dec.err
     fi
 else
     warn "Skipped SOPS decrypt check because secrets file, key, or sops command is unavailable"
@@ -440,4 +458,4 @@ if [ "$WARNINGS" -gt 0 ]; then
     warn "Diagnostics completed with $WARNINGS warning(s)"
 fi
 
-rm -f /tmp/nops-secrets-dec.err
+rm -f /tmp/nix-cluster-secrets-dec.err

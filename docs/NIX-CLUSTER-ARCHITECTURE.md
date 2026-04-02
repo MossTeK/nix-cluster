@@ -29,7 +29,7 @@ There are 8 Python files in the runtime package:
 | File | Responsibility |
 |---|---|
 | [src/nix_cluster/__init__.py](../src/nix_cluster/__init__.py) | Package exports |
-| [src/nix_cluster/config.py](../src/nix_cluster/config.py) | Typed runtime configuration model loaded from `/etc/nops-runtime-config.json` |
+| [src/nix_cluster/config.py](../src/nix_cluster/config.py) | Typed runtime configuration model loaded from `/etc/nix-cluster-runtime-config.json` |
 | [src/nix_cluster/core.py](../src/nix_cluster/core.py) | Shared logging, process execution, and atomic file writing utilities |
 | [src/nix_cluster/runtime.py](../src/nix_cluster/runtime.py) | etcd client used for HA state publishing and aggregation |
 | [src/nix_cluster/update.py](../src/nix_cluster/update.py) | `UpdateManager`, the git/rebuild decision engine |
@@ -41,10 +41,10 @@ There are 8 Python files in the runtime package:
 
 | Script | Role |
 |---|---|
-| [src/setup.sh](../src/setup.sh) | Main installer and enrollment workflow used by `nops-install` |
+| [src/setup.sh](../src/setup.sh) | Main installer and enrollment workflow used by `nix-cluster-install` |
 | [src/lib/install-config.sh](../src/lib/install-config.sh) | CLI/config parsing helper for `setup.sh` |
 | [src/observe.sh](../src/observe.sh) | Local node observability CLI for service status and journals |
-| [src/node-observe.sh](../src/node-observe.sh) | Remote wrapper that runs `nops-observe` on another node |
+| [src/node-observe.sh](../src/node-observe.sh) | Remote wrapper that runs `nix-cluster-observe` on another node |
 | [src/fleet-status.sh](../src/fleet-status.sh) | Fleet-wide status collection across nodes |
 | [src/fleet-watch.sh](../src/fleet-watch.sh) | Repeated fleet polling and change display |
 | [src/controller-heartbeat.sh](../src/controller-heartbeat.sh) | Worker-side controller reachability monitor |
@@ -56,7 +56,7 @@ There are 8 Python files in the runtime package:
 
 The runtime is driven by a generated JSON file:
 
-- `/etc/nops-runtime-config.json`
+- `/etc/nix-cluster-runtime-config.json`
 
 That file is produced by the NixOS module in [flake.nix](../flake.nix) and then consumed by the Python services and shell helpers.
 
@@ -65,7 +65,7 @@ That file is produced by the NixOS module in [flake.nix](../flake.nix) and then 
 ```mermaid
 flowchart LR
     A["services.nix-cluster.* options"] --> B["flake.nix module"]
-    B --> C["/etc/nops-runtime-config.json"]
+    B --> C["/etc/nix-cluster-runtime-config.json"]
     C --> D["UpdateManager"]
     C --> E["MatrixListener"]
     C --> F["WebhookServer"]
@@ -193,8 +193,8 @@ It contains two services:
 ```mermaid
 flowchart LR
     A["Tracked systemd units"] --> B["ServiceReporter"]
-    B --> C["/var/lib/nops/ha/service-health.json"]
-    B --> D["/var/lib/nops/metrics/service-health.prom"]
+    B --> C["/var/lib/nix-cluster/ha/service-health.json"]
+    B --> D["/var/lib/nix-cluster/metrics/service-health.prom"]
     B --> E["etcd key prefix /nix-cluster/health/..."]
 ```
 
@@ -213,8 +213,8 @@ flowchart LR
     A["etcd health records"] --> B["ClusterMonitor"]
     B --> C["healthy/unhealthy/stale grouping"]
     C --> D["recommended target selection"]
-    D --> E["/var/lib/nops/ha/cluster-state.json"]
-    D --> F["/var/lib/nops/metrics/cluster-state.prom"]
+    D --> E["/var/lib/nix-cluster/ha/cluster-state.json"]
+    D --> F["/var/lib/nix-cluster/metrics/cluster-state.prom"]
 ```
 
 The controller monitor:
@@ -241,7 +241,7 @@ flowchart TD
     A["systemd timer"] --> B["controller-heartbeat.sh"]
     B --> C["load controller targets from runtime config"]
     C --> D["ping targets in order"]
-    D --> E["write /var/lib/nops-heartbeat/controller-status.json"]
+    D --> E["write /var/lib/nix-cluster-heartbeat/controller-status.json"]
     E --> F["emit journal event on state change"]
 ```
 
@@ -294,7 +294,7 @@ It is not part of the active runtime path.
 
 ### [src/observe.sh](../src/observe.sh)
 
-`nops-observe` is a local inspection utility.
+`nix-cluster-observe` is a local inspection utility.
 
 It supports:
 
@@ -305,18 +305,18 @@ It reads `observability.tracked_units` from runtime config when no explicit unit
 
 ### [src/node-observe.sh](../src/node-observe.sh)
 
-`nops-node` is a remote wrapper around `nops-observe`.
+`nix-cluster-node` is a remote wrapper around `nix-cluster-observe`.
 
 It:
 
 - resolves target login behavior
 - tries controller SSH key auth first
 - falls back to deployment inventory credentials if needed
-- executes `nops-observe` remotely through `sudo`
+- executes `nix-cluster-observe` remotely through `sudo`
 
 ### [src/fleet-status.sh](../src/fleet-status.sh)
 
-`nops-fleet-status` iterates the deployment inventory and collects node status using `nops-node`.
+`nix-cluster-fleet-status` iterates the deployment inventory and collects node status using `nix-cluster-node`.
 
 It:
 
@@ -328,7 +328,7 @@ It:
 
 ### [src/fleet-watch.sh](../src/fleet-watch.sh)
 
-`nops-fleet-watch` repeatedly runs `nops-fleet-status --json`, normalizes the output, and prints changes over time.
+`nix-cluster-fleet-watch` repeatedly runs `nix-cluster-fleet-status --json`, normalizes the output, and prints changes over time.
 
 It is a polling watch utility, not a daemon.
 
@@ -342,16 +342,16 @@ The module in [flake.nix](../flake.nix) does three major things.
 
 It produces wrapped executables such as:
 
-- `nops-daemon`
-- `nops-webhook`
-- `nops-reporter`
-- `nops-monitor`
-- `nops-observe`
-- `nops-node`
-- `nops-fleet-status`
-- `nops-fleet-watch`
-- `nops-controller-heartbeat`
-- `nops-install`
+- `nix-cluster-daemon`
+- `nix-cluster-webhook`
+- `nix-cluster-reporter`
+- `nix-cluster-monitor`
+- `nix-cluster-observe`
+- `nix-cluster-node`
+- `nix-cluster-fleet-status`
+- `nix-cluster-fleet-watch`
+- `nix-cluster-controller-heartbeat`
+- `nix-cluster-install`
 
 ## 2. Declares NixOS options
 
@@ -381,7 +381,7 @@ It creates:
 ```mermaid
 flowchart TD
     A["flake.nix module options"] --> B["wrapped executables"]
-    A --> C["/etc/nops-runtime-config.json"]
+    A --> C["/etc/nix-cluster-runtime-config.json"]
     B --> D["systemd services"]
     C --> D
     D --> E["nix-cluster.service"]
@@ -442,7 +442,7 @@ sequenceDiagram
 
 ```mermaid
 flowchart TD
-    A["nops-install"] --> B["setup.sh"]
+    A["nix-cluster-install"] --> B["setup.sh"]
     B --> C["create service account and keys"]
     C --> D["clone or initialize fleet repo"]
     D --> E["render templates into nodes/groups/modules"]
@@ -459,7 +459,7 @@ flowchart TD
 If you want the shortest mental model, it is this:
 
 - `flake.nix` declares behavior.
-- That behavior becomes `/etc/nops-runtime-config.json`.
+- That behavior becomes `/etc/nix-cluster-runtime-config.json`.
 - Matrix and webhook listeners call `UpdateManager`.
 - `UpdateManager` decides whether to rebuild.
 - `ha.py` publishes and aggregates service health.
@@ -471,12 +471,12 @@ If you want the shortest mental model, it is this:
 
 | Command | Backing script | Purpose |
 |---|---|---|
-| `nops-install` | [src/setup.sh](../src/setup.sh) | Enroll or bootstrap a node |
-| `nops-observe` | [src/observe.sh](../src/observe.sh) | Inspect local node service state |
-| `nops-node` | [src/node-observe.sh](../src/node-observe.sh) | Inspect another node remotely |
-| `nops-fleet-status` | [src/fleet-status.sh](../src/fleet-status.sh) | Summarize remote node status across fleet |
-| `nops-fleet-watch` | [src/fleet-watch.sh](../src/fleet-watch.sh) | Poll and display changes in fleet status |
-| `nops-controller-heartbeat` | [src/controller-heartbeat.sh](../src/controller-heartbeat.sh) | Record controller reachability from workers |
+| `nix-cluster-install` | [src/setup.sh](../src/setup.sh) | Enroll or bootstrap a node |
+| `nix-cluster-observe` | [src/observe.sh](../src/observe.sh) | Inspect local node service state |
+| `nix-cluster-node` | [src/node-observe.sh](../src/node-observe.sh) | Inspect another node remotely |
+| `nix-cluster-fleet-status` | [src/fleet-status.sh](../src/fleet-status.sh) | Summarize remote node status across fleet |
+| `nix-cluster-fleet-watch` | [src/fleet-watch.sh](../src/fleet-watch.sh) | Poll and display changes in fleet status |
+| `nix-cluster-controller-heartbeat` | [src/controller-heartbeat.sh](../src/controller-heartbeat.sh) | Record controller reachability from workers |
 
 ---
 

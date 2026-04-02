@@ -1,18 +1,37 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-CONFIG_PATH="${NOPS_RUNTIME_CONFIG_PATH:-${NOPS_CONFIG_PATH:-/etc/nops-runtime-config.json}}"
-SOPS_KEY="${NOPS_SOPS_KEY_FILE:-/var/lib/sops-nix/key.txt}"
+resolve_runtime_config_path() {
+	local candidate
+	for candidate in \
+		"${NIX_CLUSTER_RUNTIME_CONFIG_PATH:-}" \
+		"${NIX_CLUSTER_CONFIG_PATH:-}" \
+		"${NOPS_RUNTIME_CONFIG_PATH:-}" \
+		"${NOPS_CONFIG_PATH:-}" \
+		"/etc/nix-cluster-runtime-config.json" \
+		"/etc/nops-runtime-config.json"
+	do
+		if [ -n "$candidate" ] && [ -r "$candidate" ]; then
+			printf '%s\n' "$candidate"
+			return 0
+		fi
+	done
+
+	printf '%s\n' "${NIX_CLUSTER_RUNTIME_CONFIG_PATH:-${NIX_CLUSTER_CONFIG_PATH:-${NOPS_RUNTIME_CONFIG_PATH:-${NOPS_CONFIG_PATH:-/etc/nix-cluster-runtime-config.json}}}}"
+}
+
+CONFIG_PATH="$(resolve_runtime_config_path)"
+SOPS_KEY="${NIX_CLUSTER_SOPS_KEY_FILE:-${NOPS_SOPS_KEY_FILE:-/var/lib/sops-nix/key.txt}}"
 
 usage() {
 	cat <<'EOF'
 Usage:
-	nops-fleet-status [--json] [hostname|ip ...]
+	nix-cluster-fleet-status [--json] [hostname|ip ...]
 
 Examples:
-	nops-fleet-status
-	nops-fleet-status node2 192.168.2.204
-	nops-fleet-status --json
+	nix-cluster-fleet-status
+	nix-cluster-fleet-status node2 192.168.2.204
+	nix-cluster-fleet-status --json
 EOF
 }
 
@@ -104,7 +123,7 @@ while IFS=$'\t' read -r hostname ip; do
 	fi
 
 	if [ "$json_output" = "true" ]; then
-		if remote_json=$(nops-node status "$ip" --json 2>/dev/null); then
+		if remote_json=$(nix-cluster-node status "$ip" --json 2>/dev/null); then
 			jq -n --arg hostname "$hostname" --arg ip "$ip" --argjson units "$remote_json" '{hostname: $hostname, ip: $ip, reachable: true, units: $units}' >> "$OUTPUT"
 		else
 			jq -n --arg hostname "$hostname" --arg ip "$ip" '{hostname: $hostname, ip: $ip, reachable: false, units: []}' >> "$OUTPUT"
@@ -113,7 +132,7 @@ while IFS=$'\t' read -r hostname ip; do
 	fi
 
 	echo "=== $hostname ($ip) ==="
-	if ! nops-node status "$ip"; then
+	if ! nix-cluster-node status "$ip"; then
 		echo "unreachable"
 	fi
 	echo

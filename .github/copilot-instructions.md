@@ -1,9 +1,9 @@
 # Copilot instructions for nix-cluster
 
 ## Project shape
-- `nops` is a GitOps deployment system for NixOS fleets.
+- `nix-cluster` is a GitOps deployment system for NixOS fleets.
 - The main control flow is: Matrix room message or webhook POST → `src/update.py` → `git fetch`/change detection → `nixos-rebuild`.
-- `flake.nix` packages the daemons (`nops-daemon`, `nops-webhook`) and exposes `nops-install`/`nops-deploy` apps.
+- `flake.nix` packages the daemons (`nix-cluster-daemon`, `nix-cluster-webhook`) and exposes `nix-cluster-install`/`nix-cluster-deploy` apps while keeping legacy `nops-*` aliases.
 - The deployed systemd service name is `nix-cluster`; use `nix-cluster.service` in operational docs and troubleshooting steps.
 
 ## Read first
@@ -22,18 +22,18 @@
 - Changes to other nodes’ directories are ignored on workers.
 - Controllers always run their `controllerScript` before rebuilding.
 - Workers sleep 30s before rechecking the repo to let controller secret commits land.
-- Webhook commits containing `[skip nops]` are intentionally ignored to prevent loops.
+- Webhook commits containing `[skip nix-cluster]` are intentionally ignored to prevent loops. Legacy `[skip nops]` is still accepted for compatibility.
 
 ## Configuration conventions
 - Keep placeholder names stable: `HOST_ID_PLACEHOLDER`, `IS_CONTROLLER_PLACEHOLDER`, `MATRIX_ENABLE_PLACEHOLDER`, `WEBHOOK_ENABLE_PLACEHOLDER`, `ALLOW_UNFREE_PLACEHOLDER`, `FORGEJO_CONFIG_PLACEHOLDER`, `CLOUDFLARE_CONTROLLER_SCRIPT_PLACEHOLDER`, and `# NODES_MARKER`.
 - `templates/flake.nix` uses `# NODES_MARKER`; `src/setup.sh` inserts `nixosConfigurations.<hostname>` there.
 - `templates/configuration.nix` is hydrated with `sed`; avoid structural edits that break those substitutions.
-- Secrets are managed with SOPS and Age via `sops-nix`; bootstrap files like `deployments.json` and `nops-config-template.json` may be encrypted at rest.
+- Secrets are managed with SOPS and Age via `sops-nix`; bootstrap files like `deployments.json` and `nix-cluster-config-template.json` may be encrypted at rest.
 
 ## Bootstrap and integrations
 - `src/setup.sh` handles both interactive and `--config <file.json>` enrollment.
 - Bootstrap mode can create local Forgejo, wire Caddy, keepalived, and Cloudflare tunnel support, then restore the remote Git URL afterward.
-- Cloudflare tunnel commits are pushed with `[skip nops]` after token updates.
+- Cloudflare tunnel commits are pushed with `[skip nix-cluster]` after token updates.
 - Keepalived VRIDs must stay unique per subnet; the script derives a VIP CIDR when possible.
 
 ## Useful commands

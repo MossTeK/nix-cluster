@@ -20,10 +20,18 @@ EOF
 }
 
 print_runtime_summary() {
-  if [[ -f /etc/nops-runtime-config.json ]]; then
-    python3 - <<'PY'
+  local runtime_config=""
+  if [[ -f /etc/nix-cluster-runtime-config.json ]]; then
+    runtime_config="/etc/nix-cluster-runtime-config.json"
+  elif [[ -f /etc/nops-runtime-config.json ]]; then
+    runtime_config="/etc/nops-runtime-config.json"
+  fi
+
+  if [[ -n "$runtime_config" ]]; then
+    RUNTIME_CONFIG_PATH="$runtime_config" python3 - <<'PY'
 import json
-p = "/etc/nops-runtime-config.json"
+import os
+p = os.environ["RUNTIME_CONFIG_PATH"]
 with open(p, "r", encoding="utf-8") as f:
     data = json.load(f)
 print("hostname:", data.get("hostname"))
@@ -38,7 +46,7 @@ print("reporting:", data.get("ha", {}).get("reporting"))
 print("scheduler:", data.get("ha", {}).get("scheduler"))
 PY
   else
-    echo "MISSING /etc/nops-runtime-config.json"
+    echo "MISSING /etc/nix-cluster-runtime-config.json"
   fi
 }
 
@@ -51,10 +59,15 @@ print_path_state() {
     /home/nix-cluster/log \
     /home/nops \
     /home/nops/homelab-fleet \
+    /var/lib/nix-cluster \
+    /var/lib/nix-cluster/ha \
+    /var/lib/nix-cluster/metrics \
+    /var/lib/nix-cluster-heartbeat \
     /var/lib/nops \
     /var/lib/nops/ha \
     /var/lib/nops/metrics \
     /var/lib/nops-heartbeat \
+    /etc/nix-cluster-runtime-config.json \
     /etc/nops-runtime-config.json
   do
     if [[ -e "$p" ]]; then
@@ -129,8 +142,8 @@ collect_local() {
 
   echo
   echo "--- ha files ---"
-  ls -lah /var/lib/nops/ha 2>/dev/null || true
-  ls -lah /var/lib/nops/metrics 2>/dev/null || true
+  ls -lah /var/lib/nix-cluster/ha 2>/dev/null || ls -lah /var/lib/nops/ha 2>/dev/null || true
+  ls -lah /var/lib/nix-cluster/metrics 2>/dev/null || ls -lah /var/lib/nops/metrics 2>/dev/null || true
 
   echo
   echo "--- metrics grep ---"

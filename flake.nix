@@ -14,7 +14,7 @@
     pythonEnv = pkgs.python3.withPackages pythonDeps;
   in {
     packages.${system} = {
-      # Package definition for nops daemons.
+      # Package definition for nix-cluster daemons.
       # Compiles the Python-based Matrix listener and Webhook server into wrapped executables.
       default = pkgs.stdenv.mkDerivation {
         pname = "nix-cluster";
@@ -27,57 +27,67 @@
         '';
 
         installPhase = ''
-          mkdir -p $out/bin $out/lib $out/share/nops
+          mkdir -p $out/bin $out/lib $out/share/nix-cluster
           cp -r src/* $out/lib/
-          cp -r templates $out/share/nops/templates
+          cp -r templates $out/share/nix-cluster/templates
           
           # Wraps the Matrix daemon with required binaries for fleet operations.
           # Injects git, nixos-rebuild, and secret management tools into the execution environment.
-          makeWrapper ${pythonEnv}/bin/python3 $out/bin/nops-daemon \
+          makeWrapper ${pythonEnv}/bin/python3 $out/bin/nix-cluster-daemon \
             --add-flags "$out/lib/nix_cluster/listener.py" \
             --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.git pkgs.inetutils pkgs.nixos-rebuild pkgs.systemd pkgs.bash pkgs.sops pkgs.age pkgs.jq pkgs.openssh pkgs.sshpass pkgs.mkpasswd ]}
 
           # Wraps the Webhook server with required binaries for fleet operations.
           # Injects git, nixos-rebuild, and secret management tools into the execution environment.
-          makeWrapper ${pythonEnv}/bin/python3 $out/bin/nops-webhook \
+          makeWrapper ${pythonEnv}/bin/python3 $out/bin/nix-cluster-webhook \
             --add-flags "$out/lib/nix_cluster/webhook.py" \
             --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.git pkgs.inetutils pkgs.nixos-rebuild pkgs.systemd pkgs.bash pkgs.sops pkgs.age pkgs.jq pkgs.openssh pkgs.sshpass pkgs.mkpasswd ]}
 
-          makeWrapper ${pkgs.bash}/bin/bash $out/bin/nops-observe \
+          makeWrapper ${pkgs.bash}/bin/bash $out/bin/nix-cluster-observe \
             --add-flags "$out/lib/observe.sh" \
             --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.systemd pkgs.jq pkgs.bash ]}
 
-          makeWrapper ${pkgs.bash}/bin/bash $out/bin/nops-node \
+          makeWrapper ${pkgs.bash}/bin/bash $out/bin/nix-cluster-node \
             --add-flags "$out/lib/node-observe.sh" \
             --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.openssh pkgs.sshpass pkgs.sops pkgs.age pkgs.jq pkgs.bash ]}
 
-          makeWrapper ${pkgs.bash}/bin/bash $out/bin/nops-fleet-status \
+          makeWrapper ${pkgs.bash}/bin/bash $out/bin/nix-cluster-fleet-status \
             --add-flags "$out/lib/fleet-status.sh" \
             --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.sops pkgs.age pkgs.jq pkgs.openssh pkgs.bash ]}
 
-          makeWrapper ${pkgs.bash}/bin/bash $out/bin/nops-fleet-watch \
+          makeWrapper ${pkgs.bash}/bin/bash $out/bin/nix-cluster-fleet-watch \
             --add-flags "$out/lib/fleet-watch.sh" \
             --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.jq pkgs.coreutils pkgs.bash ]}
 
-          makeWrapper ${pkgs.bash}/bin/bash $out/bin/nops-controller-heartbeat \
+          makeWrapper ${pkgs.bash}/bin/bash $out/bin/nix-cluster-controller-heartbeat \
             --add-flags "$out/lib/controller-heartbeat.sh" \
             --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.iputils pkgs.inetutils pkgs.systemd pkgs.jq pkgs.coreutils pkgs.bash ]}
 
-          makeWrapper ${pythonEnv}/bin/python3 $out/bin/nops-reporter \
+          makeWrapper ${pythonEnv}/bin/python3 $out/bin/nix-cluster-reporter \
             --add-flags "$out/lib/nix_cluster/ha.py" \
             --add-flags "reporter" \
             --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.systemd pkgs.coreutils pkgs.bash ]}
 
-          makeWrapper ${pythonEnv}/bin/python3 $out/bin/nops-monitor \
+          makeWrapper ${pythonEnv}/bin/python3 $out/bin/nix-cluster-monitor \
             --add-flags "$out/lib/nix_cluster/ha.py" \
             --add-flags "monitor" \
             --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.systemd pkgs.coreutils pkgs.bash ]}
+
+          ln -s nix-cluster-daemon $out/bin/nops-daemon
+          ln -s nix-cluster-webhook $out/bin/nops-webhook
+          ln -s nix-cluster-observe $out/bin/nops-observe
+          ln -s nix-cluster-node $out/bin/nops-node
+          ln -s nix-cluster-fleet-status $out/bin/nops-fleet-status
+          ln -s nix-cluster-fleet-watch $out/bin/nops-fleet-watch
+          ln -s nix-cluster-controller-heartbeat $out/bin/nops-controller-heartbeat
+          ln -s nix-cluster-reporter $out/bin/nops-reporter
+          ln -s nix-cluster-monitor $out/bin/nops-monitor
         '';
       };
 
-      # Builds nops-install, an interactive CLI that scaffolds a new node's flake and SOPS secrets file.
+      # Builds nix-cluster-install, an interactive CLI that scaffolds a new node's flake and SOPS secrets file.
       install = pkgs.stdenv.mkDerivation {
-        name = "nops-install";
+        name = "nix-cluster-install";
         src = ./.;
         nativeBuildInputs = [ pkgs.makeWrapper pkgs.dos2unix ];
         
@@ -87,28 +97,33 @@
         '';
 
         installPhase = ''
-          mkdir -p $out/share/nops/src $out/bin
-          cp src/setup.sh $out/share/nops/src/setup.sh
-          cp src/deploy.sh $out/share/nops/src/deploy.sh 2>/dev/null || true
-          cp -r src/lib $out/share/nops/src/lib 2>/dev/null || true
-          chmod +x $out/share/nops/src/*.sh
-          cp -r templates $out/share/nops/templates
+          mkdir -p $out/share/nix-cluster/src $out/bin
+          cp src/setup.sh $out/share/nix-cluster/src/setup.sh
+          cp src/deploy.sh $out/share/nix-cluster/src/deploy.sh 2>/dev/null || true
+          cp -r src/lib $out/share/nix-cluster/src/lib 2>/dev/null || true
+          chmod +x $out/share/nix-cluster/src/*.sh
+          cp -r templates $out/share/nix-cluster/templates
 
-          makeWrapper ${pkgs.bash}/bin/bash $out/bin/nops-install \
-            --add-flags "$out/share/nops/src/setup.sh" \
-            --set NOPS_TEMPLATES_DIR "$out/share/nops/templates" \
-            --set NOPS_SRC_DIR "$out/share/nops/src" \
+          makeWrapper ${pkgs.bash}/bin/bash $out/bin/nix-cluster-install \
+            --add-flags "$out/share/nix-cluster/src/setup.sh" \
+            --set NIX_CLUSTER_TEMPLATES_DIR "$out/share/nix-cluster/templates" \
+            --set NIX_CLUSTER_SRC_DIR "$out/share/nix-cluster/src" \
+            --set NOPS_TEMPLATES_DIR "$out/share/nix-cluster/templates" \
+            --set NOPS_SRC_DIR "$out/share/nix-cluster/src" \
             --prefix PATH : ${pkgs.lib.makeBinPath [ 
               pkgs.git pkgs.sops pkgs.age pkgs.vim pkgs.nano pkgs.openssh 
               pkgs.util-linux pkgs.nixos-rebuild pkgs.inetutils 
-              pkgs.systemd pkgs.jq 
+              pkgs.systemd pkgs.jq pkgs.mkpasswd
             ]}
 
-          makeWrapper ${pkgs.bash}/bin/bash $out/bin/nops-deploy \
-            --add-flags "$out/share/nops/src/deploy.sh" \
+          makeWrapper ${pkgs.bash}/bin/bash $out/bin/nix-cluster-deploy \
+            --add-flags "$out/share/nix-cluster/src/deploy.sh" \
             --prefix PATH : ${pkgs.lib.makeBinPath [ 
               pkgs.git pkgs.openssh pkgs.nix pkgs.mkpasswd
             ]}
+
+          ln -s nix-cluster-install $out/bin/nops-install
+          ln -s nix-cluster-deploy $out/bin/nops-deploy
         '';
       };
     };
@@ -143,7 +158,7 @@
         ++ cfg.observability.extraTrackedUnits
       );
       # Serializes repo path and rebuild commands to a JSON file the Python daemon reads at startup.
-    nopsConfig = pkgs.writeText "nops-config.json" (builtins.toJSON {
+    nixClusterConfig = pkgs.writeText "nix-cluster-config.json" (builtins.toJSON {
       is_controller = cfg.isController;
       hostname = config.networking.hostName;
       # AUTOMATIC SANITIZATION: Strip \r from the controller script
@@ -292,27 +307,27 @@
           };
           stateDir = lib.mkOption {
             type = lib.types.str;
-            default = "/var/lib/nops";
+            default = "/var/lib/nix-cluster";
             description = "State directory used for runtime snapshots and HA data.";
           };
           metricsDir = lib.mkOption {
             type = lib.types.str;
-            default = "/var/lib/nops/metrics";
+            default = "/var/lib/nix-cluster/metrics";
             description = "Directory used for Prometheus textfile metrics.";
           };
           heartbeatStateDir = lib.mkOption {
             type = lib.types.str;
-            default = "/var/lib/nops-heartbeat";
+            default = "/var/lib/nix-cluster-heartbeat";
             description = "Directory used by the worker controller-heartbeat timer.";
           };
           runtimeConfigPath = lib.mkOption {
             type = lib.types.str;
-            default = "/etc/nops-runtime-config.json";
+            default = "/etc/nix-cluster-runtime-config.json";
             description = "Path to the generated runtime configuration JSON consumed by the nix-cluster daemons.";
           };
           controllerScriptDir = lib.mkOption {
             type = lib.types.str;
-            default = "/var/lib/nops";
+            default = "/var/lib/nix-cluster";
             description = "Directory where the controller hook script is materialized before execution.";
           };
         };
@@ -575,6 +590,11 @@
               default = false;
               description = "Enable controller-hosted PXE assets.";
             };
+            authorizedKeys = lib.mkOption {
+              type = lib.types.listOf lib.types.str;
+              default = [];
+              description = "SSH public keys baked into the PXE live environment for key-only installer access.";
+            };
             dhcpEnable = lib.mkOption {
               type = lib.types.bool;
               default = false;
@@ -642,7 +662,7 @@
           };
           skipCommitMarker = lib.mkOption {
             type = lib.types.str;
-            default = "[skip nops]";
+            default = "[skip nix-cluster]";
             description = "Commit message marker that causes webhook-triggered updates to be ignored.";
           };
         };
@@ -697,7 +717,7 @@
             chown -R ${serviceUser}:${serviceGroup} ${repoPathString} 2>/dev/null || true
           fi
         '';
-        environment.etc.${runtimeConfigEtcPath}.source = nopsConfig;
+        environment.etc.${runtimeConfigEtcPath}.source = nixClusterConfig;
         systemd.tmpfiles.rules = [
           "d ${cfg.paths.logDir} 0755 ${serviceUser} ${serviceGroup} -"
           "d ${cfg.paths.stateDir} 0755 ${serviceUser} ${serviceGroup} -"
@@ -802,6 +822,8 @@
           };
           
           environment = {
+            NIX_CLUSTER_CONFIG_PATH = cfg.paths.runtimeConfigPath;
+            NIX_CLUSTER_LOG_PATH = serviceLogFile;
             NOPS_CONFIG_PATH = cfg.paths.runtimeConfigPath;
             NOPS_LOG_PATH = serviceLogFile;
             MATRIX_BOT_TOKEN_FILE = config.sops.secrets.matrix_bot_token.path;
@@ -836,19 +858,19 @@
                export MATRIX_BOT_TOKEN=$(cat $MATRIX_BOT_TOKEN_FILE)
                export MATRIX_ROOM_ID=$(cat $MATRIX_ROOM_ID_FILE)
                export MATRIX_HOMESERVER=$(cat $MATRIX_HOMESERVER_FILE)
-               ${self.packages.${system}.default}/bin/nops-daemon &
+               ${self.packages.${system}.default}/bin/nix-cluster-daemon &
              fi
 
              if [ "${builtins.toString cfg.webhook.enable}" = "1" ]; then
-               ${self.packages.${system}.default}/bin/nops-webhook &
+               ${self.packages.${system}.default}/bin/nix-cluster-webhook &
              fi
 
              if [ "${builtins.toString (cfg.ha.enable && cfg.ha.reporting.enable)}" = "1" ]; then
-               ${self.packages.${system}.default}/bin/nops-reporter &
+               ${self.packages.${system}.default}/bin/nix-cluster-reporter &
              fi
 
              if [ "${builtins.toString (cfg.isController && cfg.ha.enable && cfg.ha.scheduler.enable && cfg.ha.runtimeStore.type == "etcd" && cfg.ha.runtimeStore.endpoint != "")}" = "1" ]; then
-               ${self.packages.${system}.default}/bin/nops-monitor &
+               ${self.packages.${system}.default}/bin/nix-cluster-monitor &
              fi
              
              wait -n
@@ -865,11 +887,13 @@
             Group = serviceGroup;
           };
           environment = {
+            NIX_CLUSTER_RUNTIME_CONFIG_PATH = cfg.paths.runtimeConfigPath;
+            NIX_CLUSTER_HEARTBEAT_STATE_DIR = cfg.paths.heartbeatStateDir;
             NOPS_RUNTIME_CONFIG_PATH = cfg.paths.runtimeConfigPath;
             NOPS_HEARTBEAT_STATE_DIR = cfg.paths.heartbeatStateDir;
           };
           script = ''
-            exec ${self.packages.${system}.default}/bin/nops-controller-heartbeat
+            exec ${self.packages.${system}.default}/bin/nix-cluster-controller-heartbeat
           '';
         };
 
@@ -885,15 +909,15 @@
       };
     };
 
-    # Exposes nops commands as runnable Nix apps.
+    # Exposes nix-cluster commands as runnable Nix apps.
     apps.${system} = {
       install = { 
         type = "app"; 
-        program = "${self.packages.${system}.install}/bin/nops-install"; 
+        program = "${self.packages.${system}.install}/bin/nix-cluster-install"; 
       };
       deploy = { 
         type = "app"; 
-        program = "${self.packages.${system}.install}/bin/nops-deploy"; 
+        program = "${self.packages.${system}.install}/bin/nix-cluster-deploy"; 
       };
     };
   };

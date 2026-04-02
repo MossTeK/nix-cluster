@@ -5,7 +5,8 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
-DEFAULT_CONFIG_PATH = "/etc/nops-runtime-config.json"
+DEFAULT_CONFIG_PATH = "/etc/nix-cluster-runtime-config.json"
+LEGACY_CONFIG_PATH = "/etc/nops-runtime-config.json"
 
 
 def _as_list(raw: Any) -> list[str]:
@@ -27,6 +28,20 @@ def _as_int(raw: Any, default: int) -> int:
     if raw is None:
         return default
     return int(raw)
+
+
+def _resolve_config_path(path: str | None) -> str:
+    candidates = [
+        path,
+        os.environ.get("NIX_CLUSTER_CONFIG_PATH"),
+        os.environ.get("NOPS_CONFIG_PATH"),
+        DEFAULT_CONFIG_PATH,
+        LEGACY_CONFIG_PATH,
+    ]
+    for candidate in candidates:
+        if candidate and os.path.exists(candidate):
+            return candidate
+    return path or os.environ.get("NIX_CLUSTER_CONFIG_PATH") or os.environ.get("NOPS_CONFIG_PATH") or DEFAULT_CONFIG_PATH
 
 
 @dataclass(slots=True)
@@ -160,7 +175,7 @@ class RuntimeConfig:
 
     @classmethod
     def from_path(cls, path: str | None = None) -> "RuntimeConfig":
-        resolved = path or os.environ.get("NOPS_CONFIG_PATH", DEFAULT_CONFIG_PATH)
+        resolved = _resolve_config_path(path)
         with open(resolved, "r", encoding="utf-8") as handle:
             raw = json.load(handle)
         return cls.from_raw(resolved, raw)
@@ -185,11 +200,11 @@ class RuntimeConfig:
         directories = DirectorySettings(
             repo=str(directories_raw.get("repo", "")),
             log=str(directories_raw.get("log", "/home/nix-cluster/log")),
-            state=str(directories_raw.get("state", "/var/lib/nops")),
-            metrics=str(directories_raw.get("metrics", "/var/lib/nops/metrics")),
-            heartbeat=str(directories_raw.get("heartbeat", "/var/lib/nops-heartbeat")),
+            state=str(directories_raw.get("state", "/var/lib/nix-cluster")),
+            metrics=str(directories_raw.get("metrics", "/var/lib/nix-cluster/metrics")),
+            heartbeat=str(directories_raw.get("heartbeat", "/var/lib/nix-cluster-heartbeat")),
             runtime_config=str(directories_raw.get("runtime_config", path)),
-            controller_script_dir=str(directories_raw.get("controller_script_dir", "/var/lib/nops")),
+            controller_script_dir=str(directories_raw.get("controller_script_dir", "/var/lib/nix-cluster")),
         )
 
         update = UpdateSettings(
@@ -265,7 +280,7 @@ class RuntimeConfig:
             port=_as_int(webhook_raw.get("port"), 8080),
             ssl_cert=str(webhook_raw.get("ssl_cert", "")),
             ssl_key=str(webhook_raw.get("ssl_key", "")),
-            skip_commit_marker=str(webhook_raw.get("skip_commit_marker", "[skip nops]")),
+            skip_commit_marker=str(webhook_raw.get("skip_commit_marker", "[skip nix-cluster]")),
         )
 
         return cls(

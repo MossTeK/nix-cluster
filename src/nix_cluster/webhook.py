@@ -13,7 +13,7 @@ from .update import UpdateManager
 
 class WebhookServer:
     def __init__(self, config_path: str, log_file: str):
-        self.logger = configure_logging("nops-webhook", log_file=log_file)
+        self.logger = configure_logging("nix-cluster-webhook", log_file=log_file)
         self.updater = UpdateManager(config_path)
         self.config = self.updater.runtime_config
 
@@ -45,18 +45,20 @@ class WebhookServer:
             trigger_id = payload.get("after", "webhook-push")
             if payload.get("commits"):
                 commit_msg = payload["commits"][0].get("message", "")
-                if self.config.webhook.skip_commit_marker in commit_msg:
-                    self.logger.info("DETECTED '%s' IN COMMIT. IGNORING WEBHOOK.", self.config.webhook.skip_commit_marker)
+                skip_markers = [self.config.webhook.skip_commit_marker, "[skip nix-cluster]", "[skip nops]"]
+                matched_marker = next((marker for marker in skip_markers if marker and marker in commit_msg), None)
+                if matched_marker is not None:
+                    self.logger.info("DETECTED '%s' IN COMMIT. IGNORING WEBHOOK.", matched_marker)
                     return web.Response(text="Ignored due to skip flag.\n", status=200)
         except Exception:
             trigger_id = "webhook-push"
 
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, self.updater.perform_update, trigger_id)
-        return web.Response(text="Nops Update Triggered successfully.\n")
+        return web.Response(text="nix-cluster update triggered successfully.\n")
 
     async def init_app(self) -> web.Application:
-        self.logger.info("INITIALIZING NOPS-WEBHOOK...")
+        self.logger.info("INITIALIZING NIX-CLUSTER-WEBHOOK...")
         try:
             self.updater.run_boot_sequence()
         except Exception as error:
@@ -70,8 +72,12 @@ class WebhookServer:
 
 
 def main() -> None:
-    config_path = os.environ.get("NOPS_CONFIG_PATH", "")
-    log_file = os.environ.get("NOPS_LOG_PATH", "/home/nix-cluster/log/main.log")
+    config_path = (
+        os.environ.get("NIX_CLUSTER_CONFIG_PATH")
+        or os.environ.get("NOPS_CONFIG_PATH")
+        or ("/etc/nix-cluster-runtime-config.json" if os.path.exists("/etc/nix-cluster-runtime-config.json") else "/etc/nops-runtime-config.json")
+    )
+    log_file = os.environ.get("NIX_CLUSTER_LOG_PATH", os.environ.get("NOPS_LOG_PATH", "/home/nix-cluster/log/main.log"))
     server = WebhookServer(config_path, log_file)
 
     ssl_context = None
@@ -79,9 +85,9 @@ def main() -> None:
         server.logger.info("CONFIGURING SSL WITH CERT: %s", server.config.webhook.ssl_cert)
         ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
         ssl_context.load_cert_chain(certfile=server.config.webhook.ssl_cert, keyfile=server.config.webhook.ssl_key)
-        server.logger.info("STARTING NOPS-WEBHOOK ON %s:%s WITH SSL", server.config.webhook.bind_address, server.config.webhook.port)
+        server.logger.info("STARTING NIX-CLUSTER-WEBHOOK ON %s:%s WITH SSL", server.config.webhook.bind_address, server.config.webhook.port)
     else:
-        server.logger.info("STARTING NOPS-WEBHOOK ON %s:%s (HTTP ONLY)", server.config.webhook.bind_address, server.config.webhook.port)
+        server.logger.info("STARTING NIX-CLUSTER-WEBHOOK ON %s:%s (HTTP ONLY)", server.config.webhook.bind_address, server.config.webhook.port)
 
     web.run_app(
         server.init_app(),

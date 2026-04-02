@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
 
-if [ -n "${NOPS_INSTALL_CONFIG_HELPER_LOADED:-}" ]; then
+if [ -n "${NIX_CLUSTER_INSTALL_CONFIG_HELPER_LOADED:-}" ]; then
   return 0
 fi
-NOPS_INSTALL_CONFIG_HELPER_LOADED=1
+NIX_CLUSTER_INSTALL_CONFIG_HELPER_LOADED=1
 
-declare -ag NOPS_INSTALL_OVERRIDE_KEYS=()
-declare -Ag NOPS_INSTALL_OVERRIDE_VALUES=()
+declare -ag NIX_CLUSTER_INSTALL_OVERRIDE_KEYS=()
+declare -Ag NIX_CLUSTER_INSTALL_OVERRIDE_VALUES=()
 
-nops_escape_sed() {
+nix_cluster_escape_sed() {
   printf '%s' "$1" | sed 's/[\/&]/\\&/g'
 }
 
 normalize_install_override_key() {
   case "$1" in
-    bootstrap_mode|is_controller|node_role|keepalived_role|git_user|git_token|repo_url|nix_cluster_repo_url|nops_repo_url|nixos_install_repo_url|repo_host_ip|node_group|node_admin|node_admin_pass|node_ssh_pub_key|installer_auth_mode|installer_ssh_pub_key|trigger_choice|fleet_private_key|matrix_bot_token|matrix_room_id|matrix_homeserver|webhook_secret|cloudflare_api_token|forgejo_public_host|custom_group_config|custom_group_imports|custom_node_config|custom_node_imports)
+    bootstrap_mode|is_controller|node_role|keepalived_role|git_user|git_token|repo_url|nix_cluster_repo_url|nops_repo_url|nixos_install_repo_url|repo_host_ip|node_group|node_admin|node_admin_pass|node_admin_password_hash|node_ssh_pub_key|installer_auth_mode|installer_ssh_pub_key|ssh_password_auth|trigger_choice|fleet_private_key|matrix_bot_token|matrix_room_id|matrix_homeserver|webhook_secret|cloudflare_api_token|forgejo_public_host|custom_group_config|custom_group_imports|custom_node_config|custom_node_imports)
       printf '%s\n' "$1"
       ;;
     caddy_enable|modules.caddy.enable)
@@ -87,10 +87,10 @@ add_install_override() {
     exit 1
   fi
 
-  if [ -z "${NOPS_INSTALL_OVERRIDE_VALUES[$key]+x}" ]; then
-    NOPS_INSTALL_OVERRIDE_KEYS+=("$key")
+  if [ -z "${NIX_CLUSTER_INSTALL_OVERRIDE_VALUES[$key]+x}" ]; then
+    NIX_CLUSTER_INSTALL_OVERRIDE_KEYS+=("$key")
   fi
-  NOPS_INSTALL_OVERRIDE_VALUES[$key]="$value"
+  NIX_CLUSTER_INSTALL_OVERRIDE_VALUES[$key]="$value"
 }
 
 parse_install_cli_args() {
@@ -130,8 +130,8 @@ parse_install_cli_args() {
 
 apply_install_overrides() {
   local key value
-  for key in "${NOPS_INSTALL_OVERRIDE_KEYS[@]}"; do
-    value="${NOPS_INSTALL_OVERRIDE_VALUES[$key]}"
+  for key in "${NIX_CLUSTER_INSTALL_OVERRIDE_KEYS[@]}"; do
+    value="${NIX_CLUSTER_INSTALL_OVERRIDE_VALUES[$key]}"
     case "$key" in
       bootstrap_mode) IS_BOOTSTRAP="$value" ;;
       is_controller) IS_CONTROLLER="$value" ;;
@@ -146,9 +146,11 @@ apply_install_overrides() {
       node_group) NODE_GROUP="$value" ;;
       node_admin) NODE_ADMIN="$value" ;;
       node_admin_pass) NODE_ADMIN_PASS="$value" ;;
+      node_admin_password_hash) NODE_ADMIN_PASSWORD_HASH="$value" ;;
       node_ssh_pub_key) NODE_SSH_PUB_KEY="$value" ;;
       installer_auth_mode) INSTALLER_AUTH_MODE="$value" ;;
       installer_ssh_pub_key) INSTALLER_SSH_PUB_KEY="$value" ;;
+      ssh_password_auth) SSH_PASSWORD_AUTH="$value" ;;
       trigger_choice) TRIGGER_CHOICE="$value" ;;
       fleet_private_key) FLEET_PRIVATE_KEY="$value" ;;
       matrix_bot_token) MATRIX_BOT_TOKEN="$value" ;;

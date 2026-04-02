@@ -20,7 +20,7 @@ flowchart LR
     subgraph Config
         A["services.nix-cluster.*"]
         B["flake.nix module"]
-        C["/etc/nops-runtime-config.json"]
+        C["/etc/nix-cluster-runtime-config.json"]
     end
 
     subgraph Triggers
@@ -82,7 +82,7 @@ These options define:
 
 The module writes a normalized runtime JSON file at:
 
-- `/etc/nops-runtime-config.json`
+- `/etc/nix-cluster-runtime-config.json`
 
 This file becomes the operational contract between Nix and the runtime.
 
@@ -229,8 +229,8 @@ It:
 ```mermaid
 flowchart LR
     A["systemd units"] --> B["ServiceReporter"]
-    B --> C["/var/lib/nops/ha/service-health.json"]
-    B --> D["/var/lib/nops/metrics/service-health.prom"]
+    B --> C["/var/lib/nix-cluster/ha/service-health.json"]
+    B --> D["/var/lib/nix-cluster/metrics/service-health.prom"]
     B --> E["/nix-cluster/health/... in etcd"]
 ```
 
@@ -254,8 +254,8 @@ flowchart LR
     B --> C["group reports by service"]
     C --> D["mark stale/unhealthy/healthy"]
     D --> E["choose recommended target"]
-    E --> F["/var/lib/nops/ha/cluster-state.json"]
-    E --> G["/var/lib/nops/metrics/cluster-state.prom"]
+    E --> F["/var/lib/nix-cluster/ha/cluster-state.json"]
+    E --> G["/var/lib/nix-cluster/metrics/cluster-state.prom"]
 ```
 
 ---
@@ -296,7 +296,7 @@ It performs:
 
 ```mermaid
 flowchart TD
-    A["nops-install"] --> B["setup.sh"]
+    A["nix-cluster-install"] --> B["setup.sh"]
     B --> C["parse CLI or JSON config"]
     C --> D["prepare nix-cluster account and keys"]
     D --> E["clone or initialize fleet repo"]
@@ -313,12 +313,12 @@ flowchart TD
 
 | Tool | Purpose |
 |---|---|
-| `nops-install` | Bootstrap or enroll a node |
-| `nops-observe` | Inspect local service state and journals |
-| `nops-node` | Run observability commands on remote nodes |
-| `nops-fleet-status` | Collect fleet-wide node state |
-| `nops-fleet-watch` | Poll fleet state and display changes |
-| `nops-controller-heartbeat` | Record worker->controller reachability |
+| `nix-cluster-install` | Bootstrap or enroll a node |
+| `nix-cluster-observe` | Inspect local service state and journals |
+| `nix-cluster-node` | Run observability commands on remote nodes |
+| `nix-cluster-fleet-status` | Collect fleet-wide node state |
+| `nix-cluster-fleet-watch` | Poll fleet state and display changes |
+| `nix-cluster-controller-heartbeat` | Record worker->controller reachability |
 
 ---
 

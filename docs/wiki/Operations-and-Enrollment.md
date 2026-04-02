@@ -10,7 +10,7 @@ This page explains what each operational script does and how the installer/enrol
 
 ## Operational shell commands
 
-## `nops-observe`
+## `nix-cluster-observe`
 
 Backing script:
 
@@ -29,7 +29,7 @@ Capabilities:
 
 If no units are provided, it uses tracked units from runtime config.
 
-## `nops-node`
+## `nix-cluster-node`
 
 Backing script:
 
@@ -37,7 +37,7 @@ Backing script:
 
 Purpose:
 
-- run `nops-observe` remotely on another node
+- run `nix-cluster-observe` remotely on another node
 
 Behavior:
 
@@ -45,7 +45,7 @@ Behavior:
 - can consult deployment inventory for fallback credentials
 - executes the remote command through `sudo`
 
-## `nops-fleet-status`
+## `nix-cluster-fleet-status`
 
 Backing script:
 
@@ -62,7 +62,7 @@ Behavior:
 - iterates remote nodes
 - emits human-readable or JSON output
 
-## `nops-fleet-watch`
+## `nix-cluster-fleet-watch`
 
 Backing script:
 
@@ -75,7 +75,7 @@ Purpose:
 
 It is a watch tool, not a daemon.
 
-## `nops-controller-heartbeat`
+## `nix-cluster-controller-heartbeat`
 
 Backing script:
 
@@ -92,7 +92,7 @@ Behavior:
 - writes JSON state
 - emits a journal event when reachability changes
 
-## `nops-deploy`
+## `nix-cluster-deploy`
 
 Backing script:
 
@@ -110,7 +110,7 @@ It is not part of the normal modern workflow.
 
 The installer entrypoint is:
 
-- `nops-install`
+- `nix-cluster-install`
 
 Backed by:
 
@@ -148,7 +148,7 @@ It provides:
 ```mermaid
 sequenceDiagram
     participant User as Operator
-    participant Install as nops-install
+    participant Install as nix-cluster-install
     participant Setup as setup.sh
     participant Repo as fleet repo
     participant SOPS as sops/age

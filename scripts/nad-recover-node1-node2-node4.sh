@@ -159,10 +159,10 @@ ensure_runtime_dirs() {
   sudo_run install -d -o nix-cluster -g nix-cluster -m 0755 /home/nix-cluster
   sudo_run install -d -o nix-cluster -g nix-cluster -m 0700 /home/nix-cluster/.ssh
   sudo_run install -d -o nix-cluster -g nix-cluster -m 0755 /home/nix-cluster/log
-  sudo_run install -d -o nix-cluster -g nix-cluster -m 0755 /var/lib/nops
-  sudo_run install -d -o nix-cluster -g nix-cluster -m 0755 /var/lib/nops/ha
-  sudo_run install -d -o nix-cluster -g nix-cluster -m 0755 /var/lib/nops/metrics
-  sudo_run install -d -o nix-cluster -g nix-cluster -m 0755 /var/lib/nops-heartbeat
+  sudo_run install -d -o nix-cluster -g nix-cluster -m 0755 /var/lib/nix-cluster
+  sudo_run install -d -o nix-cluster -g nix-cluster -m 0755 /var/lib/nix-cluster/ha
+  sudo_run install -d -o nix-cluster -g nix-cluster -m 0755 /var/lib/nix-cluster/metrics
+  sudo_run install -d -o nix-cluster -g nix-cluster -m 0755 /var/lib/nix-cluster-heartbeat
 }
 
 install_service_repo_from_stage() {
@@ -196,7 +196,7 @@ repair_node1() {
   install_service_repo_from_stage
 
   sudo_run chown -R nix-cluster:nix-cluster /home/nix-cluster
-  sudo_run chown -R nix-cluster:nix-cluster /var/lib/nops /var/lib/nops-heartbeat
+  sudo_run chown -R nix-cluster:nix-cluster /var/lib/nix-cluster /var/lib/nix-cluster-heartbeat
   sudo_run chmod 700 /home/nix-cluster/.ssh 2>/dev/null || true
   sudo_run chmod 600 /home/nix-cluster/.ssh/id_ed25519 2>/dev/null || true
   sudo_run chmod 644 /home/nix-cluster/.ssh/id_ed25519.pub 2>/dev/null || true
@@ -211,7 +211,7 @@ bootstrap_worker() {
   ensure_runtime_dirs
   install_service_repo_from_stage
   sudo_run chown -R nix-cluster:nix-cluster /home/nix-cluster
-  sudo_run chown -R nix-cluster:nix-cluster /var/lib/nops /var/lib/nops-heartbeat
+  sudo_run chown -R nix-cluster:nix-cluster /var/lib/nix-cluster /var/lib/nix-cluster-heartbeat
   sudo_run systemctl restart nix-cluster
   sudo_run systemctl status nix-cluster --no-pager -l || true
   sudo_run journalctl -u nix-cluster -n 200 --no-pager || true
@@ -225,14 +225,14 @@ verify_controller() {
   sudo_run systemctl status keepalived --no-pager || true
   sudo_run systemctl status pixiecore --no-pager || true
   sudo_run systemctl status postgresqlBackup.timer --no-pager || true
-  sudo_run -u nix-cluster /run/current-system/sw/bin/nops-fleet-status || true
+  sudo_run -u nix-cluster /run/current-system/sw/bin/nix-cluster-fleet-status || true
   curl -fsS http://127.0.0.1:2379/health || true
   if command -v etcdctl >/dev/null 2>&1; then
     sudo_run env ETCDCTL_API=3 etcdctl --endpoints=http://127.0.0.1:2379 get --prefix /nix-cluster/inventory || true
     sudo_run env ETCDCTL_API=3 etcdctl --endpoints=http://127.0.0.1:2379 get --prefix /nix-cluster/join || true
   fi
-  sudo_run ls -lah /var/lib/nops/ha || true
-  sudo_run ls -lah /var/lib/nops/metrics || true
+  sudo_run ls -lah /var/lib/nix-cluster/ha || true
+  sudo_run ls -lah /var/lib/nix-cluster/metrics || true
   curl -fsS http://127.0.0.1:9100/metrics 2>/dev/null | grep -E 'nix_cluster|nops' || true
 }
 
@@ -241,8 +241,8 @@ verify_worker() {
   sudo_run systemctl status caddy --no-pager || true
   sudo_run systemctl status cloudflared --no-pager || true
   sudo_run systemctl status keepalived --no-pager || true
-  sudo_run ls -lah /var/lib/nops/ha || true
-  sudo_run ls -lah /var/lib/nops/metrics || true
+  sudo_run ls -lah /var/lib/nix-cluster/ha || true
+  sudo_run ls -lah /var/lib/nix-cluster/metrics || true
   curl -fsS http://127.0.0.1:9100/metrics 2>/dev/null | grep -E 'nix_cluster|nops' || true
   systemctl is-enabled pixiecore || true
   systemctl is-active pixiecore || true

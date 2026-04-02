@@ -1,13 +1,32 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-NOPS_SSH_KEY="${NOPS_CONTROLLER_SSH_KEY:-/home/nix-cluster/.ssh/id_ed25519}"
-NOPS_REMOTE_USER="${NOPS_REMOTE_USER:-nix-cluster}"
-CONFIG_PATH="${NOPS_RUNTIME_CONFIG_PATH:-${NOPS_CONFIG_PATH:-/etc/nops-runtime-config.json}}"
-SOPS_KEY="${NOPS_SOPS_KEY_FILE:-/var/lib/sops-nix/key.txt}"
+resolve_runtime_config_path() {
+	local candidate
+	for candidate in \
+		"${NIX_CLUSTER_RUNTIME_CONFIG_PATH:-}" \
+		"${NIX_CLUSTER_CONFIG_PATH:-}" \
+		"${NOPS_RUNTIME_CONFIG_PATH:-}" \
+		"${NOPS_CONFIG_PATH:-}" \
+		"/etc/nix-cluster-runtime-config.json" \
+		"/etc/nops-runtime-config.json"
+	do
+		if [ -n "$candidate" ] && [ -r "$candidate" ]; then
+			printf '%s\n' "$candidate"
+			return 0
+		fi
+	done
+
+	printf '%s\n' "${NIX_CLUSTER_RUNTIME_CONFIG_PATH:-${NIX_CLUSTER_CONFIG_PATH:-${NOPS_RUNTIME_CONFIG_PATH:-${NOPS_CONFIG_PATH:-/etc/nix-cluster-runtime-config.json}}}}"
+}
+
+NIX_CLUSTER_SSH_KEY="${NIX_CLUSTER_CONTROLLER_SSH_KEY:-${NOPS_CONTROLLER_SSH_KEY:-/home/nix-cluster/.ssh/id_ed25519}}"
+NIX_CLUSTER_REMOTE_USER="${NIX_CLUSTER_REMOTE_USER:-${NOPS_REMOTE_USER:-nix-cluster}}"
+CONFIG_PATH="$(resolve_runtime_config_path)"
+SOPS_KEY="${NIX_CLUSTER_SOPS_KEY_FILE:-${NOPS_SOPS_KEY_FILE:-/var/lib/sops-nix/key.txt}}"
 
 SSH_OPTS=(
-	-i "$NOPS_SSH_KEY"
+	-i "$NIX_CLUSTER_SSH_KEY"
 	-o BatchMode=yes
 	-o StrictHostKeyChecking=no
 	-o UserKnownHostsFile=/dev/null
@@ -43,7 +62,7 @@ target_spec() {
 	if [[ "$target" == *@* ]]; then
 		printf '%s\n' "$target"
 	else
-		printf '%s@%s\n' "$NOPS_REMOTE_USER" "$target"
+		printf '%s@%s\n' "$NIX_CLUSTER_REMOTE_USER" "$target"
 	fi
 }
 
@@ -79,14 +98,14 @@ remote_sudo_command() {
 usage() {
 	cat <<'EOF'
 Usage:
-	nops-node status <host|user@host> [--json] [unit ...]
-	nops-node journal <host|user@host> [journalctl flags]
+	nix-cluster-node status <host|user@host> [--json] [unit ...]
+	nix-cluster-node journal <host|user@host> [journalctl flags]
 
 Examples:
-	nops-node status 192.168.2.202
-	nops-node status node2 --json
-	nops-node journal node2 -u nix-cluster.service -n 100
-	nops-node journal node2 -f --since '-5 min'
+	nix-cluster-node status 192.168.2.202
+	nix-cluster-node status node2 --json
+	nix-cluster-node journal node2 -u nix-cluster.service -n 100
+	nix-cluster-node journal node2 -f --since '-5 min'
 EOF
 }
 
@@ -144,10 +163,10 @@ shift 2
 
 case "$command" in
 	status)
-		run_remote "$target" sudo /run/current-system/sw/bin/nops-observe status "$@"
+		run_remote "$target" sudo /run/current-system/sw/bin/nix-cluster-observe status "$@"
 		;;
 	journal)
-		run_remote "$target" sudo /run/current-system/sw/bin/nops-observe journal "$@"
+		run_remote "$target" sudo /run/current-system/sw/bin/nix-cluster-observe journal "$@"
 		;;
 	-h|--help|help)
 		usage

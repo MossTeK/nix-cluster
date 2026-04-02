@@ -4,7 +4,7 @@
 
 All primary runtime behavior is exposed through `services."nix-cluster".*` options in the NixOS module.
 
-Those values are serialized into `/etc/nops-runtime-config.json` and consumed by the runtime.
+Those values are serialized into `/etc/nix-cluster-runtime-config.json` and consumed by the runtime.
 
 ---
 
@@ -286,7 +286,7 @@ These are used both for runtime tracking and for the installer/scaffolding model
 
 ```mermaid
 flowchart TD
-    A["services.nix-cluster.* options"] --> B["/etc/nops-runtime-config.json"]
+    A["services.nix-cluster.* options"] --> B["/etc/nix-cluster-runtime-config.json"]
     B --> C["listener.py"]
     B --> D["webhook.py"]
     B --> E["update.py"]

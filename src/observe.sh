@@ -1,19 +1,38 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-CONFIG_PATH="${NOPS_RUNTIME_CONFIG_PATH:-${NOPS_CONFIG_PATH:-/etc/nops-runtime-config.json}}"
+resolve_runtime_config_path() {
+	local candidate
+	for candidate in \
+		"${NIX_CLUSTER_RUNTIME_CONFIG_PATH:-}" \
+		"${NIX_CLUSTER_CONFIG_PATH:-}" \
+		"${NOPS_RUNTIME_CONFIG_PATH:-}" \
+		"${NOPS_CONFIG_PATH:-}" \
+		"/etc/nix-cluster-runtime-config.json" \
+		"/etc/nops-runtime-config.json"
+	do
+		if [ -n "$candidate" ] && [ -r "$candidate" ]; then
+			printf '%s\n' "$candidate"
+			return 0
+		fi
+	done
+
+	printf '%s\n' "${NIX_CLUSTER_RUNTIME_CONFIG_PATH:-${NIX_CLUSTER_CONFIG_PATH:-${NOPS_RUNTIME_CONFIG_PATH:-${NOPS_CONFIG_PATH:-/etc/nix-cluster-runtime-config.json}}}}"
+}
+
+CONFIG_PATH="$(resolve_runtime_config_path)"
 
 usage() {
 	cat <<'EOF'
 Usage:
-	nops-observe status [--json] [unit ...]
-	nops-observe journal [journalctl flags]
+	nix-cluster-observe status [--json] [unit ...]
+	nix-cluster-observe journal [journalctl flags]
 
 Examples:
-	nops-observe status
-	nops-observe status --json nix-cluster.service caddy.service
-	nops-observe journal -u nix-cluster.service -n 100
-	nops-observe journal -f --since '-5 min'
+	nix-cluster-observe status
+	nix-cluster-observe status --json nix-cluster.service caddy.service
+	nix-cluster-observe journal -u nix-cluster.service -n 100
+	nix-cluster-observe journal -f --since '-5 min'
 EOF
 }
 

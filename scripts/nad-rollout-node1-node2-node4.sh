@@ -179,18 +179,27 @@ desired_repo_path() {
 }
 
 current_repo_path() {
-  if [[ -f /etc/nops-runtime-config.json ]]; then
+  local runtime_config=""
+  if [[ -f /etc/nix-cluster-runtime-config.json ]]; then
+    runtime_config="/etc/nix-cluster-runtime-config.json"
+  elif [[ -f /etc/nops-runtime-config.json ]]; then
+    runtime_config="/etc/nops-runtime-config.json"
+  fi
+
+  if [[ -n "$runtime_config" ]]; then
     if command -v python3 >/dev/null 2>&1; then
-      python3 - <<'PY'
+      RUNTIME_CONFIG_PATH="$runtime_config" python3 - <<'PY'
 import json
-with open('/etc/nops-runtime-config.json', 'r', encoding='utf-8') as f:
+import os
+with open(os.environ['RUNTIME_CONFIG_PATH'], 'r', encoding='utf-8') as f:
     data = json.load(f)
 print(data.get('directories', {}).get('repo') or '')
 PY
     else
-      nix shell nixpkgs#python3 --command python3 - <<'PY'
+      RUNTIME_CONFIG_PATH="$runtime_config" nix shell nixpkgs#python3 --command python3 - <<'PY'
 import json
-with open('/etc/nops-runtime-config.json', 'r', encoding='utf-8') as f:
+import os
+with open(os.environ['RUNTIME_CONFIG_PATH'], 'r', encoding='utf-8') as f:
     data = json.load(f)
 print(data.get('directories', {}).get('repo') or '')
 PY
@@ -208,11 +217,19 @@ PY
 }
 
 print_runtime_summary() {
-  if [[ -f /etc/nops-runtime-config.json ]]; then
+  local runtime_config=""
+  if [[ -f /etc/nix-cluster-runtime-config.json ]]; then
+    runtime_config="/etc/nix-cluster-runtime-config.json"
+  elif [[ -f /etc/nops-runtime-config.json ]]; then
+    runtime_config="/etc/nops-runtime-config.json"
+  fi
+
+  if [[ -n "$runtime_config" ]]; then
     if command -v python3 >/dev/null 2>&1; then
-      python3 - <<'PY'
+      RUNTIME_CONFIG_PATH="$runtime_config" python3 - <<'PY'
 import json
-p = "/etc/nops-runtime-config.json"
+import os
+p = os.environ['RUNTIME_CONFIG_PATH']
 with open(p, "r", encoding="utf-8") as f:
     data = json.load(f)
 print("hostname:", data.get("hostname"))
@@ -227,9 +244,10 @@ print("reporting:", data.get("ha", {}).get("reporting"))
 print("scheduler:", data.get("ha", {}).get("scheduler"))
 PY
     else
-      nix shell nixpkgs#python3 --command python3 - <<'PY'
+      RUNTIME_CONFIG_PATH="$runtime_config" nix shell nixpkgs#python3 --command python3 - <<'PY'
 import json
-p = "/etc/nops-runtime-config.json"
+  import os
+  p = os.environ['RUNTIME_CONFIG_PATH']
 with open(p, "r", encoding="utf-8") as f:
     data = json.load(f)
 print("hostname:", data.get("hostname"))
@@ -245,7 +263,7 @@ print("scheduler:", data.get("ha", {}).get("scheduler"))
 PY
     fi
   else
-    echo "MISSING /etc/nops-runtime-config.json"
+    echo "MISSING /etc/nix-cluster-runtime-config.json"
   fi
 }
 
@@ -266,10 +284,15 @@ print_path_state() {
     /home/nops/homelab-fleet \
     "$current_home" \
     "$current_repo" \
+    /var/lib/nix-cluster \
+    /var/lib/nix-cluster/ha \
+    /var/lib/nix-cluster/metrics \
+    /var/lib/nix-cluster-heartbeat \
     /var/lib/nops \
     /var/lib/nops/ha \
     /var/lib/nops/metrics \
     /var/lib/nops-heartbeat \
+    /etc/nix-cluster-runtime-config.json \
     /etc/nops-runtime-config.json
   do
     if [[ -e "$p" ]]; then
@@ -348,8 +371,8 @@ collect_state() {
 
   echo
   echo "--- ha files ---"
-  sudo_run ls -lah /var/lib/nops/ha 2>/dev/null || true
-  sudo_run ls -lah /var/lib/nops/metrics 2>/dev/null || true
+  sudo_run ls -lah /var/lib/nix-cluster/ha 2>/dev/null || sudo_run ls -lah /var/lib/nops/ha 2>/dev/null || true
+  sudo_run ls -lah /var/lib/nix-cluster/metrics 2>/dev/null || sudo_run ls -lah /var/lib/nops/metrics 2>/dev/null || true
 
   echo
   echo "--- metrics grep ---"
@@ -376,10 +399,10 @@ prepare_node() {
   sudo_run install -d -o "$current_user" -g "$current_group" -m 0755 "$current_home"
   sudo_run install -d -o "$current_user" -g "$current_group" -m 0700 "$current_home/.ssh"
   sudo_run install -d -o "$current_user" -g "$current_group" -m 0755 "$current_home/log"
-  sudo_run install -d -o "$current_user" -g "$current_group" -m 0755 /var/lib/nops
-  sudo_run install -d -o "$current_user" -g "$current_group" -m 0755 /var/lib/nops/ha
-  sudo_run install -d -o "$current_user" -g "$current_group" -m 0755 /var/lib/nops/metrics
-  sudo_run install -d -o "$current_user" -g "$current_group" -m 0755 /var/lib/nops-heartbeat
+  sudo_run install -d -o "$current_user" -g "$current_group" -m 0755 /var/lib/nix-cluster
+  sudo_run install -d -o "$current_user" -g "$current_group" -m 0755 /var/lib/nix-cluster/ha
+  sudo_run install -d -o "$current_user" -g "$current_group" -m 0755 /var/lib/nix-cluster/metrics
+  sudo_run install -d -o "$current_user" -g "$current_group" -m 0755 /var/lib/nix-cluster-heartbeat
 
   if [[ "$current_home" != "/home/nops" && -d /home/nops/.ssh && ! -e "$current_home/.ssh/id_ed25519" ]]; then
     sudo_run cp -a /home/nops/.ssh/. "$current_home/.ssh/"
@@ -397,7 +420,7 @@ prepare_node() {
   sudo_run find "$current_repo/.git" -name '*.lock' -delete 2>/dev/null || true
   sudo_run chown -R "$current_user:$current_group" "$current_home"
   sudo_run chown -R "$current_user:$current_group" "$current_repo"
-  sudo_run chown -R "$current_user:$current_group" /var/lib/nops /var/lib/nops-heartbeat
+  sudo_run chown -R "$current_user:$current_group" /var/lib/nix-cluster /var/lib/nix-cluster-heartbeat
   sudo_run chmod 700 "$current_home/.ssh" 2>/dev/null || true
   sudo_run chmod 600 "$current_home/.ssh/id_ed25519" 2>/dev/null || true
   sudo_run chmod 644 "$current_home/.ssh/id_ed25519.pub" 2>/dev/null || true
@@ -431,16 +454,16 @@ rebuild_node() {
 verify_controller() {
   local user
   user="$(service_user)"
-  sudo_run -u "$user" /run/current-system/sw/bin/nops-fleet-status
-  sudo_run -u "$user" /run/current-system/sw/bin/nops-controller-heartbeat || true
+  sudo_run -u "$user" /run/current-system/sw/bin/nix-cluster-fleet-status
+  sudo_run -u "$user" /run/current-system/sw/bin/nix-cluster-controller-heartbeat || true
   sudo_run systemctl status nix-cluster --no-pager || true
   sudo_run systemctl status caddy --no-pager || true
   sudo_run systemctl status cloudflared --no-pager || true
   sudo_run systemctl status keepalived --no-pager || true
   sudo_run systemctl status pixiecore --no-pager || true
   sudo_run systemctl status postgresqlBackup.timer --no-pager || true
-  sudo_run ls -lah /var/lib/nops/ha || true
-  sudo_run ls -lah /var/lib/nops/metrics || true
+  sudo_run ls -lah /var/lib/nix-cluster/ha || true
+  sudo_run ls -lah /var/lib/nix-cluster/metrics || true
   curl -fsS http://127.0.0.1:9100/metrics | grep -E 'nix_cluster|nops' || true
 }
 
@@ -449,8 +472,8 @@ verify_worker() {
   sudo_run systemctl status caddy --no-pager || true
   sudo_run systemctl status cloudflared --no-pager || true
   sudo_run systemctl status keepalived --no-pager || true
-  sudo_run ls -lah /var/lib/nops/ha || true
-  sudo_run ls -lah /var/lib/nops/metrics || true
+  sudo_run ls -lah /var/lib/nix-cluster/ha || true
+  sudo_run ls -lah /var/lib/nix-cluster/metrics || true
   curl -fsS http://127.0.0.1:9100/metrics | grep -E 'nix_cluster|nops' || true
   systemctl is-enabled pixiecore || true
   systemctl is-active pixiecore || true

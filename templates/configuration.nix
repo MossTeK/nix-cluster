@@ -32,6 +32,7 @@
       };
       pxe = {
         enable = PXE_ENABLE_PLACEHOLDER;
+        authorizedKeys = PXE_AUTHORIZED_KEYS_PLACEHOLDER;
         dhcpEnable = PXE_DHCP_ENABLE_PLACEHOLDER;
         interface = "PXE_INTERFACE_PLACEHOLDER";
         httpPort = PXE_HTTP_PORT_PLACEHOLDER;
@@ -48,7 +49,7 @@
     ];
   };
 
-  networking.hostName = "nops-node";
+  networking.hostName = "nix-cluster-node";
   networking.hostId = "HOST_ID_PLACEHOLDER";
   time.timeZone = "UTC";
 
@@ -62,15 +63,23 @@
 
   services.openssh = {
     enable = true;
-    settings.PasswordAuthentication = true;
+    settings = {
+      PasswordAuthentication = SSH_PASSWORD_AUTH_PLACEHOLDER;
+      KbdInteractiveAuthentication = false;
+      PermitRootLogin = "no";
+    };
   };
+
+  users.mutableUsers = false;
 
   users.users.tdavis = {
     isNormalUser = true;
     extraGroups = [ "wheel" "networkmanager" ];
-    initialPassword = "password";
+    ADMIN_PASSWORD_CONFIG_PLACEHOLDER
     SSH_PUB_KEY_PLACEHOLDER
   };
+
+  security.sudo.wheelNeedsPassword = false;
 
   security.sudo.extraRules = [
     {

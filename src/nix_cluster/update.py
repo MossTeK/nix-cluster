@@ -12,7 +12,7 @@ from typing import Sequence
 from .config import RuntimeConfig
 from .core import ProcessRunner, configure_logging
 
-logger = configure_logging("nops-update")
+logger = configure_logging("nix-cluster-update")
 UPDATE_LOCK = threading.Lock()
 
 
@@ -94,10 +94,10 @@ class UpdateManager:
 
     def perform_update(self, trigger_id: str) -> str:
         if not UPDATE_LOCK.acquire(blocking=False):
-            logger.info("NOPS UPDATE ALREADY RUNNING. SKIPPING TRIGGER: %s", trigger_id)
+            logger.info("NIX-CLUSTER UPDATE ALREADY RUNNING. SKIPPING TRIGGER: %s", trigger_id)
             return "SKIPPED: update already in progress"
 
-        logger.info("NOPS UPDATE SEQUENCE INITIATED: %s", trigger_id)
+        logger.info("NIX-CLUSTER UPDATE SEQUENCE INITIATED: %s", trigger_id)
         repo_dir = self.runtime_config.repo_dir
         is_controller = self.runtime_config.is_controller
         controller_script = self.runtime_config.controller_script
@@ -138,10 +138,10 @@ class UpdateManager:
                 self._run_command(["bash", "-c", command.replace("\r", "")], cwd=repo_dir, stage="REBUILD")
                 for command in self.runtime_config.update.commands
             ]
-            logger.info("NOPS REBUILD TASK COMPLETED: %s", trigger_id)
+            logger.info("NIX-CLUSTER REBUILD TASK COMPLETED: %s", trigger_id)
             return "\n".join(filter(None, output_log)).strip()
         except Exception as error:
-            logger.error("NOPS UPDATE PIPELINE FAILED: %s", error)
+            logger.error("NIX-CLUSTER UPDATE PIPELINE FAILED: %s", error)
             return f"FAILURE: {error}"
         finally:
             UPDATE_LOCK.release()

@@ -4,12 +4,12 @@ set -euo pipefail
 usage() {
 	cat <<'EOF'
 Usage:
-	nops-fleet-watch [--interval SECONDS] [--initial] [hostname|ip ...]
+	nix-cluster-fleet-watch [--interval SECONDS] [--initial] [hostname|ip ...]
 
 Examples:
-	nops-fleet-watch
-	nops-fleet-watch --interval 3
-	nops-fleet-watch --initial node2 node4
+	nix-cluster-fleet-watch
+	nix-cluster-fleet-watch --interval 3
+	nix-cluster-fleet-watch --initial node2 node4
 EOF
 }
 
@@ -45,9 +45,9 @@ fi
 
 fetch_snapshot() {
 	if [ "${#filters[@]}" -gt 0 ]; then
-		nops-fleet-status --json "${filters[@]}"
+		nix-cluster-fleet-status --json "${filters[@]}"
 	else
-		nops-fleet-status --json
+		nix-cluster-fleet-status --json
 	fi
 }
 

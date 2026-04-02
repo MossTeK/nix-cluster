@@ -6,12 +6,12 @@ let
   pxeCfg = config.services."nix-cluster".modules.pxe;
   bootScript = if pxeCfg.bootUrl != "" then ''
     #!ipxe
-    echo nops PXE bootstrap
+    echo nix-cluster PXE bootstrap
     dhcp
     chain ${pxeCfg.bootUrl} || shell
   '' else ''
     #!ipxe
-    echo nops PXE bootstrap
+    echo nix-cluster PXE bootstrap
     dhcp
     shell
   '';

@@ -1,8 +1,8 @@
-# nops (Nix Operations Daemon) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+# nix-cluster (Nix Cluster Controller) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**nops** is a lightweight, asynchronous GitOps deployment library for NixOS. It allows you to manage an entire "Fleet" of NixOS machines—and external infrastructure—from a single centralized Git repository. 
+**nix-cluster** is a lightweight, asynchronous GitOps deployment library for NixOS. It allows you to manage an entire "Fleet" of NixOS machines—and external infrastructure—from a single centralized Git repository. 
 
-`nops` gives you the flexibility to trigger asynchronous updates via two methods:
+`nix-cluster` gives you the flexibility to trigger asynchronous updates via two methods:
 1. **Matrix Pub/Sub:** Nodes connect to a secure Matrix room. When your Git host posts a push notification to the room, your nodes intelligently pull the changes. Zero open firewall ports required.
 2. **Webhooks:** Nodes run a lightweight `aiohttp` web server to receive standard JSON push event payloads directly from Forgejo, GitLab, or GitHub. 
 
@@ -24,7 +24,7 @@ If you are using `nix-cluster` with a private fleet repository, keep environment
 ## ✨ Key Features
 * **Zero-Touch Node Enrollment:** Run a single `nix run` command on a fresh NixOS install to instantly bootstrap the daemon, generate secrets, and join the fleet.
 * **Unified Infrastructure Controllers:** Designate one or more "Controller" nodes to safely execute pre-build infrastructure scripts (like Terraform) in a multi-node High Availability cluster.
-* **Infinite Loop Prevention:** Built-in `[skip nops]` commit detection ensures automated bot commits from your Controller node do not trigger recursive rebuild loops across your fleet.
+* **Infinite Loop Prevention:** Built-in skip-marker detection ensures automated bot commits from your Controller node do not trigger recursive rebuild loops across your fleet.
 * **Smart Fleet Management:** One repository rules them all. Nodes only rebuild if their specific `nodes/$HOSTNAME/` directory, shared `modules/`, or global secrets change.
 * **Native SOPS Integration:** Built-in secret management using `sops-nix` and Age keys.
 
@@ -41,8 +41,8 @@ If you are using `nix-cluster` with a private fleet repository, keep environment
 ## 🚀 Quick Start: Bootstrapping the Controller Node
 
 1. Start with a minimal NixOS install for the first controller node.
-2. Run `nops-install` on that machine and choose controller/bootstrap mode, either through the interactive prompts or with `--config nops-config-template.json`.
-3. The installer scaffolds the fleet repo, enrolls the controller, initializes `deployments.json`, and writes a reusable `nops-config-template.json` into the repo root.
+2. Run `nix-cluster-install` on that machine and choose controller/bootstrap mode, either through the interactive prompts or with `--config nix-cluster-config-template.json`.
+3. The installer scaffolds the fleet repo, enrolls the controller, initializes `deployments.json`, and writes a reusable `nix-cluster-config-template.json` into the repo root.
 4. The controller install also generates a controller SSH key, seeds that public key into the worker install template, and appends the controller node to `deployments.json` as inventory.
 5. Once the controller is up, subsequent nodes are added by editing `deployments.json` and pushing to Git. You do not manually scaffold `nodes/<hostname>` entries.
 
@@ -59,37 +59,39 @@ If you want the controller to also host a PXE helper stack, set `pxe_enable: tru
   "hostname": "node6",
   "installer_ip": "192.168.2.106",
   "installer_user": "nixos",
-  "installer_auth_mode": "auto",
+  "installer_auth_mode": "ssh_key",
   "installer_ssh_pub_key": "",
-  "installer_password": "changeme",
+  "installer_password": "",
   "disk": "/dev/sda",
   "fs": "zfs",
   "node_group": "web",
   "node_role": "worker",
   "keepalived_role": "backup",
   "node_admin": "moss",
-  "node_admin_pass": "changeme"
+  "ssh_password_auth": false,
+  "node_admin_pass": "",
+  "node_admin_password_hash": ""
 }
 ```
 
 4. Save the encrypted file, then commit and push your changes to the fleet repository.
 5. On the next controller update cycle, the controller SSHes into the live installer at `installer_user@installer_ip`, runs `nixos-anywhere` with Disko, and reboots the machine into the base OS.
-6. After first boot, the controller reconnects using its SSH key when available, or falls back to `node_admin` and `node_admin_pass` if needed.
-7. The controller hydrates `nops-config-template.json` with the node-specific values, runs `nops-install` remotely, adds the node under `nodes/<hostname>/`, updates `flake.nix`, injects the SOPS key, and pushes the enrollment commit.
+6. After first boot, the controller reconnects using its SSH key and continues enrollment without enabling SSH password auth by default.
+7. The controller hydrates `nix-cluster-config-template.json` with the node-specific values, runs `nix-cluster-install` remotely, adds the node under `nodes/<hostname>/`, updates `flake.nix`, injects the SOPS key, and pushes the enrollment commit.
 8. The new node rebuilds into the fleet config and joins automatically.
 
-For live ISO or live USB enrollment, set `installer_auth_mode` to `password`, `ssh_key`, or `auto`. If the live environment already trusts the controller key, `ssh_key` avoids password-based SSH.
+For live ISO or live USB enrollment, set `installer_auth_mode` to `ssh_key`, `auto`, or `password`. `ssh_key` is now the default and is the expected mode for PXE-driven installs.
 
 Use `node_role` and `keepalived_role` to make HA placement explicit. The bootstrap controller defaults to `controller` plus `master`, while worker and backup nodes can be assigned `backup` or `service` roles for later module placement. You can also mark additional controller nodes with `node_role: controller`.
 
-**Security Note:** `deployments.json` and `nops-config-template.json` contain bootstrap credentials and must remain SOPS-encrypted at rest. Edit them with `sops deployments.json` and `sops nops-config-template.json`.
+**Security Note:** `deployments.json` and `nix-cluster-config-template.json` contain bootstrap credentials and must remain SOPS-encrypted at rest. Edit them with `sops deployments.json` and `sops nix-cluster-config-template.json`.
 
-`deployments.json` is the source of truth for controller-driven bare-metal enrollment. `nops-config-template.json` is the reusable non-interactive install template the controller hydrates and uses when it runs `nops-install` on worker nodes. The template also supports optional controller-hosted PXE fields for HTTP boot and, if explicitly enabled, DHCP/TFTP.
+`deployments.json` is the source of truth for controller-driven bare-metal enrollment. `nix-cluster-config-template.json` is the reusable non-interactive install template the controller hydrates and uses when it runs `nix-cluster-install` on worker nodes. The template also supports optional controller-hosted PXE fields for HTTP boot and, if explicitly enabled, DHCP/TFTP.
 
 The intended operator workflow is:
 - install the controller once with prompts or JSON
 - let that install seed the repo templates
-- boot workers into the live ISO and set the installer password
+- boot workers into a PXE or live environment that already trusts the controller SSH key
 - add workers and additional controllers only by appending entries to `deployments.json`
 - let the controller scaffold `nodes/<hostname>` and `flake.nix` automatically
 
@@ -99,11 +101,11 @@ If `caddy_enable` is `true`, the installer scaffolds a base Caddy module and imp
 
 If `keepalived_enable` is `true` during bootstrap, the installer also scaffolds a keepalived ingress VIP module so the configured tunnel target address is actually assigned on the first node. If `keepalived_vip_cidr` is left empty, the installer derives the prefix length from the selected network interface and combines it with `cloudflare_tunnel_vip`.
 
-`repo_url` should be the final shared Git URL that every node can reach after bootstrap. During bootstrap, `nops` temporarily pushes through the local Forgejo instance, then restores `origin` back to `repo_url`. If you keep `repo_url` set to `localhost`, worker nodes will not be able to clone or pull the fleet repository.
+`repo_url` should be the final shared Git URL that every node can reach after bootstrap. During bootstrap, `nix-cluster` temporarily pushes through the local Forgejo instance, then restores `origin` back to `repo_url`. If you keep `repo_url` set to `localhost`, worker nodes will not be able to clone or pull the fleet repository.
 
-`repo_host_ip` is optional. When set, `nops` writes a host override on the installing node so the hostname from `repo_url` resolves to that internal IP even before internal DNS is ready. This is useful during first-node bootstrap when the public hostname already exists in Cloudflare but the homelab should reach Forgejo through a LAN VIP.
+`repo_host_ip` is optional. When set, `nix-cluster` writes a host override on the installing node so the hostname from `repo_url` resolves to that internal IP even before internal DNS is ready. This is useful during first-node bootstrap when the public hostname already exists in Cloudflare but the homelab should reach Forgejo through a LAN VIP.
 
-If `repo_host_ip` is omitted during bootstrap, `nops` now defaults it to `cloudflare_tunnel_vip` when the hostname in `repo_url` matches `forgejo_public_host`. That covers the common first-node case where Git should use the same ingress VIP as the tunnel and Caddy path.
+If `repo_host_ip` is omitted during bootstrap, `nix-cluster` now defaults it to `cloudflare_tunnel_vip` when the hostname in `repo_url` matches `forgejo_public_host`. That covers the common first-node case where Git should use the same ingress VIP as the tunnel and Caddy path.
 
 `keepalived_virtual_router_id` must be a unique integer from 1 to 255 on that subnet. Reusing a VRID from another VIP group on the same LAN will cause VRRP collisions even when the VIP addresses differ.
 

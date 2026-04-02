@@ -1,8 +1,42 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-CONFIG_PATH="${NOPS_RUNTIME_CONFIG_PATH:-${NOPS_CONFIG_PATH:-/etc/nops-runtime-config.json}}"
-STATE_DIR="${NOPS_HEARTBEAT_STATE_DIR:-/var/lib/nops-heartbeat}"
+resolve_runtime_config_path() {
+	local candidate
+	for candidate in \
+		"${NIX_CLUSTER_RUNTIME_CONFIG_PATH:-}" \
+		"${NIX_CLUSTER_CONFIG_PATH:-}" \
+		"${NOPS_RUNTIME_CONFIG_PATH:-}" \
+		"${NOPS_CONFIG_PATH:-}" \
+		"/etc/nix-cluster-runtime-config.json" \
+		"/etc/nops-runtime-config.json"
+	do
+		if [ -n "$candidate" ] && [ -r "$candidate" ]; then
+			printf '%s\n' "$candidate"
+			return 0
+		fi
+	done
+
+	printf '%s\n' "${NIX_CLUSTER_RUNTIME_CONFIG_PATH:-${NIX_CLUSTER_CONFIG_PATH:-${NOPS_RUNTIME_CONFIG_PATH:-${NOPS_CONFIG_PATH:-/etc/nix-cluster-runtime-config.json}}}}"
+}
+
+resolve_heartbeat_state_dir() {
+	local candidate
+	for candidate in \
+		"${NIX_CLUSTER_HEARTBEAT_STATE_DIR:-}" \
+		"${NOPS_HEARTBEAT_STATE_DIR:-}" \
+		"/var/lib/nix-cluster-heartbeat" \
+		"/var/lib/nops-heartbeat"
+	do
+		if [ -n "$candidate" ] && { [ -d "$candidate" ] || [ ! -e "$candidate" ]; }; then
+			printf '%s\n' "$candidate"
+			return 0
+		fi
+	done
+}
+
+CONFIG_PATH="$(resolve_runtime_config_path)"
+STATE_DIR="$(resolve_heartbeat_state_dir)"
 STATE_FILE="$STATE_DIR/controller-status.json"
 HOSTNAME_VALUE=$(hostname)
 
