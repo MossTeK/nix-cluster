@@ -61,7 +61,7 @@
 
           makeWrapper ${pkgs.bash}/bin/bash $out/bin/nops-controller-heartbeat \
             --add-flags "$out/lib/controller-heartbeat.sh" \
-            --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.iputils pkgs.systemd pkgs.jq pkgs.coreutils pkgs.bash ]}
+            --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.iputils pkgs.inetutils pkgs.systemd pkgs.jq pkgs.coreutils pkgs.bash ]}
 
           makeWrapper ${pythonEnv}/bin/python3 $out/bin/nops-reporter \
             --add-flags "$out/lib/reporter.py" \
