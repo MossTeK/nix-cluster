@@ -382,6 +382,7 @@ provision_live_installer() {
   local TMP_DIR
   local HOST_ID
   local HASHED_PASS
+  local AUTHORIZED_KEYS_JSON
 
   if [ -z "$DISK" ] || [ -z "$FS" ]; then
     echo "[nix-cluster] $HOSTNAME is missing disk or fs in deployments.json. Skipping."
@@ -407,6 +408,11 @@ provision_live_installer() {
   else
     HASHED_PASS="!"
   fi
+
+  AUTHORIZED_KEYS_JSON=$(jq -cn \
+    --arg controller "$CONTROLLER_SSH_PUB_KEY" \
+    --arg installer "$INSTALLER_SSH_PUB_KEY" \
+    '[ $controller, $installer ] | map(select(length > 0)) | unique')
 
   cat <<EOF > "$TMP_DIR/flake.nix"
 {
@@ -444,7 +450,7 @@ provision_live_installer() {
               isNormalUser = true;
               extraGroups = [ "wheel" "networkmanager" ];
               hashedPassword = "$HASHED_PASS";
-              openssh.authorizedKeys.keys = [ "$CONTROLLER_SSH_PUB_KEY" ];
+              openssh.authorizedKeys.keys = builtins.fromJSON ''$AUTHORIZED_KEYS_JSON'';
             };
 
             security.sudo.wheelNeedsPassword = false;
@@ -565,6 +571,10 @@ while read -r node; do
   if [ -z "$HOSTNAME" ] || [ -z "$INSTALLER_IP" ]; then
     echo "[nix-cluster] Skipping malformed deployment entry: $node"
     continue
+  fi
+
+  if [ -z "$INSTALLER_SSH_PUB_KEY" ]; then
+    INSTALLER_SSH_PUB_KEY="$CONTROLLER_SSH_PUB_KEY"
   fi
 
   publish_node_inventory "deployments.json" "desired"
