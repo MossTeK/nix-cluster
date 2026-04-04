@@ -560,7 +560,7 @@ else
     read -s -p "Optional password for $NODE_ADMIN (leave blank for key-only access): " NODE_ADMIN_PASS
     echo ""
     NODE_ADMIN_PASSWORD_HASH=""
-    read -p "Node role [controller/worker/service/backup] [worker]: " NODE_ROLE
+    read -p "Node role [controller/worker/service/backup/spare] [worker]: " NODE_ROLE
     NODE_ROLE=${NODE_ROLE:-worker}
     if [ "$NODE_ROLE" = "controller" ]; then
         KEEPALIVED_ROLE="master"
@@ -1193,12 +1193,31 @@ fi
 # Substitutes installer-collected values into the node config: hostname, admin user, repo path, and trigger mode.
 log "Hydrating node configuration..."
 HOST_ID=$(head -c 4 /dev/urandom | od -A n -t x4 | tr -d ' ' | cut -c 1-8)
+case "${NODE_ROLE:-worker}" in
+    controller)
+        HA_ROLE="active"
+        ;;
+    spare)
+        HA_ROLE="spare"
+        ;;
+    *)
+        HA_ROLE="passive"
+        ;;
+esac
+if [ "${KEEPALIVED_ENABLE:-false}" = "true" ]; then
+    PLACEMENT_KEEPALIVED_ROLE="${KEEPALIVED_ROLE:-backup}"
+else
+    PLACEMENT_KEEPALIVED_ROLE="disabled"
+fi
 sudo -u "$SERVICE_USER" sed -i "s|HOST_ID_PLACEHOLDER|$HOST_ID|" "$NODE_DIR/configuration.nix"
 sudo -u "$SERVICE_USER" sed -i "s|networking.hostName = \".*\";|networking.hostName = \"$HOSTNAME\";|" "$NODE_DIR/configuration.nix"
 sudo -u "$SERVICE_USER" sed -i "s|users.users.tdavis|users.users.$NODE_ADMIN|" "$NODE_DIR/configuration.nix"
 sudo -u "$SERVICE_USER" sed -i "s|NODE_ADMIN_PLACEHOLDER|$NODE_ADMIN|" "$NODE_DIR/configuration.nix"
 sudo -u "$SERVICE_USER" sed -i "s|repoPath = \".*\";|repoPath = \"$TARGET_DIR\";|" "$NODE_DIR/configuration.nix"
 sudo -u "$SERVICE_USER" sed -i "s|SSH_PASSWORD_AUTH_PLACEHOLDER|${SSH_PASSWORD_AUTH:-false}|" "$NODE_DIR/configuration.nix"
+sudo -u "$SERVICE_USER" sed -i "s|NODE_ROLE_PLACEHOLDER|${NODE_ROLE:-worker}|" "$NODE_DIR/configuration.nix"
+sudo -u "$SERVICE_USER" sed -i "s|HA_ROLE_PLACEHOLDER|$HA_ROLE|" "$NODE_DIR/configuration.nix"
+sudo -u "$SERVICE_USER" sed -i "s|KEEPALIVED_ROLE_PLACEHOLDER|$PLACEMENT_KEEPALIVED_ROLE|" "$NODE_DIR/configuration.nix"
 
 if [ -n "${NODE_ADMIN_PASSWORD_HASH:-}" ]; then
     SAFE_NODE_ADMIN_PASSWORD_HASH=$(nix_cluster_escape_sed "$NODE_ADMIN_PASSWORD_HASH")

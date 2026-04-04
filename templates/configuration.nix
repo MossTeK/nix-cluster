@@ -12,6 +12,11 @@
     enable = true;
     repoPath = "/home/nix-cluster/";
     isController = IS_CONTROLLER_PLACEHOLDER;
+    placement = {
+      nodeRole = "NODE_ROLE_PLACEHOLDER";
+      haRole = "HA_ROLE_PLACEHOLDER";
+      keepalivedRole = "KEEPALIVED_ROLE_PLACEHOLDER";
+    };
     modules = {
       caddy.enable = CADDY_ENABLE_PLACEHOLDER;
       keepalived = {

@@ -78,6 +78,13 @@ class ControllerSettings:
 
 
 @dataclass(slots=True)
+class PlacementSettings:
+    node_role: str
+    ha_role: str
+    keepalived_role: str
+
+
+@dataclass(slots=True)
 class PrometheusSettings:
     enable: bool
     port: int
@@ -168,6 +175,7 @@ class RuntimeConfig:
     directories: DirectorySettings
     update: UpdateSettings
     controller: ControllerSettings
+    placement: PlacementSettings
     observability: ObservabilitySettings
     ha: HASettings
     matrix: MatrixSettings
@@ -186,6 +194,7 @@ class RuntimeConfig:
         update_raw = raw.get("update", raw.get("commands", {}))
         controller_raw = raw.get("controller", {})
         monitor_raw = controller_raw.get("monitor", {})
+        placement_raw = raw.get("placement", {})
         observability_raw = raw.get("observability", {})
         prometheus_raw = observability_raw.get("prometheus", {})
         loki_raw = observability_raw.get("loki", {})
@@ -222,6 +231,12 @@ class RuntimeConfig:
                 interval_seconds=_as_int(monitor_raw.get("interval_seconds"), 15),
                 targets=_as_list(monitor_raw.get("targets", [])),
             ),
+        )
+
+        placement = PlacementSettings(
+            node_role=str(placement_raw.get("node_role", "worker")),
+            ha_role=str(placement_raw.get("ha_role", "passive")),
+            keepalived_role=str(placement_raw.get("keepalived_role", "disabled")),
         )
 
         observability = ObservabilitySettings(
@@ -292,6 +307,7 @@ class RuntimeConfig:
             directories=directories,
             update=update,
             controller=controller,
+            placement=placement,
             observability=observability,
             ha=ha,
             matrix=matrix,

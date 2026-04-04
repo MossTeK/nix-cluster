@@ -186,6 +186,11 @@
           targets = cfg.controller.monitor.targets;
         };
       };
+      placement = {
+        node_role = cfg.placement.nodeRole;
+        ha_role = cfg.placement.haRole;
+        keepalived_role = cfg.placement.keepalivedRole;
+      };
       observability = {
         tracked_units = trackedUnits;
         prometheus = {
@@ -383,6 +388,23 @@
           type = lib.types.listOf lib.types.str;
           default = [];
           description = "Controller hostnames or IPs that workers should ping. Configure at least one stable controller address or VIP.";
+        };
+        placement = {
+          nodeRole = lib.mkOption {
+            type = lib.types.enum [ "controller" "worker" "service" "backup" "spare" ];
+            default = "worker";
+            description = "Default node placement role that modules can use for active/passive/spare decisions.";
+          };
+          haRole = lib.mkOption {
+            type = lib.types.enum [ "active" "passive" "spare" ];
+            default = "passive";
+            description = "Default HA service role that modules can use to decide whether to expose, standby, or stay idle.";
+          };
+          keepalivedRole = lib.mkOption {
+            type = lib.types.enum [ "master" "backup" "disabled" ];
+            default = "disabled";
+            description = "Derived Keepalived placement role for modules that need ingress/VIP awareness.";
+          };
         };
         observability.extraTrackedUnits = lib.mkOption {
           type = lib.types.listOf lib.types.str;
@@ -664,6 +686,19 @@
       };
 
       config = lib.mkIf cfg.enable {
+        services."nix-cluster".placement = {
+          nodeRole = lib.mkDefault (if cfg.isController then "controller" else "worker");
+          haRole = lib.mkDefault (
+            if cfg.placement.nodeRole == "controller" then "active"
+            else if cfg.placement.nodeRole == "spare" then "spare"
+            else "passive"
+          );
+          keepalivedRole = lib.mkDefault (
+            if !cfg.modules.keepalived.enable then "disabled"
+            else if cfg.modules.keepalived.priority >= 150 then "master"
+            else "backup"
+          );
+        };
         assertions = [
           {
             assertion = lib.hasPrefix "/etc/" cfg.paths.runtimeConfigPath;
