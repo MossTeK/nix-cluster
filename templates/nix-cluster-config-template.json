@@ -8,6 +8,8 @@
   "repo_url": "https://git.example.com/<youruser>/fleet.git",
   "nix_cluster_repo_url": "https://git.smallguytech.org/SGT/nix-cluster.git",
   "nixos_install_repo_url": "https://git.smallguytech.org/SGT/nix-cluster.git",
+  "registry_mode": "bundled",
+  "module_registry_url": "https://git.smallguytech.org/SGT/module-registry.git",
   "repo_host_ip": "",
   "node_group": "homelab",
   "node_admin": "<admin>",

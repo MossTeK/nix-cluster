@@ -14,7 +14,7 @@ nix_cluster_escape_sed() {
 
 normalize_install_override_key() {
   case "$1" in
-    bootstrap_mode|is_controller|node_role|keepalived_role|git_user|git_token|repo_url|nix_cluster_repo_url|nops_repo_url|nixos_install_repo_url|repo_host_ip|node_group|node_admin|node_admin_pass|node_admin_password_hash|node_ssh_pub_key|installer_auth_mode|installer_ssh_pub_key|ssh_password_auth|trigger_choice|fleet_private_key|matrix_bot_token|matrix_room_id|matrix_homeserver|webhook_secret|cloudflare_api_token|forgejo_public_host|custom_group_config|custom_group_imports|custom_node_config|custom_node_imports)
+    bootstrap_mode|is_controller|node_role|keepalived_role|git_user|git_token|repo_url|nix_cluster_repo_url|nops_repo_url|nixos_install_repo_url|registry_mode|module_registry_url|repo_host_ip|node_group|node_admin|node_admin_pass|node_admin_password_hash|node_ssh_pub_key|installer_auth_mode|installer_ssh_pub_key|ssh_password_auth|trigger_choice|fleet_private_key|matrix_bot_token|matrix_room_id|matrix_homeserver|webhook_secret|cloudflare_api_token|forgejo_public_host|custom_group_config|custom_group_imports|custom_node_config|custom_node_imports)
       printf '%s\n' "$1"
       ;;
     caddy_enable|modules.caddy.enable)
@@ -142,6 +142,8 @@ apply_install_overrides() {
       repo_url) REPO_URL="$value" ;;
       nix_cluster_repo_url|nops_repo_url) NIX_CLUSTER_REPO_URL="$value" ;;
       nixos_install_repo_url) NIXOS_INSTALL_REPO_URL="$value" ;;
+      registry_mode) REGISTRY_MODE="$value" ;;
+      module_registry_url) MODULE_REGISTRY_URL="$value" ;;
       repo_host_ip) REPO_HOST_IP="$value" ;;
       node_group) NODE_GROUP="$value" ;;
       node_admin) NODE_ADMIN="$value" ;;

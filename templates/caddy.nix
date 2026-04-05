@@ -2,6 +2,10 @@
 { config, pkgs, lib, ... }:
 
 lib.mkIf config.services."nix-cluster".modules.caddy.enable {
+  services."nix-cluster".observability.monitoredServices = lib.mkAfter [
+    "caddy.service"
+  ];
+
   services.caddy = {
     enable = true;
     package = pkgs.caddy;

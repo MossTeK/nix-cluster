@@ -2,6 +2,10 @@
 { config, pkgs, lib, ... }:
 
 lib.mkIf (config.services."nix-cluster".modules.postgresBackup.enable && (config.services.forgejo.enable or false)) {
+  services."nix-cluster".observability.monitoredServices = lib.mkAfter [
+    "postgresqlBackup.timer"
+  ];
+
   services.postgresqlBackup = {
     enable = true;
     backupAll = false;

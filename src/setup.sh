@@ -8,6 +8,7 @@ trap 'exit 0' EXIT
 HOSTNAME=$(hostname)
 TEMPLATES_DIR="${NIX_CLUSTER_TEMPLATES_DIR:-${NOPS_TEMPLATES_DIR:-../templates}}"
 DEFAULT_NIX_CLUSTER_REPO_URL="https://git.smallguytech.org/SGT/nix-cluster.git"
+DEFAULT_MODULE_REGISTRY_URL="https://git.smallguytech.org/SGT/module-registry.git"
 SERVICE_USER="nix-cluster"
 SERVICE_GROUP="nix-cluster"
 SERVICE_HOME="/home/${SERVICE_USER}"
@@ -477,6 +478,8 @@ if [ "$NON_INTERACTIVE" = true ]; then
     REPO_HOST_IP=$(jq -r '.repo_host_ip // empty' "$CONFIG_FILE")
     NIX_CLUSTER_REPO_URL=$(jq -r --arg default_repo "$DEFAULT_NIX_CLUSTER_REPO_URL" '.nix_cluster_repo_url // .nops_repo_url // $default_repo' "$CONFIG_FILE")
     NIXOS_INSTALL_REPO_URL=$(jq -r --arg default_repo "$DEFAULT_NIX_CLUSTER_REPO_URL" '.nixos_install_repo_url // .nix_cluster_repo_url // .nops_repo_url // $default_repo' "$CONFIG_FILE")
+    REGISTRY_MODE=$(jq -r '.registry_mode // "bundled"' "$CONFIG_FILE")
+    MODULE_REGISTRY_URL=$(jq -r --arg default_repo "$DEFAULT_MODULE_REGISTRY_URL" '.module_registry_url // $default_repo' "$CONFIG_FILE")
     NODE_GROUP=$(jq -r '.node_group // "default"' "$CONFIG_FILE")
     NODE_ADMIN=$(jq -r '.node_admin // empty' "$CONFIG_FILE")
     NODE_ADMIN_PASS=$(jq -r '.node_admin_pass // empty' "$CONFIG_FILE")
@@ -544,6 +547,12 @@ else
     NIX_CLUSTER_REPO_URL=${NIX_CLUSTER_REPO_URL:-$DEFAULT_NIX_CLUSTER_REPO_URL}
     read -p "nix-cluster install repo URL for controller provisioning [$DEFAULT_NIX_CLUSTER_REPO_URL]: " NIXOS_INSTALL_REPO_URL
     NIXOS_INSTALL_REPO_URL=${NIXOS_INSTALL_REPO_URL:-$DEFAULT_NIX_CLUSTER_REPO_URL}
+    read -p "Module source mode [bundled/registry] [bundled]: " REGISTRY_MODE
+    REGISTRY_MODE=${REGISTRY_MODE:-bundled}
+    if [ "$REGISTRY_MODE" = "registry" ]; then
+        read -p "Module registry URL [$DEFAULT_MODULE_REGISTRY_URL]: " MODULE_REGISTRY_URL
+        MODULE_REGISTRY_URL=${MODULE_REGISTRY_URL:-$DEFAULT_MODULE_REGISTRY_URL}
+    fi
 
     read -p "Enter the group/tier for this node (e.g., media, signaling, db) [default]: " NODE_GROUP
     NODE_GROUP=${NODE_GROUP:-default}
@@ -661,6 +670,9 @@ else
     read -p "Path to custom node imports.nix: " CUSTOM_NODE_IMPORTS
     apply_install_overrides
 fi
+
+REGISTRY_MODE=${REGISTRY_MODE:-bundled}
+MODULE_REGISTRY_URL=${MODULE_REGISTRY_URL:-$DEFAULT_MODULE_REGISTRY_URL}
 
 if [ "${IS_BOOTSTRAP:-false}" = "true" ]; then
     IS_CONTROLLER="true"
@@ -815,6 +827,14 @@ if [ ! -f "flake.nix" ]; then
         NIX_CLUSTER_FLAKE_URL="$(normalize_git_flake_url "$NIX_CLUSTER_REPO_URL")"
         sudo -u "$SERVICE_USER" sed -i "s|git+https://git.smallguytech.org/SGT/nix-cluster.git|${NIX_CLUSTER_FLAKE_URL}|" "$TARGET_DIR/flake.nix"
     fi
+    if [ "${REGISTRY_MODE:-bundled}" = "registry" ] && [ -n "${MODULE_REGISTRY_URL:-}" ]; then
+        MODULE_REGISTRY_FLAKE_URL="$(normalize_git_flake_url "$MODULE_REGISTRY_URL")"
+        sudo -u "$SERVICE_USER" sed -i "/MODULE_REGISTRY_INPUT_PLACEHOLDER/c\
+    moduleRegistry.url = \"${MODULE_REGISTRY_FLAKE_URL}\";\
+    moduleRegistry.inputs.nixpkgs.follows = \"nixpkgs\";" "$TARGET_DIR/flake.nix"
+    else
+        sudo -u "$SERVICE_USER" sed -i '/MODULE_REGISTRY_INPUT_PLACEHOLDER/d' "$TARGET_DIR/flake.nix"
+    fi
 fi
 
 if [ ! -f "$TARGET_DIR/deployments.json" ]; then
@@ -845,6 +865,8 @@ if [ "${IS_CONTROLLER:-false}" = "true" ]; then
         --arg git_token "$GIT_TOKEN" \
         --arg repo_url "$REPO_URL" \
         --arg repo_host_ip "$REPO_HOST_IP" \
+        --arg registry_mode "${REGISTRY_MODE:-bundled}" \
+        --arg module_registry_url "${MODULE_REGISTRY_URL:-$DEFAULT_MODULE_REGISTRY_URL}" \
         --arg node_group "$NODE_GROUP" \
         --arg node_admin "$NODE_ADMIN" \
         --arg node_admin_password_hash "${NODE_ADMIN_PASSWORD_HASH:-}" \
@@ -880,6 +902,8 @@ if [ "${IS_CONTROLLER:-false}" = "true" ]; then
          .git_token = $git_token |
          .repo_url = $repo_url |
          .repo_host_ip = $repo_host_ip |
+         .registry_mode = $registry_mode |
+         .module_registry_url = $module_registry_url |
          .node_group = $node_group |
          .node_admin = $node_admin |
          .node_admin_pass = "" |
@@ -1005,45 +1029,57 @@ if [ ! -d "$GROUP_DIR" ]; then
         log "Using custom group imports.nix from $CUSTOM_GROUP_IMPORTS"
         sudo -u "$SERVICE_USER" cp --no-preserve=mode "$CUSTOM_GROUP_IMPORTS" "$GROUP_DIR/imports.nix"
     else
-        sudo -u "$SERVICE_USER" cp --no-preserve=mode "$TEMPLATES_DIR/imports.nix" "$GROUP_DIR/imports.nix"
+        if [ "${REGISTRY_MODE:-bundled}" = "registry" ]; then
+            cat <<'EOF' | sudo -u "$SERVICE_USER" tee "$GROUP_DIR/imports.nix" > /dev/null
+{ config, pkgs, inputs, ... }:
+
+{
+  imports = [
+    inputs.moduleRegistry.nixosModules.official.caddy
+    inputs.moduleRegistry.nixosModules.official.cloudflared
+    inputs.moduleRegistry.nixosModules.official.postgresBackup
+    inputs.moduleRegistry.nixosModules.official.keepalived
+  ];
+}
+EOF
+        else
+            sudo -u "$SERVICE_USER" cp --no-preserve=mode "$TEMPLATES_DIR/imports.nix" "$GROUP_DIR/imports.nix"
+        fi
     fi
     sudo -u "$SERVICE_USER" chmod -R u+w "$GROUP_DIR"
 fi
 
-log "Ensuring standard module files exist..."
-sudo -u "$SERVICE_USER" mkdir -p "$TARGET_DIR/modules/caddy" "$TARGET_DIR/modules/cloudflare" "$TARGET_DIR/modules/backup" "$TARGET_DIR/modules/ingress" "$TARGET_DIR/modules/pxe"
-for module_spec in \
-    "caddy/caddy.nix:caddy.nix" \
-    "cloudflare/cloudflared.nix:cloudflared.nix" \
-    "backup/postgres.nix:postgres-backup.nix" \
-    "ingress/keepalived.nix:keepalived.nix" \
-    "pxe/pxe.nix:pxe.nix"
-do
-    module_target="${module_spec%%:*}"
-    module_template="${module_spec##*:}"
-    if [ ! -f "$TARGET_DIR/modules/$module_target" ]; then
-        sudo -u "$SERVICE_USER" cp --no-preserve=mode "$TEMPLATES_DIR/$module_template" "$TARGET_DIR/modules/$module_target"
-        sudo -u "$SERVICE_USER" chmod u+w "$TARGET_DIR/modules/$module_target"
-    fi
-done
+if [ "${REGISTRY_MODE:-bundled}" != "registry" ]; then
+    log "Ensuring standard module files exist..."
+    sudo -u "$SERVICE_USER" mkdir -p "$TARGET_DIR/modules/caddy" "$TARGET_DIR/modules/cloudflare" "$TARGET_DIR/modules/backup" "$TARGET_DIR/modules/ingress" "$TARGET_DIR/modules/pxe"
+    for module_spec in \
+        "caddy/caddy.nix:caddy.nix" \
+        "cloudflare/cloudflared.nix:cloudflared.nix" \
+        "backup/postgres.nix:postgres-backup.nix" \
+        "ingress/keepalived.nix:keepalived.nix" \
+        "pxe/pxe.nix:pxe.nix"
+    do
+        module_target="${module_spec%%:*}"
+        module_template="${module_spec##*:}"
+        if [ ! -f "$TARGET_DIR/modules/$module_target" ]; then
+            sudo -u "$SERVICE_USER" cp --no-preserve=mode "$TEMPLATES_DIR/$module_template" "$TARGET_DIR/modules/$module_target"
+            sudo -u "$SERVICE_USER" chmod u+w "$TARGET_DIR/modules/$module_target"
+        fi
+    done
+fi
 
 # Scaffolds a base Caddy module when enabled so generated fleets have a shared reverse proxy layer.
 if [ "${CADDY_ENABLE:-false}" = "true" ]; then
     log "Base Caddy reverse proxy enabled. Scaffolding module..."
 
-    CADDY_MODULE_DIR="$TARGET_DIR/modules/caddy"
-    if [ ! -d "$CADDY_MODULE_DIR" ]; then
-        sudo -u "$SERVICE_USER" mkdir -p "$CADDY_MODULE_DIR"
-        sudo -u "$SERVICE_USER" cp --no-preserve=mode "$TEMPLATES_DIR/caddy.nix" "$CADDY_MODULE_DIR/caddy.nix"
-        sudo -u "$SERVICE_USER" chmod u+w "$CADDY_MODULE_DIR/caddy.nix"
-        log "Created modules/caddy/caddy.nix"
-    fi
-
-    GROUP_IMPORTS="$TARGET_DIR/groups/$NODE_GROUP/imports.nix"
-    if [ -f "$GROUP_IMPORTS" ] && ! grep -q "caddy.nix" "$GROUP_IMPORTS"; then
-        sudo -u "$SERVICE_USER" sed -i 's|CADDY_MODULE_PLACEHOLDER|../../modules/caddy/caddy.nix|' "$GROUP_IMPORTS"
-        sudo -u "$SERVICE_USER" sed -i '/# Add module paths here/a\    ../../modules/caddy/caddy.nix' "$GROUP_IMPORTS"
-        log "Added caddy module to group imports"
+    if [ "${REGISTRY_MODE:-bundled}" != "registry" ]; then
+        CADDY_MODULE_DIR="$TARGET_DIR/modules/caddy"
+        if [ ! -d "$CADDY_MODULE_DIR" ]; then
+            sudo -u "$SERVICE_USER" mkdir -p "$CADDY_MODULE_DIR"
+            sudo -u "$SERVICE_USER" cp --no-preserve=mode "$TEMPLATES_DIR/caddy.nix" "$CADDY_MODULE_DIR/caddy.nix"
+            sudo -u "$SERVICE_USER" chmod u+w "$CADDY_MODULE_DIR/caddy.nix"
+            log "Created modules/caddy/caddy.nix"
+        fi
     fi
 fi
 
@@ -1067,29 +1103,24 @@ if [ "${KEEPALIVED_ENABLE:-false}" = "true" ]; then
         exit 1
     fi
 
-    KEEPALIVED_MODULE_DIR="$TARGET_DIR/modules/ingress"
-    if [ ! -d "$KEEPALIVED_MODULE_DIR" ]; then
-        sudo -u "$SERVICE_USER" mkdir -p "$KEEPALIVED_MODULE_DIR"
-    fi
-    sudo -u "$SERVICE_USER" cp --no-preserve=mode "$TEMPLATES_DIR/keepalived.nix" "$KEEPALIVED_MODULE_DIR/keepalived.nix"
-    sudo -u "$SERVICE_USER" chmod u+w "$KEEPALIVED_MODULE_DIR/keepalived.nix"
-    sudo -u "$SERVICE_USER" sed -i "s|KEEPALIVED_INTERFACE_PLACEHOLDER|${KEEPALIVED_INTERFACE}|" "$KEEPALIVED_MODULE_DIR/keepalived.nix"
-    if [ "${KEEPALIVED_ROLE:-backup}" = "master" ] || [ "${IS_BOOTSTRAP:-false}" = "true" ]; then
-        KEEPALIVED_STATE="MASTER"
-    else
-        KEEPALIVED_STATE="BACKUP"
-    fi
-    sudo -u "$SERVICE_USER" sed -i "s|KEEPALIVED_STATE_PLACEHOLDER|${KEEPALIVED_STATE}|" "$KEEPALIVED_MODULE_DIR/keepalived.nix"
-    sudo -u "$SERVICE_USER" sed -i "s|KEEPALIVED_ROUTER_ID_PLACEHOLDER|${KEEPALIVED_ROUTER_ID}|" "$KEEPALIVED_MODULE_DIR/keepalived.nix"
-    sudo -u "$SERVICE_USER" sed -i "s|KEEPALIVED_PRIORITY_PLACEHOLDER|${KEEPALIVED_PRIORITY}|" "$KEEPALIVED_MODULE_DIR/keepalived.nix"
-    sudo -u "$SERVICE_USER" sed -i "s|KEEPALIVED_VIP_CIDR_PLACEHOLDER|${KEEPALIVED_VIP_CIDR}|" "$KEEPALIVED_MODULE_DIR/keepalived.nix"
-    log "Created modules/ingress/keepalived.nix (interface: $KEEPALIVED_INTERFACE, vip: $KEEPALIVED_VIP_CIDR)"
-
-    GROUP_IMPORTS="$TARGET_DIR/groups/$NODE_GROUP/imports.nix"
-    if [ -f "$GROUP_IMPORTS" ] && ! grep -q "keepalived.nix" "$GROUP_IMPORTS"; then
-        sudo -u "$SERVICE_USER" sed -i 's|KEEPALIVED_MODULE_PLACEHOLDER|../../modules/ingress/keepalived.nix|' "$GROUP_IMPORTS"
-        sudo -u "$SERVICE_USER" sed -i '/# Add module paths here/a\    ../../modules/ingress/keepalived.nix' "$GROUP_IMPORTS"
-        log "Added keepalived module to group imports"
+    if [ "${REGISTRY_MODE:-bundled}" != "registry" ]; then
+        KEEPALIVED_MODULE_DIR="$TARGET_DIR/modules/ingress"
+        if [ ! -d "$KEEPALIVED_MODULE_DIR" ]; then
+            sudo -u "$SERVICE_USER" mkdir -p "$KEEPALIVED_MODULE_DIR"
+        fi
+        sudo -u "$SERVICE_USER" cp --no-preserve=mode "$TEMPLATES_DIR/keepalived.nix" "$KEEPALIVED_MODULE_DIR/keepalived.nix"
+        sudo -u "$SERVICE_USER" chmod u+w "$KEEPALIVED_MODULE_DIR/keepalived.nix"
+        sudo -u "$SERVICE_USER" sed -i "s|KEEPALIVED_INTERFACE_PLACEHOLDER|${KEEPALIVED_INTERFACE}|" "$KEEPALIVED_MODULE_DIR/keepalived.nix"
+        if [ "${KEEPALIVED_ROLE:-backup}" = "master" ] || [ "${IS_BOOTSTRAP:-false}" = "true" ]; then
+            KEEPALIVED_STATE="MASTER"
+        else
+            KEEPALIVED_STATE="BACKUP"
+        fi
+        sudo -u "$SERVICE_USER" sed -i "s|KEEPALIVED_STATE_PLACEHOLDER|${KEEPALIVED_STATE}|" "$KEEPALIVED_MODULE_DIR/keepalived.nix"
+        sudo -u "$SERVICE_USER" sed -i "s|KEEPALIVED_ROUTER_ID_PLACEHOLDER|${KEEPALIVED_ROUTER_ID}|" "$KEEPALIVED_MODULE_DIR/keepalived.nix"
+        sudo -u "$SERVICE_USER" sed -i "s|KEEPALIVED_PRIORITY_PLACEHOLDER|${KEEPALIVED_PRIORITY}|" "$KEEPALIVED_MODULE_DIR/keepalived.nix"
+        sudo -u "$SERVICE_USER" sed -i "s|KEEPALIVED_VIP_CIDR_PLACEHOLDER|${KEEPALIVED_VIP_CIDR}|" "$KEEPALIVED_MODULE_DIR/keepalived.nix"
+        log "Created modules/ingress/keepalived.nix (interface: $KEEPALIVED_INTERFACE, vip: $KEEPALIVED_VIP_CIDR)"
     fi
 fi
 
@@ -1097,12 +1128,14 @@ fi
 if [ "${IS_BOOTSTRAP:-false}" = "true" ]; then
     log "PostgreSQL backup support enabled. Scaffolding module..."
 
-    POSTGRES_BACKUP_MODULE_DIR="$TARGET_DIR/modules/backup"
-    if [ ! -d "$POSTGRES_BACKUP_MODULE_DIR" ]; then
-        sudo -u "$SERVICE_USER" mkdir -p "$POSTGRES_BACKUP_MODULE_DIR"
+    if [ "${REGISTRY_MODE:-bundled}" != "registry" ]; then
+        POSTGRES_BACKUP_MODULE_DIR="$TARGET_DIR/modules/backup"
+        if [ ! -d "$POSTGRES_BACKUP_MODULE_DIR" ]; then
+            sudo -u "$SERVICE_USER" mkdir -p "$POSTGRES_BACKUP_MODULE_DIR"
+        fi
+        sudo -u "$SERVICE_USER" cp --no-preserve=mode "$TEMPLATES_DIR/postgres-backup.nix" "$POSTGRES_BACKUP_MODULE_DIR/postgres.nix"
+        sudo -u "$SERVICE_USER" chmod u+w "$POSTGRES_BACKUP_MODULE_DIR/postgres.nix"
     fi
-    sudo -u "$SERVICE_USER" cp --no-preserve=mode "$TEMPLATES_DIR/postgres-backup.nix" "$POSTGRES_BACKUP_MODULE_DIR/postgres.nix"
-    sudo -u "$SERVICE_USER" chmod u+w "$POSTGRES_BACKUP_MODULE_DIR/postgres.nix"
 
 fi
 
@@ -1110,13 +1143,15 @@ fi
 if [ "${CF_TUNNEL:-false}" = "true" ]; then
     log "Cloudflare Tunnel enabled. Scaffolding modules..."
 
-    # Create cloudflared NixOS module
-    CF_MODULE_DIR="$TARGET_DIR/modules/cloudflare"
-    if [ ! -d "$CF_MODULE_DIR" ]; then
-        sudo -u "$SERVICE_USER" mkdir -p "$CF_MODULE_DIR"
-        sudo -u "$SERVICE_USER" cp --no-preserve=mode "$TEMPLATES_DIR/cloudflared.nix" "$CF_MODULE_DIR/cloudflared.nix"
-        sudo -u "$SERVICE_USER" chmod u+w "$CF_MODULE_DIR/cloudflared.nix"
-        log "Created modules/cloudflare/cloudflared.nix"
+    if [ "${REGISTRY_MODE:-bundled}" != "registry" ]; then
+        # Create cloudflared NixOS module
+        CF_MODULE_DIR="$TARGET_DIR/modules/cloudflare"
+        if [ ! -d "$CF_MODULE_DIR" ]; then
+            sudo -u "$SERVICE_USER" mkdir -p "$CF_MODULE_DIR"
+            sudo -u "$SERVICE_USER" cp --no-preserve=mode "$TEMPLATES_DIR/cloudflared.nix" "$CF_MODULE_DIR/cloudflared.nix"
+            sudo -u "$SERVICE_USER" chmod u+w "$CF_MODULE_DIR/cloudflared.nix"
+            log "Created modules/cloudflare/cloudflared.nix"
+        fi
     fi
 
     # Create Terraform config with substituted values
@@ -1131,18 +1166,6 @@ if [ "${CF_TUNNEL:-false}" = "true" ]; then
         log "Created modules/terraform/main.tf (tunnel: $CF_TUNNEL_NAME, domain: $CF_TUNNEL_DOMAIN, vip: $CF_TUNNEL_VIP)"
     fi
 
-    # Add cloudflared import to group imports.nix if not already present
-    GROUP_IMPORTS="$TARGET_DIR/groups/$NODE_GROUP/imports.nix"
-    if [ -f "$GROUP_IMPORTS" ] && ! grep -q "cloudflared.nix" "$GROUP_IMPORTS"; then
-        sudo -u "$SERVICE_USER" sed -i 's|CLOUDFLARED_MODULE_PLACEHOLDER|../../modules/cloudflare/cloudflared.nix|' "$GROUP_IMPORTS"
-        sudo -u "$SERVICE_USER" sed -i '/# Add module paths here/a\    ../../modules/cloudflare/cloudflared.nix' "$GROUP_IMPORTS"
-        log "Added cloudflared module to group imports"
-    fi
-fi
-
-# Clean up any unused placeholders in the group imports file
-if [ -f "$TARGET_DIR/groups/$NODE_GROUP/imports.nix" ]; then
-    sudo -u "$SERVICE_USER" sed -i '/_MODULE_PLACEHOLDER/d' "$TARGET_DIR/groups/$NODE_GROUP/imports.nix"
 fi
 
 NODE_DIR="$TARGET_DIR/nodes/$HOSTNAME"
@@ -1170,10 +1193,14 @@ sudo -u "$SERVICE_USER" chmod u+w "$NODE_DIR/controllerScript-autoprovision.sh"
 
 # Generate the node's imports.nix with conditional module imports
 IMPORTS_FILE="$NODE_DIR/imports.nix"
-echo "{ config, pkgs, ... }: { imports = [" > "$IMPORTS_FILE"
+echo "{ config, pkgs, inputs, ... }: { imports = [" > "$IMPORTS_FILE"
 echo "  ../../groups/$NODE_GROUP/configuration.nix" >> "$IMPORTS_FILE"
 echo "  ../../groups/$NODE_GROUP/imports.nix" >> "$IMPORTS_FILE"
-echo "  ../../modules/pxe/pxe.nix" >> "$IMPORTS_FILE"
+if [ "${REGISTRY_MODE:-bundled}" = "registry" ]; then
+    echo "  inputs.moduleRegistry.nixosModules.official.pxe" >> "$IMPORTS_FILE"
+else
+    echo "  ../../modules/pxe/pxe.nix" >> "$IMPORTS_FILE"
+fi
 if [ "$IS_BOOTSTRAP" = "true" ]; then
     echo "  ../../modules/forgejo/forgejo.nix" >> "$IMPORTS_FILE"
 fi
@@ -1424,7 +1451,7 @@ fi
 
 log "Adding node to Fleet flake.nix..."
 if ! grep -q "nixosConfigurations.$HOSTNAME" "$TARGET_DIR/flake.nix"; then
-    sudo -u "$SERVICE_USER" sed -i "/# NODES_MARKER/a \    nixosConfigurations.$HOSTNAME = nixpkgs.lib.nixosSystem { system = \"x86_64-linux\"; modules = [ ./nodes/$HOSTNAME/configuration.nix nixCluster.nixosModules.default ]; };" "$TARGET_DIR/flake.nix"
+    sudo -u "$SERVICE_USER" sed -i "/# NODES_MARKER/a \    nixosConfigurations.$HOSTNAME = nixpkgs.lib.nixosSystem { system = \"x86_64-linux\"; specialArgs = { inherit inputs; }; modules = [ ./nodes/$HOSTNAME/configuration.nix nixCluster.nixosModules.default ]; };" "$TARGET_DIR/flake.nix"
 else
     log "Node $HOSTNAME already exists in flake.nix. Skipping insertion."
 fi

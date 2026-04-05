@@ -5,6 +5,10 @@ let
   keepalivedCfg = config.services."nix-cluster".modules.keepalived;
 in
 lib.mkIf (keepalivedCfg.enable && keepalivedCfg.interface != "" && keepalivedCfg.vipCidr != "") {
+  services."nix-cluster".observability.monitoredServices = lib.mkAfter [
+    "keepalived.service"
+  ];
+
   services.keepalived = {
     enable = true;
     vrrpInstances."ingress_vip" = {

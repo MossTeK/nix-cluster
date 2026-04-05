@@ -2,6 +2,10 @@
 { config, pkgs, lib, ... }:
 
 lib.mkIf config.services."nix-cluster".modules.cloudflare.enable {
+  services."nix-cluster".observability.monitoredServices = lib.mkAfter [
+    "cloudflared.service"
+  ];
+
   sops.secrets.cloudflare_tunnel_token = {};
 
   virtualisation.docker.enable = true;

@@ -141,15 +141,10 @@
       storeInitialCluster = if storeCfg.initialCluster != [] then lib.concatStringsSep "," storeCfg.initialCluster else "${storeCfg.name}=${storeAdvertisePeerUrl}";
       trackedUnits = lib.unique (
         [ "nix-cluster.service" ]
-        ++ lib.optionals cfg.modules.caddy.enable [ "caddy.service" ]
-        ++ lib.optionals cfg.modules.keepalived.enable [ "keepalived.service" ]
-        ++ lib.optionals cfg.modules.cloudflare.enable [ "cloudflared.service" ]
-        ++ lib.optionals cfg.modules.pxe.enable [ "caddy.service" ]
-        ++ lib.optionals (cfg.modules.pxe.enable && cfg.modules.pxe.dhcpEnable) [ "dnsmasq.service" ]
-        ++ lib.optionals cfg.modules.postgresBackup.enable [ "postgresqlBackup.timer" ]
         ++ lib.optionals cfg.ha.runtimeStore.localServer.enable [ "nix-cluster-runtime-store.service" ]
         ++ lib.optionals cfg.observability.prometheus.enable [ "prometheus-node-exporter.service" ]
         ++ lib.optionals (cfg.observability.loki.enable && cfg.observability.loki.url != "") [ "promtail.service" ]
+        ++ cfg.observability.monitoredServices
         ++ cfg.observability.extraTrackedUnits
       );
       # Serializes repo path and rebuild commands to a JSON file the Python daemon reads at startup.
@@ -410,6 +405,11 @@
           type = lib.types.listOf lib.types.str;
           default = [];
           description = "Additional systemd units to include in on-demand observability checks.";
+        };
+        observability.monitoredServices = lib.mkOption {
+          type = lib.types.listOf lib.types.str;
+          default = [];
+          description = "Systemd units appended by external or registry-backed modules so the HA reporter and diagnostics can track them without core hard-coding every module.";
         };
         observability.prometheus = {
           enable = lib.mkEnableOption "Prometheus node exporter integration for nix-cluster runtime metrics";

@@ -12,11 +12,13 @@
     nixCluster.inputs.nixpkgs.follows = "nixpkgs";
     nixCluster.inputs.sops-nix.follows = "sops-nix";
 
+    MODULE_REGISTRY_INPUT_PLACEHOLDER
+
     # disko for declarative disk partitioning
     disko.url = "github:nix-community/disko";
   };
 
-  outputs = { self, nixpkgs, sops-nix, nixCluster, disko, ... }: {
+  outputs = inputs@{ self, nixpkgs, sops-nix, nixCluster, disko, ... }: {
     
     # nix-cluster install appends nixosConfigurations.<hostname> entries below this line via sed.
     # NODES_MARKER

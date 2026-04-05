@@ -17,6 +17,10 @@ let
   '';
 in
 lib.mkIf (pxeCfg.enable && config.services."nix-cluster".isController) {
+  services."nix-cluster".observability.monitoredServices = lib.mkAfter (
+    [ "caddy.service" ] ++ lib.optionals pxeCfg.dhcpEnable [ "dnsmasq.service" ]
+  );
+
   environment.etc."pxe/tftp".source = "${pkgs.ipxe}/share/ipxe";
   environment.etc."pxe/http/boot.ipxe".text = bootScript;
 
