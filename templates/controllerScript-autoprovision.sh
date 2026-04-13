@@ -379,10 +379,11 @@ publish_join_state() {
 
 provision_live_installer() {
   local PXE_TEMP_DISABLED=0
-  local TMP_DIR
-  local HOST_ID
   local HASHED_PASS
-  local AUTHORIZED_KEYS_JSON
+  local INSTALLER_FLAKE_URL="git+NIXOS_INSTALL_REPO_URL_PLACEHOLDER"
+  local install_cmd=()
+  local install_cmd_quoted=""
+  local arg
 
   if [ -z "$DISK" ] || [ -z "$FS" ]; then
     echo "[nix-cluster] $HOSTNAME is missing disk or fs in deployments.json. Skipping."
@@ -397,10 +398,7 @@ provision_live_installer() {
     return 1
   fi
 
-  publish_join_state "provisioning-live-installer" "running nixos-anywhere"
-
-  TMP_DIR=$(mktemp -d)
-  HOST_ID=$(head -c 4 /dev/urandom | od -A n -t x4 | tr -d ' ' | cut -c 1-8)
+  publish_join_state "provisioning-live-installer" "running nixos-install over ssh"
   if [ -n "$NODE_ADMIN_PASSWORD_HASH" ]; then
     HASHED_PASS="$NODE_ADMIN_PASSWORD_HASH"
   elif [ -n "$NODE_ADMIN_PASS" ]; then
@@ -409,104 +407,42 @@ provision_live_installer() {
     HASHED_PASS="!"
   fi
 
-  AUTHORIZED_KEYS_JSON=$(jq -cn \
-    --arg controller "$CONTROLLER_SSH_PUB_KEY" \
-    --arg installer "$INSTALLER_SSH_PUB_KEY" \
-    '[ $controller, $installer ] | map(select(length > 0)) | unique')
+  install_cmd=(
+    nix
+    --extra-experimental-features
+    "nix-command flakes"
+    run
+    --refresh
+    --no-write-lock-file
+    "$INSTALLER_FLAKE_URL"
+    --
+    --hostname "$HOSTNAME"
+    --disk "$DISK"
+    --fs "$FS"
+    --admin "$NODE_ADMIN"
+    --ssh-key "$CONTROLLER_SSH_PUB_KEY"
+  )
 
-  cat <<EOF > "$TMP_DIR/flake.nix"
-{
-  inputs = {
-    nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
-    disko.url = "github:nix-community/disko";
-    nixos-install.url = "git+NIXOS_INSTALL_REPO_URL_PLACEHOLDER";
-  };
-  outputs = { self, nixpkgs, disko, nixos-install }:
-    let
-      renderedDisko = builtins.toFile "disko-$FS.nix" (
-        builtins.replaceStrings [ "__DISK__" ] [ "$DISK" ]
-          (builtins.readFile (nixos-install + "/templates/disko-$FS.nix"))
-      );
-    in {
-    nixosConfigurations."$HOSTNAME" = nixpkgs.lib.nixosSystem {
-      system = "x86_64-linux";
-      modules = [
-        disko.nixosModules.disko
-        renderedDisko
-        ({ lib, ... }: lib.mkMerge [
-          {
-            networking.hostName = "$HOSTNAME";
-            networking.hostId = "$HOST_ID";
-            networking.networkmanager.enable = true;
-
-            services.openssh.enable = true;
-            services.openssh.openFirewall = true;
-            services.openssh.settings.PasswordAuthentication = $SSH_PASSWORD_AUTH;
-            services.openssh.settings.KbdInteractiveAuthentication = false;
-            services.openssh.settings.PermitRootLogin = "no";
-
-            users.mutableUsers = false;
-            users.users.$NODE_ADMIN = {
-              isNormalUser = true;
-              extraGroups = [ "wheel" "networkmanager" ];
-              hashedPassword = "$HASHED_PASS";
-              openssh.authorizedKeys.keys = builtins.fromJSON ''$AUTHORIZED_KEYS_JSON'';
-            };
-
-            security.sudo.wheelNeedsPassword = false;
-            nix.settings = {
-              experimental-features = [ "nix-command" "flakes" ];
-              trusted-users = [ "root" "$NODE_ADMIN" ];
-            };
-            system.stateVersion = "25.11";
-          }
-          (lib.mkIf ("$FS" == "zfs") {
-            boot.loader.systemd-boot.enable = false;
-            boot.loader.grub.enable = true;
-            boot.loader.grub.devices = [ "nodev" ];
-            boot.loader.grub.efiSupport = true;
-            boot.loader.grub.useOSProber = false;
-            boot.loader.efi.canTouchEfiVariables = true;
-            boot.initrd.supportedFilesystems = [ "zfs" ];
-            boot.supportedFilesystems = [ "zfs" ];
-            boot.zfs.forceImportRoot = true;
-            services.zfs.autoScrub.enable = true;
-          })
-          (lib.mkIf ("$FS" != "zfs") {
-            boot.loader.systemd-boot.enable = true;
-            boot.loader.efi.canTouchEfiVariables = true;
-          })
-        ])
-      ];
-    };
-  };
-}
-EOF
-
-  if [ "$INSTALLER_AUTH_MODE" = "ssh_key" ] || { [ "$INSTALLER_AUTH_MODE" = "auto" ] && can_login_with_key "$INSTALLER_USER" "$INSTALLER_IP"; }; then
-    nix --extra-experimental-features "nix-command flakes" run github:nix-community/nixos-anywhere -- \
-      --phases kexec,disko,install \
-      --flake "$TMP_DIR#$HOSTNAME" \
-      --target-host "$INSTALLER_USER@$INSTALLER_IP"
-  elif [ "$INSTALLER_AUTH_MODE" = "password" ] && [ -n "$INSTALLER_PASSWORD" ]; then
-    SSHPASS="$INSTALLER_PASSWORD" nix --extra-experimental-features "nix-command flakes" run github:nix-community/nixos-anywhere -- \
-      --env-password \
-      --phases kexec,disko,install \
-      --flake "$TMP_DIR#$HOSTNAME" \
-      --target-host "$INSTALLER_USER@$INSTALLER_IP"
-  elif [ "$INSTALLER_AUTH_MODE" = "auto" ] && [ -n "$INSTALLER_PASSWORD" ]; then
-    SSHPASS="$INSTALLER_PASSWORD" nix --extra-experimental-features "nix-command flakes" run github:nix-community/nixos-anywhere -- \
-      --env-password \
-      --phases kexec,disko,install \
-      --flake "$TMP_DIR#$HOSTNAME" \
-      --target-host "$INSTALLER_USER@$INSTALLER_IP"
-  else
-    echo "[nix-cluster] $HOSTNAME is reachable on the live installer, but no password was provided. Skipping."
-    rm -rf "$TMP_DIR"
-    return 1
+  if [ -n "$INSTALLER_SSH_PUB_KEY" ] && [ "$INSTALLER_SSH_PUB_KEY" != "$CONTROLLER_SSH_PUB_KEY" ]; then
+    install_cmd+=(--ssh-key "$INSTALLER_SSH_PUB_KEY")
   fi
 
-  rm -rf "$TMP_DIR"
+  install_cmd+=(
+    --admin-password-hash "$HASHED_PASS"
+    --packages git vim
+    --force
+  )
+
+  for arg in "${install_cmd[@]}"; do
+    printf -v arg '%q' "$arg"
+    install_cmd_quoted+="$arg "
+  done
+
+  if ! run_remote_sudo_command "$INSTALLER_USER" "$INSTALLER_IP" "$INSTALLER_PASSWORD" "$INSTALLER_AUTH_MODE" "$install_cmd_quoted"; then
+    echo "[nix-cluster] Failed to run nixos-install on $HOSTNAME."
+    publish_join_state "install-failed" "remote nixos-install command failed"
+    return 1
+  fi
 
   if stop_pixiecore_for_disk_boot; then
     PXE_TEMP_DISABLED=1
@@ -576,6 +512,11 @@ while read -r node; do
   if [ -z "$INSTALLER_SSH_PUB_KEY" ]; then
     INSTALLER_SSH_PUB_KEY="$CONTROLLER_SSH_PUB_KEY"
   fi
+
+  NODE_SSH_KEYS_JSON=$(jq -cn \
+    --arg controller "$CONTROLLER_SSH_PUB_KEY" \
+    --arg installer "$INSTALLER_SSH_PUB_KEY" \
+    '[ $controller, $installer ] | map(select(length > 0)) | unique')
 
   publish_node_inventory "deployments.json" "desired"
   publish_join_state "desired" "inventory record loaded from deployments.json"
@@ -652,6 +593,7 @@ while read -r node; do
         --arg admin "$NODE_ADMIN" \
         --arg admin_password_hash "$NODE_ADMIN_PASSWORD_HASH" \
         --arg node_ssh_pub_key "$CONTROLLER_SSH_PUB_KEY" \
+        --argjson node_ssh_pub_keys "$NODE_SSH_KEYS_JSON" \
         --arg installer_auth_mode "$INSTALLER_AUTH_MODE" \
         --arg installer_ssh_pub_key "$INSTALLER_SSH_PUB_KEY" \
         --argjson ssh_password_auth "$SSH_PASSWORD_AUTH" \
@@ -669,6 +611,7 @@ while read -r node; do
          .node_admin_pass = "" |
          .node_admin_password_hash = $admin_password_hash |
          .node_ssh_pub_key = $node_ssh_pub_key |
+         .node_ssh_pub_keys = $node_ssh_pub_keys |
          .ssh_password_auth = $ssh_password_auth |
          .installer_auth_mode = $installer_auth_mode |
          .installer_ssh_pub_key = $installer_ssh_pub_key |
@@ -686,6 +629,7 @@ while read -r node; do
         --arg admin "$NODE_ADMIN" \
         --arg admin_password_hash "$NODE_ADMIN_PASSWORD_HASH" \
         --arg node_ssh_pub_key "$CONTROLLER_SSH_PUB_KEY" \
+        --argjson node_ssh_pub_keys "$NODE_SSH_KEYS_JSON" \
         --arg installer_auth_mode "$INSTALLER_AUTH_MODE" \
         --arg installer_ssh_pub_key "$INSTALLER_SSH_PUB_KEY" \
         --argjson ssh_password_auth "$SSH_PASSWORD_AUTH" \
@@ -693,11 +637,11 @@ while read -r node; do
         --arg keepalived_role "$KEEPALIVED_ROLE" \
         --arg fleet_private_key "$(sudo cat "$SOPS_KEY")" \
         --arg webhook_secret "$WEBHOOK_SECRET" \
-        '{bootstrap_mode: false, is_controller: ($node_role == "controller"), git_user: $git_user, git_token: $git_token, repo_url: $repo_url, node_group: $node_group, node_admin: $admin, node_admin_pass: "", node_admin_password_hash: $admin_password_hash, node_ssh_pub_key: $node_ssh_pub_key, ssh_password_auth: $ssh_password_auth, installer_auth_mode: $installer_auth_mode, installer_ssh_pub_key: $installer_ssh_pub_key, node_role: $node_role, keepalived_role: $keepalived_role, fleet_private_key: $fleet_private_key, trigger_choice: "2", webhook_secret: $webhook_secret}' > "$CONFIG_JSON"
+        '{bootstrap_mode: false, is_controller: ($node_role == "controller"), git_user: $git_user, git_token: $git_token, repo_url: $repo_url, node_group: $node_group, node_admin: $admin, node_admin_pass: "", node_admin_password_hash: $admin_password_hash, node_ssh_pub_key: $node_ssh_pub_key, node_ssh_pub_keys: $node_ssh_pub_keys, ssh_password_auth: $ssh_password_auth, installer_auth_mode: $installer_auth_mode, installer_ssh_pub_key: $installer_ssh_pub_key, node_role: $node_role, keepalived_role: $keepalived_role, fleet_private_key: $fleet_private_key, trigger_choice: "2", webhook_secret: $webhook_secret}' > "$CONFIG_JSON"
     fi
 
     if copy_to_remote "$CONFIG_JSON" "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" /tmp/nix-cluster-config.json auto; then
-      run_remote_sudo_command "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" auto "nix --extra-experimental-features 'nix-command flakes' shell nixpkgs#git -c nix --extra-experimental-features 'nix-command flakes' run git+https://git.smallguytech.org/SGT/nix-cluster.git#install -- --config /tmp/nix-cluster-config.json"
+      run_remote_sudo_command "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" auto "nix --extra-experimental-features 'nix-command flakes' shell nixpkgs#git -c nix --extra-experimental-features 'nix-command flakes' run git+NIX_CLUSTER_INSTALL_REPO_URL_PLACEHOLDER#install -- --config /tmp/nix-cluster-config.json"
       publish_join_state "install-triggered" "remote nix-cluster install command started"
     else
       echo "[nix-cluster] Failed to copy worker config to $HOSTNAME. Skipping enrollment."

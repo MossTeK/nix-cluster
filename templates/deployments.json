@@ -1,18 +1,18 @@
 [
   {
-    "hostname": "node5",
-    "installer_ip": "192.168.2.105",
+    "hostname": "worker-01",
+    "installer_ip": "192.168.1.105",
     "installer_user": "nixos",
     "installer_auth_mode": "ssh_key",
     "installer_ssh_pub_key": "",
     "installer_password": "",
     "reinstall": false,
-    "disk": "/dev/nvme0n1",
+    "disk": "/dev/sda",
     "fs": "zfs",
-    "node_group": "web",
+    "node_group": "default",
     "node_role": "worker",
     "keepalived_role": "backup",
-    "node_admin": "moss",
+    "node_admin": "admin",
     "ssh_password_auth": false,
     "node_admin_pass": "",
     "node_admin_password_hash": ""

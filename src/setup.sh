@@ -484,7 +484,8 @@ if [ "$NON_INTERACTIVE" = true ]; then
     NODE_ADMIN=$(jq -r '.node_admin // empty' "$CONFIG_FILE")
     NODE_ADMIN_PASS=$(jq -r '.node_admin_pass // empty' "$CONFIG_FILE")
     NODE_ADMIN_PASSWORD_HASH=$(jq -r '.node_admin_password_hash // empty' "$CONFIG_FILE")
-    NODE_SSH_PUB_KEY=$(jq -r '.node_ssh_pub_key // empty' "$CONFIG_FILE")
+    NODE_SSH_PUB_KEY=$(jq -r 'if (.node_ssh_pub_key // "") != "" then .node_ssh_pub_key elif ((.node_ssh_pub_keys // []) | length) > 0 then .node_ssh_pub_keys[0] else "" end' "$CONFIG_FILE")
+    NODE_SSH_PUB_KEYS_JSON=$(jq -c '(.node_ssh_pub_keys // []) as $keys | if ($keys | length) > 0 then $keys elif (.node_ssh_pub_key // "") != "" then [ .node_ssh_pub_key ] else [] end' "$CONFIG_FILE")
     SSH_PASSWORD_AUTH=$(jq -r '.ssh_password_auth // "false"' "$CONFIG_FILE")
     INSTALLER_AUTH_MODE=$(jq -r '.installer_auth_mode // "ssh_key"' "$CONFIG_FILE")
     INSTALLER_SSH_PUB_KEY=$(jq -r '.installer_ssh_pub_key // empty' "$CONFIG_FILE")
@@ -559,6 +560,11 @@ else
 
     read -p "SETUP ADMIN USERNAME (for this node): " NODE_ADMIN
     read -p "Optional: Enter SSH Public Key for $NODE_ADMIN (Leave blank to skip): " NODE_SSH_PUB_KEY
+    if [ -n "$NODE_SSH_PUB_KEY" ]; then
+        NODE_SSH_PUB_KEYS_JSON=$(jq -cn --arg key "$NODE_SSH_PUB_KEY" '[ $key ]')
+    else
+        NODE_SSH_PUB_KEYS_JSON='[]'
+    fi
     echo ""
     read -p "Enable SSH password authentication for $NODE_ADMIN? (y/N): " SSH_PASSWORD_AUTH_PROMPT
     if [[ "$SSH_PASSWORD_AUTH_PROMPT" =~ ^[Yy]$ ]]; then
@@ -698,13 +704,16 @@ if [ -n "${NODE_ADMIN_PASS:-}" ] && [ -z "${NODE_ADMIN_PASSWORD_HASH:-}" ]; then
     NODE_ADMIN_PASSWORD_HASH=$(mkpasswd -m sha-512 -s <<< "$NODE_ADMIN_PASS")
 fi
 
+NODE_SSH_PUB_KEYS_JSON=${NODE_SSH_PUB_KEYS_JSON:-$(if [ -n "${NODE_SSH_PUB_KEY:-}" ]; then jq -cn --arg key "$NODE_SSH_PUB_KEY" '[ $key ]'; else printf '[]'; fi)}
+NODE_SSH_PUB_KEY=$(jq -r '.[0] // ""' <<< "$NODE_SSH_PUB_KEYS_JSON")
+
 if [ "${SSH_PASSWORD_AUTH:-false}" = "true" ] && [ -z "${NODE_ADMIN_PASSWORD_HASH:-}" ]; then
     echo "Error: ssh_password_auth=true requires node_admin_pass or node_admin_password_hash."
     exit 1
 fi
 
-if [ -z "${NODE_SSH_PUB_KEY:-}" ] && [ -z "${NODE_ADMIN_PASSWORD_HASH:-}" ]; then
-    echo "Error: Provide node_ssh_pub_key or an admin password/hash so the node remains accessible."
+if [ "$(jq -r 'length' <<< "$NODE_SSH_PUB_KEYS_JSON")" -eq 0 ] && [ -z "${NODE_ADMIN_PASSWORD_HASH:-}" ]; then
+    echo "Error: Provide node_ssh_pub_key/node_ssh_pub_keys or an admin password/hash so the node remains accessible."
     exit 1
 fi
 
@@ -859,6 +868,7 @@ if [ "${IS_CONTROLLER:-false}" = "true" ]; then
     log "Hydrating repository-level install templates..."
     NIX_CLUSTER_CONFIG_TEMPLATE_SRC=$(mktemp)
     NIX_CLUSTER_CONFIG_TEMPLATE_TMP=$(mktemp)
+    CONTROLLER_NODE_SSH_PUB_KEYS_JSON=$(jq -cn --arg key "$CONTROLLER_NODE_SSH_PUB_KEY" '[ $key ]')
     prepare_json_for_edit "$CONFIG_TEMPLATE_PATH" "$NIX_CLUSTER_CONFIG_TEMPLATE_SRC"
     jq \
         --arg git_user "$GIT_USER" \
@@ -871,6 +881,7 @@ if [ "${IS_CONTROLLER:-false}" = "true" ]; then
         --arg node_admin "$NODE_ADMIN" \
         --arg node_admin_password_hash "${NODE_ADMIN_PASSWORD_HASH:-}" \
         --arg node_ssh_pub_key "$CONTROLLER_NODE_SSH_PUB_KEY" \
+        --argjson node_ssh_pub_keys "$CONTROLLER_NODE_SSH_PUB_KEYS_JSON" \
         --arg node_role "${NODE_ROLE:-worker}" \
         --arg keepalived_role "${KEEPALIVED_ROLE:-backup}" \
         --arg installer_auth_mode "${INSTALLER_AUTH_MODE:-ssh_key}" \
@@ -909,6 +920,7 @@ if [ "${IS_CONTROLLER:-false}" = "true" ]; then
          .node_admin_pass = "" |
          .node_admin_password_hash = $node_admin_password_hash |
          .node_ssh_pub_key = $node_ssh_pub_key |
+         .node_ssh_pub_keys = $node_ssh_pub_keys |
          .ssh_password_auth = $ssh_password_auth |
          .node_role = $node_role |
          .keepalived_role = $keepalived_role |
@@ -1183,11 +1195,11 @@ sudo -u "$SERVICE_USER" cp --no-preserve=mode "$TEMPLATES_DIR/controllerScript-a
 sudo -u "$SERVICE_USER" chmod u+w "$NODE_DIR/controllerScript-autoprovision.sh"
     if [ -n "${NIXOS_INSTALL_REPO_URL:-}" ]; then
         NIXOS_INSTALL_FLAKE_URL="$(normalize_git_flake_url "$NIXOS_INSTALL_REPO_URL")"
-        sudo -u "$SERVICE_USER" sed -i "s|git+https://git.smallguytech.org/SGT/nix-cluster.git|${NIXOS_INSTALL_FLAKE_URL}|" "$NODE_DIR/controllerScript-autoprovision.sh"
+        sudo -u "$SERVICE_USER" sed -i "s|git+NIXOS_INSTALL_REPO_URL_PLACEHOLDER|${NIXOS_INSTALL_FLAKE_URL}|" "$NODE_DIR/controllerScript-autoprovision.sh"
     fi
-    if [ -n "${NIX_CLUSTER_REPO_URL:-}" ] && [ -z "${NIXOS_INSTALL_REPO_URL:-}" ]; then
+    if [ -n "${NIX_CLUSTER_REPO_URL:-}" ]; then
         NIX_CLUSTER_INSTALL_FLAKE_URL="$(normalize_git_flake_url "$NIX_CLUSTER_REPO_URL")"
-        sudo -u "$SERVICE_USER" sed -i "s|git+https://git.smallguytech.org/SGT/nix-cluster.git|${NIX_CLUSTER_INSTALL_FLAKE_URL}|" "$NODE_DIR/controllerScript-autoprovision.sh"
+        sudo -u "$SERVICE_USER" sed -i "s|git+NIX_CLUSTER_INSTALL_REPO_URL_PLACEHOLDER|${NIX_CLUSTER_INSTALL_FLAKE_URL}|" "$NODE_DIR/controllerScript-autoprovision.sh"
     fi
 
 
@@ -1253,12 +1265,12 @@ else
     sudo -u "$SERVICE_USER" sed -i 's|ADMIN_PASSWORD_CONFIG_PLACEHOLDER|hashedPassword = "!";|' "$NODE_DIR/configuration.nix"
 fi
 
-if [ -n "$NODE_SSH_PUB_KEY" ]; then
-    # Safely escape slashes in the key string just in case
-    SAFE_SSH_KEY=$(echo "$NODE_SSH_PUB_KEY" | sed 's|/|\\/|g')
-    sudo -u "$SERVICE_USER" sed -i "s|SSH_PUB_KEY_PLACEHOLDER|openssh.authorizedKeys.keys = [ \"$SAFE_SSH_KEY\" ];|" "$NODE_DIR/configuration.nix"
+SSH_KEYS_NIX_EXPR=$(jq -r 'if length == 0 then "" else "openssh.authorizedKeys.keys = [ " + (map(@json) | join(" ")) + " ];" end' <<< "$NODE_SSH_PUB_KEYS_JSON")
+if [ -n "$SSH_KEYS_NIX_EXPR" ]; then
+    SAFE_SSH_KEYS_EXPR=$(nix_cluster_escape_sed "$SSH_KEYS_NIX_EXPR")
+    sudo -u "$SERVICE_USER" sed -i "s|SSH_PUB_KEYS_PLACEHOLDER|$SAFE_SSH_KEYS_EXPR|" "$NODE_DIR/configuration.nix"
 else
-    sudo -u "$SERVICE_USER" sed -i "/SSH_PUB_KEY_PLACEHOLDER/d" "$NODE_DIR/configuration.nix"
+    sudo -u "$SERVICE_USER" sed -i "/SSH_PUB_KEYS_PLACEHOLDER/d" "$NODE_DIR/configuration.nix"
 fi
 
 SAFE_CONTROLLER_PXE_KEY=$(nix_cluster_escape_sed "$CONTROLLER_NODE_SSH_PUB_KEY")

@@ -81,7 +81,7 @@
     isNormalUser = true;
     extraGroups = [ "wheel" "networkmanager" ];
     ADMIN_PASSWORD_CONFIG_PLACEHOLDER
-    SSH_PUB_KEY_PLACEHOLDER
+    SSH_PUB_KEYS_PLACEHOLDER
   };
 
   security.sudo.wheelNeedsPassword = false;
