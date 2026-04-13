@@ -446,6 +446,135 @@ wait_for_login() {
   return 0
 }
 
+subnet_prefix_from_ip() {
+  local ip="$1"
+
+  if [[ "$ip" =~ ^([0-9]+\.[0-9]+\.[0-9]+)\.[0-9]+$ ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+    return 0
+  fi
+
+  return 1
+}
+
+resolved_hostname_candidates() {
+  local candidate
+
+  for candidate in "$HOSTNAME" "${HOSTNAME}.local"; do
+    getent ahostsv4 "$candidate" 2>/dev/null | awk '{print $1}' || true
+  done
+}
+
+ping_sweep_subnet() {
+  local prefix="$1"
+  local ip
+  local active_jobs=0
+
+  for i in $(seq 1 254); do
+    ip="${prefix}.${i}"
+    if [ "$ip" = "$CONTROLLER_PRIMARY_IP" ]; then
+      continue
+    fi
+
+    ( ping -c 1 -W 1 "$ip" >/dev/null 2>&1 && printf '%s\n' "$ip" ) || true &
+    active_jobs=$((active_jobs + 1))
+
+    if [ "$active_jobs" -ge 32 ]; then
+      wait >/dev/null 2>&1 || true
+      active_jobs=0
+    fi
+  done
+
+  wait >/dev/null 2>&1 || true
+}
+
+candidate_node_ips() {
+  local prefix=""
+
+  {
+    printf '%s\n' "$INSTALLER_IP"
+    resolved_hostname_candidates
+    ip neigh show 2>/dev/null | awk '{print $1}' || true
+
+    if prefix=$(subnet_prefix_from_ip "$INSTALLER_IP"); then
+      ping_sweep_subnet "$prefix"
+    fi
+  } | awk 'NF && !seen[$0]++'
+}
+
+remote_hostname_matches() {
+  local user="$1"
+  local host="$2"
+  local password="$3"
+  local auth_mode="$4"
+  local remote_hostname
+
+  if ! can_login "$user" "$host" "$password" "$auth_mode"; then
+    return 1
+  fi
+
+  remote_hostname=$(run_remote "$user" "$host" "$password" "$auth_mode" "hostname -s 2>/dev/null || hostname" 2>/dev/null | tail -n 1 | tr -d '\r')
+  [ "$remote_hostname" = "$HOSTNAME" ]
+}
+
+discover_node_ip() {
+  local candidate_ip
+
+  while IFS= read -r candidate_ip; do
+    [ -n "$candidate_ip" ] || continue
+
+    if remote_hostname_matches "$NODE_ADMIN" "$candidate_ip" "$NODE_ADMIN_PASS" auto; then
+      printf '%s\n' "$candidate_ip"
+      return 0
+    fi
+
+    if remote_hostname_matches "nix-cluster" "$candidate_ip" "" ssh_key; then
+      printf '%s\n' "$candidate_ip"
+      return 0
+    fi
+  done < <(candidate_node_ips)
+
+  return 1
+}
+
+refresh_node_ip_if_needed() {
+  local reason="$1"
+  local discovered_ip=""
+
+  if discovered_ip=$(discover_node_ip 2>/dev/null); then
+    if [ "$discovered_ip" != "$INSTALLER_IP" ]; then
+      echo "[nix-cluster] $HOSTNAME detected at DHCP address $discovered_ip instead of inventory address $INSTALLER_IP."
+      INSTALLER_IP="$discovered_ip"
+      publish_join_state "dhcp-address-detected" "$reason; discovered $HOSTNAME at $INSTALLER_IP"
+    fi
+    return 0
+  fi
+
+  return 1
+}
+
+wait_for_installed_node_login() {
+  local max_attempts="${1:-36}"
+  local attempt=1
+
+  until can_login "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" auto; do
+    refresh_node_ip_if_needed "waiting for installed OS after reboot" || true
+
+    if can_login "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" auto; then
+      break
+    fi
+
+    if [ "$attempt" -ge "$max_attempts" ]; then
+      return 1
+    fi
+
+    sleep 10
+    attempt=$((attempt + 1))
+  done
+
+  return 0
+}
+
 seed_installer_authorized_key() {
   local ssh_pub_key_escaped="$1"
 
@@ -607,7 +736,7 @@ provision_live_installer() {
   publish_join_state "waiting-for-installed-os" "waiting for first boot after install"
 
   echo "[nix-cluster] Waiting for $HOSTNAME to reboot..."
-  if ! wait_for_login "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" 36; then
+  if ! wait_for_installed_node_login 36; then
     if [ "$PXE_TEMP_DISABLED" -eq 1 ]; then
       start_pixiecore_after_disk_boot
     fi
@@ -627,7 +756,7 @@ provision_live_installer() {
     start_pixiecore_after_disk_boot
   fi
 
-  publish_join_state "installed-os-online" "installed system is reachable"
+  publish_join_state "installed-os-online" "installed system is reachable at $INSTALLER_IP"
 
   return 0
 }
@@ -677,6 +806,12 @@ while read -r node; do
 
   publish_node_inventory "deployments.json" "desired"
   publish_join_state "desired" "inventory record loaded from deployments.json"
+
+  if ! can_login_with_key nix-cluster "$INSTALLER_IP" \
+    && ! can_login "$INSTALLER_USER" "$INSTALLER_IP" "$INSTALLER_PASSWORD" "$INSTALLER_AUTH_MODE" \
+    && ! can_login "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" auto; then
+    refresh_node_ip_if_needed "preflight node discovery" || true
+  fi
 
   # State 1: Already active (answers as nix-cluster)
   if can_login_with_key nix-cluster "$INSTALLER_IP"; then
