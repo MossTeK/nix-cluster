@@ -828,6 +828,27 @@ normalize_git_flake_url() {
     printf '%s\n' "$url"
 }
 
+normalize_tarball_flake_url() {
+    local url="$1"
+
+    if [[ "$url" =~ /archive/.*\.tar\.gz($|\?) ]]; then
+        printf '%s\n' "$url"
+        return 0
+    fi
+
+    if [[ "$url" =~ ^https?://[^[:space:]]+\.git$ ]]; then
+        printf '%s\n' "${url%.git}/archive/main.tar.gz"
+        return 0
+    fi
+
+    if [[ "$url" =~ ^https?://[^[:space:]]+$ ]]; then
+        printf '%s\n' "${url%/}/archive/main.tar.gz"
+        return 0
+    fi
+
+    printf '%s\n' "$url"
+}
+
 if [ ! -f "flake.nix" ]; then
     log "Empty fleet repository detected. Initializing base flake..."
     sudo -u "$SERVICE_USER" cp --no-preserve=mode "$TEMPLATES_DIR/flake.nix" "$TARGET_DIR/flake.nix"
@@ -1194,8 +1215,8 @@ fi
 sudo -u "$SERVICE_USER" cp --no-preserve=mode "$TEMPLATES_DIR/controllerScript-autoprovision.sh" "$NODE_DIR/controllerScript-autoprovision.sh"
 sudo -u "$SERVICE_USER" chmod u+w "$NODE_DIR/controllerScript-autoprovision.sh"
     if [ -n "${NIXOS_INSTALL_REPO_URL:-}" ]; then
-        NIXOS_INSTALL_FLAKE_URL="$(normalize_git_flake_url "$NIXOS_INSTALL_REPO_URL")"
-        sudo -u "$SERVICE_USER" sed -i "s|git+NIXOS_INSTALL_REPO_URL_PLACEHOLDER|${NIXOS_INSTALL_FLAKE_URL}|" "$NODE_DIR/controllerScript-autoprovision.sh"
+        NIXOS_INSTALL_FLAKE_URL="$(normalize_tarball_flake_url "$NIXOS_INSTALL_REPO_URL")"
+        sudo -u "$SERVICE_USER" sed -i "s|NIXOS_INSTALL_REPO_URL_PLACEHOLDER|${NIXOS_INSTALL_FLAKE_URL}|" "$NODE_DIR/controllerScript-autoprovision.sh"
     fi
     if [ -n "${NIX_CLUSTER_REPO_URL:-}" ]; then
         NIX_CLUSTER_INSTALL_FLAKE_URL="$(normalize_git_flake_url "$NIX_CLUSTER_REPO_URL")"

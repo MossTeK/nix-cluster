@@ -647,7 +647,7 @@ publish_join_state() {
 provision_live_installer() {
   local PXE_TEMP_DISABLED=0
   local HASHED_PASS
-  local INSTALLER_FLAKE_URL="git+NIXOS_INSTALL_REPO_URL_PLACEHOLDER"
+  local INSTALLER_FLAKE_URL="NIXOS_INSTALL_REPO_URL_PLACEHOLDER"
   local install_cmd=()
   local install_cmd_quoted=""
   local install_log_file
