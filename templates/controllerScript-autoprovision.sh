@@ -14,9 +14,143 @@ SSH_BASE_OPTS=(
   -o ConnectTimeout=5
 )
 TEMP_FILES=()
+CONTROLLER_LOG_DIR="/home/nix-cluster/log"
+PROVISIONING_LOG_ROOT="${CONTROLLER_LOG_DIR}/provisioning"
+CURRENT_NODE_LOG_DIR=""
 
 timestamp_utc() {
   date -u +"%Y-%m-%dT%H:%M:%SZ"
+}
+
+sanitize_path_component() {
+  printf '%s\n' "$1" | tr -cs 'A-Za-z0-9._-' '_'
+}
+
+ensure_provisioning_log_root() {
+  mkdir -p "$PROVISIONING_LOG_ROOT"
+}
+
+ensure_node_log_dir() {
+  local safe_host
+
+  if [ -n "$CURRENT_NODE_LOG_DIR" ]; then
+    printf '%s\n' "$CURRENT_NODE_LOG_DIR"
+    return 0
+  fi
+
+  safe_host=$(sanitize_path_component "$HOSTNAME")
+  CURRENT_NODE_LOG_DIR="${PROVISIONING_LOG_ROOT}/${safe_host}/$(date -u +"%Y%m%dT%H%M%SZ")"
+  mkdir -p "$CURRENT_NODE_LOG_DIR"
+  ln -sfn "$CURRENT_NODE_LOG_DIR" "${PROVISIONING_LOG_ROOT}/${safe_host}/latest"
+  printf '%s\n' "$CURRENT_NODE_LOG_DIR"
+}
+
+node_log_path() {
+  local file_name="$1"
+
+  ensure_node_log_dir >/dev/null
+  printf '%s/%s\n' "$CURRENT_NODE_LOG_DIR" "$file_name"
+}
+
+capture_controller_probe_snapshot() {
+  local probe_log
+
+  probe_log=$(node_log_path "controller-probe.txt")
+  {
+    echo "timestamp=$(timestamp_utc)"
+    echo "controller=$CONTROLLER_HOSTNAME"
+    echo "target_hostname=$HOSTNAME"
+    echo "target_ip=$INSTALLER_IP"
+    echo "installer_user=$INSTALLER_USER"
+    echo "node_admin=$NODE_ADMIN"
+    echo "installer_auth_mode=$INSTALLER_AUTH_MODE"
+    echo
+    echo "== ping =="
+    ping -c 1 -W 2 "$INSTALLER_IP" || true
+    echo
+    echo "== ip neigh =="
+    ip neigh show "$INSTALLER_IP" || true
+    echo
+    echo "== ssh keyscan =="
+    ssh-keyscan -T 5 "$INSTALLER_IP" 2>/dev/null || true
+  } >"$probe_log" 2>&1
+}
+
+capture_remote_snapshot() {
+  local snapshot_name="$1"
+  local remote_user="$2"
+  local remote_password="$3"
+  local remote_auth_mode="$4"
+  local snapshot_log
+  local remote_script
+
+  snapshot_log=$(node_log_path "$snapshot_name")
+  remote_script=$(cat <<'EOF'
+set -u
+echo "timestamp=$(date -Is)"
+echo "hostname=$(hostname 2>/dev/null || true)"
+echo "user=$(id -un 2>/dev/null || true)"
+echo
+echo "== ip -4 -brief addr =="
+ip -4 -brief addr 2>/dev/null || true
+echo
+echo "== ip route =="
+ip route 2>/dev/null || true
+echo
+echo "== lsblk =="
+lsblk -o NAME,PATH,FSTYPE,SIZE,MOUNTPOINT,MODEL 2>/dev/null || true
+echo
+echo "== findmnt / =="
+findmnt / 2>/dev/null || true
+echo
+echo "== active boot =="
+cat /proc/cmdline 2>/dev/null || true
+echo
+echo "== nix-cluster service =="
+systemctl is-active nix-cluster 2>/dev/null || true
+systemctl status nix-cluster --no-pager -l 2>/dev/null || true
+echo
+echo "== nix-cluster journal =="
+journalctl -b -u nix-cluster -n 120 --no-pager 2>/dev/null || true
+echo
+echo "== setup log =="
+sudo cat /var/log/nix-cluster-setup.log 2>/dev/null || true
+EOF
+)
+
+  run_remote "$remote_user" "$INSTALLER_IP" "$remote_password" "$remote_auth_mode" "$remote_script" >"$snapshot_log" 2>&1 || true
+}
+
+capture_failure_artifacts() {
+  local reason="$1"
+  local summary_log
+
+  ensure_node_log_dir >/dev/null
+  summary_log=$(node_log_path "failure-summary.txt")
+  {
+    echo "timestamp=$(timestamp_utc)"
+    echo "reason=$reason"
+    echo "hostname=$HOSTNAME"
+    echo "installer_ip=$INSTALLER_IP"
+    echo "installer_user=$INSTALLER_USER"
+    echo "node_admin=$NODE_ADMIN"
+    echo "installer_auth_mode=$INSTALLER_AUTH_MODE"
+    echo "log_dir=$CURRENT_NODE_LOG_DIR"
+  } >"$summary_log"
+
+  capture_controller_probe_snapshot
+
+  if can_login "$INSTALLER_USER" "$INSTALLER_IP" "$INSTALLER_PASSWORD" "$INSTALLER_AUTH_MODE"; then
+    capture_remote_snapshot "installer-runtime.txt" "$INSTALLER_USER" "$INSTALLER_PASSWORD" "$INSTALLER_AUTH_MODE"
+  fi
+
+  if can_login "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" auto; then
+    capture_remote_snapshot "admin-runtime.txt" "$NODE_ADMIN" "$NODE_ADMIN_PASS" auto
+  fi
+
+  if can_login_with_key nix-cluster "$INSTALLER_IP"; then
+    capture_remote_snapshot "nix-cluster-runtime.txt" "nix-cluster" "" ssh_key
+  fi
 }
 
 detect_primary_ip() {
@@ -86,7 +220,11 @@ if [ -r "$RUNTIME_CONFIG" ]; then
   ETCD_ENDPOINT=$(jq -r '.ha.runtime_store.endpoint // empty' "$RUNTIME_CONFIG" 2>/dev/null || true)
   ETCD_INVENTORY_PREFIX=$(jq -r '.ha.runtime_store.inventory_prefix // "/nix-cluster/inventory"' "$RUNTIME_CONFIG" 2>/dev/null || true)
   ETCD_JOIN_PREFIX=$(jq -r '.ha.runtime_store.join_prefix // "/nix-cluster/join"' "$RUNTIME_CONFIG" 2>/dev/null || true)
+  CONTROLLER_LOG_DIR=$(jq -r '.directories.log // "/home/nix-cluster/log"' "$RUNTIME_CONFIG" 2>/dev/null || true)
 fi
+
+PROVISIONING_LOG_ROOT="${CONTROLLER_LOG_DIR}/provisioning"
+ensure_provisioning_log_root
 
 etcd_enabled() {
   [ -n "$ETCD_ENDPOINT" ]
@@ -383,18 +521,23 @@ provision_live_installer() {
   local INSTALLER_FLAKE_URL="git+NIXOS_INSTALL_REPO_URL_PLACEHOLDER"
   local install_cmd=()
   local install_cmd_quoted=""
+  local install_log_file
   local arg
+
+  ensure_node_log_dir >/dev/null
 
   if [ -z "$DISK" ] || [ -z "$FS" ]; then
     echo "[nix-cluster] $HOSTNAME is missing disk or fs in deployments.json. Skipping."
-    publish_join_state "invalid-config" "missing disk or fs"
+    capture_failure_artifacts "missing disk or fs in deployments.json"
+    publish_join_state "invalid-config" "missing disk or fs; logs in $CURRENT_NODE_LOG_DIR"
     return 1
   fi
 
   if ! run_remote "$INSTALLER_USER" "$INSTALLER_IP" "$INSTALLER_PASSWORD" "$INSTALLER_AUTH_MODE" "test -b '$DISK'"; then
     echo "[nix-cluster] $HOSTNAME configured disk $DISK does not exist on the live installer. Available disks:"
-    run_remote "$INSTALLER_USER" "$INSTALLER_IP" "$INSTALLER_PASSWORD" "$INSTALLER_AUTH_MODE" "lsblk -dn -o NAME,PATH,SIZE,MODEL,TYPE | awk '\$5 == \"disk\" { print }'" || true
-    publish_join_state "invalid-config" "configured disk missing on installer"
+    run_remote "$INSTALLER_USER" "$INSTALLER_IP" "$INSTALLER_PASSWORD" "$INSTALLER_AUTH_MODE" "lsblk -dn -o NAME,PATH,SIZE,MODEL,TYPE | awk '\$5 == \"disk\" { print }'" | tee "$(node_log_path "available-disks.txt")" || true
+    capture_failure_artifacts "configured disk missing on installer"
+    publish_join_state "invalid-config" "configured disk missing on installer; logs in $CURRENT_NODE_LOG_DIR"
     return 1
   fi
 
@@ -438,9 +581,20 @@ provision_live_installer() {
     install_cmd_quoted+="$arg "
   done
 
-  if ! run_remote_sudo_command "$INSTALLER_USER" "$INSTALLER_IP" "$INSTALLER_PASSWORD" "$INSTALLER_AUTH_MODE" "$install_cmd_quoted"; then
+  install_log_file=$(node_log_path "nixos-install.log")
+  {
+    echo "timestamp=$(timestamp_utc)"
+    echo "hostname=$HOSTNAME"
+    echo "installer_ip=$INSTALLER_IP"
+    echo "installer_user=$INSTALLER_USER"
+    echo "install_command=$install_cmd_quoted"
+    echo
+  } >"$install_log_file"
+
+  if ! run_remote_sudo_command "$INSTALLER_USER" "$INSTALLER_IP" "$INSTALLER_PASSWORD" "$INSTALLER_AUTH_MODE" "$install_cmd_quoted" 2>&1 | tee -a "$install_log_file"; then
     echo "[nix-cluster] Failed to run nixos-install on $HOSTNAME."
-    publish_join_state "install-failed" "remote nixos-install command failed"
+    capture_failure_artifacts "remote nixos-install command failed"
+    publish_join_state "install-failed" "remote nixos-install command failed; logs in $CURRENT_NODE_LOG_DIR"
     return 1
   fi
 
@@ -459,10 +613,12 @@ provision_live_installer() {
     fi
     if can_login "$INSTALLER_USER" "$INSTALLER_IP" "$INSTALLER_PASSWORD" "$INSTALLER_AUTH_MODE"; then
       echo "[nix-cluster] $HOSTNAME rebooted back into the live installer instead of the installed system. Boot from the local disk to continue enrollment."
-      publish_join_state "installer-returned" "node rebooted back into live installer"
+      capture_failure_artifacts "node rebooted back into live installer"
+      publish_join_state "installer-returned" "node rebooted back into live installer; logs in $CURRENT_NODE_LOG_DIR"
     else
       echo "[nix-cluster] $HOSTNAME did not become reachable after installation. Skipping enrollment."
-      publish_join_state "install-failed" "node did not become reachable after install"
+      capture_failure_artifacts "node did not become reachable after install"
+      publish_join_state "install-failed" "node did not become reachable after install; logs in $CURRENT_NODE_LOG_DIR"
     fi
     return 1
   fi
@@ -487,6 +643,7 @@ CONTROLLER_SSH_PUB_KEY_ESCAPED=$(printf "%q" "$CONTROLLER_SSH_PUB_KEY")
 publish_controller_inventory
 
 while read -r node; do
+  CURRENT_NODE_LOG_DIR=""
   HOSTNAME=$(echo "$node" | jq -r '.hostname')
   INSTALLER_IP=$(echo "$node" | jq -r '.installer_ip')
   INSTALLER_USER=$(echo "$node" | jq -r '.installer_user // "nixos"')
@@ -556,6 +713,7 @@ while read -r node; do
     fi
 
     if [ "$REINSTALL" = "true" ]; then
+      ensure_node_log_dir >/dev/null
       echo "[nix-cluster] $HOSTNAME detected as Base OS, but reinstall=true so rebooting into netboot for a fresh install..."
       publish_join_state "rebooting-for-reinstall" "base os reachable and reinstall requested"
       run_remote_sudo_command "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" auto "nohup sh -c 'sleep 2; reboot' >/dev/null 2>&1 &" || true
@@ -564,10 +722,12 @@ while read -r node; do
       if ! wait_for_login "$INSTALLER_USER" "$INSTALLER_IP" "$INSTALLER_PASSWORD" 18; then
         if can_login "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS"; then
           echo "[nix-cluster] $HOSTNAME came back on the installed system instead of netboot. Ensure PXE/network boot is selected first, then rerun the controller."
-          publish_join_state "reinstall-blocked" "node rebooted back into installed system instead of installer"
+          capture_failure_artifacts "node rebooted back into installed system instead of installer"
+          publish_join_state "reinstall-blocked" "node rebooted back into installed system instead of installer; logs in $CURRENT_NODE_LOG_DIR"
         else
           echo "[nix-cluster] $HOSTNAME did not become reachable on the live installer after reboot. Skipping reinstall."
-          publish_join_state "reinstall-failed" "node did not return on live installer"
+          capture_failure_artifacts "node did not return on live installer after reboot"
+          publish_join_state "reinstall-failed" "node did not return on live installer; logs in $CURRENT_NODE_LOG_DIR"
         fi
         continue
       fi

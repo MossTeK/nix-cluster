@@ -57,6 +57,7 @@ print_path_state() {
     /home/nix-cluster/.ssh \
     /home/nix-cluster/.ssh/id_ed25519 \
     /home/nix-cluster/log \
+    /home/nix-cluster/log/provisioning \
     /home/nops \
     /home/nops/homelab-fleet \
     /var/lib/nix-cluster \
@@ -144,6 +145,23 @@ collect_local() {
   echo "--- ha files ---"
   ls -lah /var/lib/nix-cluster/ha 2>/dev/null || ls -lah /var/lib/nops/ha 2>/dev/null || true
   ls -lah /var/lib/nix-cluster/metrics 2>/dev/null || ls -lah /var/lib/nops/metrics 2>/dev/null || true
+
+  echo
+  echo "--- provisioning logs ---"
+  find /home/nix-cluster/log/provisioning -maxdepth 3 -type f 2>/dev/null | sort | tail -n 40 || true
+
+  echo
+  echo "--- latest install log tails ---"
+  latest_install_logs=$(find /home/nix-cluster/log/provisioning -name 'nixos-install.log' -type f 2>/dev/null | sort | tail -n 3)
+  if [[ -n "$latest_install_logs" ]]; then
+    while IFS= read -r log_path; do
+      [[ -n "$log_path" ]] || continue
+      echo "### $log_path ###"
+      tail -n 40 "$log_path" || true
+    done <<< "$latest_install_logs"
+  else
+    echo "No persisted worker install logs found."
+  fi
 
   echo
   echo "--- metrics grep ---"
