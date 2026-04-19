@@ -524,6 +524,7 @@ if [ "$NON_INTERACTIVE" = true ]; then
     CUSTOM_GROUP_IMPORTS=$(jq -r '.custom_group_imports // ""' "$CONFIG_FILE")
     CUSTOM_NODE_CONFIG=$(jq -r '.custom_node_config // ""' "$CONFIG_FILE")
     CUSTOM_NODE_IMPORTS=$(jq -r '.custom_node_imports // ""' "$CONFIG_FILE")
+    PRESERVE_EXISTING_NODE_FILES=$(jq -r '.preserve_existing_node_files // "false"' "$CONFIG_FILE")
 
     if [ -z "$GIT_USER" ] || [ -z "$GIT_TOKEN" ] || [ -z "$REPO_URL" ] || [ -z "$NODE_ADMIN" ]; then
         echo "Error: Missing required fields in config file."
@@ -679,6 +680,7 @@ fi
 
 REGISTRY_MODE=${REGISTRY_MODE:-bundled}
 MODULE_REGISTRY_URL=${MODULE_REGISTRY_URL:-$DEFAULT_MODULE_REGISTRY_URL}
+PRESERVE_EXISTING_NODE_FILES=${PRESERVE_EXISTING_NODE_FILES:-false}
 
 if [ "${IS_BOOTSTRAP:-false}" = "true" ]; then
     IS_CONTROLLER="true"
@@ -1205,15 +1207,26 @@ NODE_DIR="$TARGET_DIR/nodes/$HOSTNAME"
 log "Creating node directory at $NODE_DIR linked to group '$NODE_GROUP'..."
 sudo -u "$SERVICE_USER" mkdir -p "$NODE_DIR"
 
-if [ -n "$CUSTOM_NODE_CONFIG" ]; then
+PRESERVE_PREFAB_NODE_DIR="false"
+if [ "${PRESERVE_EXISTING_NODE_FILES:-false}" = "true" ] && [ -d "$NODE_DIR" ]; then
+    PRESERVE_PREFAB_NODE_DIR="true"
+    log "Prefab node directory detected. Existing node files will be preserved when present."
+fi
+
+if [ "$PRESERVE_PREFAB_NODE_DIR" = "true" ] && [ -f "$NODE_DIR/configuration.nix" ]; then
+    log "Preserving existing node configuration.nix in $NODE_DIR"
+elif [ -n "$CUSTOM_NODE_CONFIG" ]; then
     log "Using custom node configuration.nix from $CUSTOM_NODE_CONFIG"
     sudo -u "$SERVICE_USER" cp --no-preserve=mode "$CUSTOM_NODE_CONFIG" "$NODE_DIR/configuration.nix"
 else
     sudo -u "$SERVICE_USER" cp --no-preserve=mode "$TEMPLATES_DIR/configuration.nix" "$NODE_DIR/configuration.nix"
 fi
 
-sudo -u "$SERVICE_USER" cp --no-preserve=mode "$TEMPLATES_DIR/controllerScript-autoprovision.sh" "$NODE_DIR/controllerScript-autoprovision.sh"
-sudo -u "$SERVICE_USER" chmod u+w "$NODE_DIR/controllerScript-autoprovision.sh"
+if [ "$PRESERVE_PREFAB_NODE_DIR" = "true" ] && [ -f "$NODE_DIR/controllerScript-autoprovision.sh" ]; then
+    log "Preserving existing controllerScript-autoprovision.sh in $NODE_DIR"
+else
+    sudo -u "$SERVICE_USER" cp --no-preserve=mode "$TEMPLATES_DIR/controllerScript-autoprovision.sh" "$NODE_DIR/controllerScript-autoprovision.sh"
+    sudo -u "$SERVICE_USER" chmod u+w "$NODE_DIR/controllerScript-autoprovision.sh"
     if [ -n "${NIXOS_INSTALL_REPO_URL:-}" ]; then
         NIXOS_INSTALL_FLAKE_URL="$(normalize_tarball_flake_url "$NIXOS_INSTALL_REPO_URL")"
         sudo -u "$SERVICE_USER" sed -i "s|NIXOS_INSTALL_REPO_URL_PLACEHOLDER|${NIXOS_INSTALL_FLAKE_URL}|" "$NODE_DIR/controllerScript-autoprovision.sh"
@@ -1222,26 +1235,36 @@ sudo -u "$SERVICE_USER" chmod u+w "$NODE_DIR/controllerScript-autoprovision.sh"
         NIX_CLUSTER_INSTALL_FLAKE_URL="$(normalize_git_flake_url "$NIX_CLUSTER_REPO_URL")"
         sudo -u "$SERVICE_USER" sed -i "s|git+NIX_CLUSTER_INSTALL_REPO_URL_PLACEHOLDER|${NIX_CLUSTER_INSTALL_FLAKE_URL}|" "$NODE_DIR/controllerScript-autoprovision.sh"
     fi
+fi
 
 
 # Generate the node's imports.nix with conditional module imports
 IMPORTS_FILE="$NODE_DIR/imports.nix"
-echo "{ config, pkgs, inputs, ... }: { imports = [" > "$IMPORTS_FILE"
-echo "  ../../groups/$NODE_GROUP/configuration.nix" >> "$IMPORTS_FILE"
-echo "  ../../groups/$NODE_GROUP/imports.nix" >> "$IMPORTS_FILE"
-if [ "${REGISTRY_MODE:-bundled}" = "registry" ]; then
-    echo "  inputs.moduleRegistry.nixosModules.official.pxe" >> "$IMPORTS_FILE"
+if [ "$PRESERVE_PREFAB_NODE_DIR" = "true" ] && [ -f "$IMPORTS_FILE" ]; then
+    log "Preserving existing imports.nix in $NODE_DIR"
+elif [ -n "$CUSTOM_NODE_IMPORTS" ]; then
+    log "Using custom node imports.nix from $CUSTOM_NODE_IMPORTS"
+    sudo -u "$SERVICE_USER" cp --no-preserve=mode "$CUSTOM_NODE_IMPORTS" "$IMPORTS_FILE"
 else
-    echo "  ../../modules/pxe/pxe.nix" >> "$IMPORTS_FILE"
+    echo "{ config, pkgs, inputs, ... }: { imports = [" > "$IMPORTS_FILE"
+    echo "  ../../groups/$NODE_GROUP/configuration.nix" >> "$IMPORTS_FILE"
+    echo "  ../../groups/$NODE_GROUP/imports.nix" >> "$IMPORTS_FILE"
+    if [ "${REGISTRY_MODE:-bundled}" = "registry" ]; then
+        echo "  inputs.moduleRegistry.nixosModules.official.pxe" >> "$IMPORTS_FILE"
+    else
+        echo "  ../../modules/pxe/pxe.nix" >> "$IMPORTS_FILE"
+    fi
+    if [ "$IS_BOOTSTRAP" = "true" ]; then
+        echo "  ../../modules/forgejo/forgejo.nix" >> "$IMPORTS_FILE"
+    fi
+    echo "];}" >> "$IMPORTS_FILE"
 fi
-if [ "$IS_BOOTSTRAP" = "true" ]; then
-    echo "  ../../modules/forgejo/forgejo.nix" >> "$IMPORTS_FILE"
-fi
-echo "];}" >> "$IMPORTS_FILE"
     sudo chown "$SERVICE_USER:$SERVICE_GROUP" "$IMPORTS_FILE"
 sudo chmod u+w "$IMPORTS_FILE"
 
-if [ -f "/etc/nixos/hardware-configuration.nix" ]; then
+if [ "$PRESERVE_PREFAB_NODE_DIR" = "true" ] && [ -f "$NODE_DIR/hardware-configuration.nix" ]; then
+    log "Preserving existing hardware-configuration.nix in $NODE_DIR"
+elif [ -f "/etc/nixos/hardware-configuration.nix" ]; then
     sudo cp /etc/nixos/hardware-configuration.nix "$NODE_DIR/hardware-configuration.nix"
         sudo chown "$SERVICE_USER:$SERVICE_GROUP" "$NODE_DIR/hardware-configuration.nix"
 elif command -v nixos-generate-config >/dev/null 2>&1; then
@@ -1269,6 +1292,9 @@ if [ "${KEEPALIVED_ENABLE:-false}" = "true" ]; then
 else
     PLACEMENT_KEEPALIVED_ROLE="disabled"
 fi
+if [ "$PRESERVE_PREFAB_NODE_DIR" = "true" ] && [ -f "$NODE_DIR/configuration.nix" ]; then
+    log "Skipping placeholder hydration for preserved node configuration.nix"
+else
 sudo -u "$SERVICE_USER" sed -i "s|HOST_ID_PLACEHOLDER|$HOST_ID|" "$NODE_DIR/configuration.nix"
 sudo -u "$SERVICE_USER" sed -i "s|networking.hostName = \".*\";|networking.hostName = \"$HOSTNAME\";|" "$NODE_DIR/configuration.nix"
 sudo -u "$SERVICE_USER" sed -i "s|users.users.tdavis|users.users.$NODE_ADMIN|" "$NODE_DIR/configuration.nix"
@@ -1398,6 +1424,7 @@ else
     sudo -u "$SERVICE_USER" sed -i "/ALLOW_UNFREE_PLACEHOLDER/d" "$NODE_DIR/configuration.nix"
     sudo -u "$SERVICE_USER" sed -i "s| CONTROLLER_PACKAGES_PLACEHOLDER||" "$NODE_DIR/configuration.nix"
     sudo -u "$SERVICE_USER" sed -i "s|CONTROLLER_PACKAGES_PLACEHOLDER||" "$NODE_DIR/configuration.nix"
+fi
 fi
 
 # Inject Cloudflare tunnel Terraform provisioning into the controller script when enabled.

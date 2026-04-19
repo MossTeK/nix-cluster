@@ -69,5 +69,6 @@
   "pxe_interface": "",
   "pxe_http_port": 8081,
   "pxe_boot_url": "",
-  "postgres_backup_enable": false
+  "postgres_backup_enable": false,
+  "preserve_existing_node_files": false
 }
