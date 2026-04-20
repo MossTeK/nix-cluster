@@ -194,13 +194,88 @@ if [ ! -r "$RUNTIME_CONFIG" ] && [ -r "/etc/nops-runtime-config.json" ]; then
   RUNTIME_CONFIG="/etc/nops-runtime-config.json"
 fi
 
-# Skip if there's no deployments file
-if [ ! -f "$DEPLOYMENTS_JSON" ]; then
+runtime_workers_present() {
+  [ -r "$RUNTIME_CONFIG" ] && jq -e '.workers? | type == "object" and length > 0' "$RUNTIME_CONFIG" >/dev/null 2>&1
+}
+
+render_runtime_workers_json() {
+  local output_file="$1"
+  jq '
+    (.workers // {} | to_entries | map({
+      hostname: .key,
+      installer_ip: (.value.installer_ip // ""),
+      installer_user: (.value.installer_user // "nixos"),
+      installer_auth_mode: (.value.installer_auth_mode // "ssh_key"),
+      installer_ssh_pub_key: (.value.installer_ssh_pub_key // ""),
+      installer_password: (.value.installer_password // ""),
+      reinstall: (.value.reinstall // false),
+      disk: (.value.disk // "/dev/sda"),
+      fs: (.value.fs // "zfs"),
+      node_group: (.value.node_group // "default"),
+      node_role: (.value.node_role // "worker"),
+      keepalived_role: (.value.keepalived_role // "backup"),
+      node_admin: (.value.node_admin // "admin"),
+      ssh_password_auth: (.value.ssh_password_auth // false),
+      node_admin_pass: (.value.node_admin_pass // ""),
+      node_admin_password_hash: (.value.node_admin_password_hash // ""),
+      node_directory: (.value.node_directory // ("nodes/" + .key))
+    }))
+  ' "$RUNTIME_CONFIG" > "$output_file"
+}
+
+merge_runtime_workers_into_deployments() {
+  local existing_json="$1"
+  local output_file="$2"
+  jq --slurpfile runtime "$RUNTIME_CONFIG" '
+    def normalized_existing:
+      if type == "array" then . else [] end;
+    def worker_entries($runtime):
+      ($runtime[0].workers // {} | to_entries | map({
+        hostname: .key,
+        installer_ip: (.value.installer_ip // ""),
+        installer_user: (.value.installer_user // "nixos"),
+        installer_auth_mode: (.value.installer_auth_mode // "ssh_key"),
+        installer_ssh_pub_key: (.value.installer_ssh_pub_key // ""),
+        installer_password: (.value.installer_password // ""),
+        reinstall: (.value.reinstall // false),
+        disk: (.value.disk // "/dev/sda"),
+        fs: (.value.fs // "zfs"),
+        node_group: (.value.node_group // "default"),
+        node_role: (.value.node_role // "worker"),
+        keepalived_role: (.value.keepalived_role // "backup"),
+        node_admin: (.value.node_admin // "admin"),
+        ssh_password_auth: (.value.ssh_password_auth // false),
+        node_admin_pass: (.value.node_admin_pass // ""),
+        node_admin_password_hash: (.value.node_admin_password_hash // ""),
+        node_directory: (.value.node_directory // ("nodes/" + .key))
+      }));
+    (normalized_existing) as $existing |
+    (worker_entries($runtime)) as $workers |
+    ($existing | map({ key: .hostname, value: . }) | from_entries) as $existing_map |
+    reduce $workers[] as $worker ($existing_map; .[$worker.hostname] = ((.[$worker.hostname] // {}) + $worker)) |
+    to_entries | map(.value) | sort_by(.hostname)
+  ' "$existing_json" > "$output_file"
+}
+
+DEPLOYMENTS_SOURCE="deployments.json"
+if [ -f "$DEPLOYMENTS_JSON" ]; then
+  DEPLOYMENTS_INPUT=$(mktemp)
+  prepare_json_input "$DEPLOYMENTS_JSON" "$DEPLOYMENTS_INPUT"
+  if runtime_workers_present; then
+    DEPLOYMENTS_MERGED=$(mktemp)
+    merge_runtime_workers_into_deployments "$DEPLOYMENTS_INPUT" "$DEPLOYMENTS_MERGED"
+    TEMP_FILES+=("$DEPLOYMENTS_MERGED")
+    DEPLOYMENTS_INPUT="$DEPLOYMENTS_MERGED"
+    DEPLOYMENTS_SOURCE="deployments.json+runtime-workers"
+  fi
+elif runtime_workers_present; then
+  DEPLOYMENTS_INPUT=$(mktemp)
+  TEMP_FILES+=("$DEPLOYMENTS_INPUT")
+  render_runtime_workers_json "$DEPLOYMENTS_INPUT"
+  DEPLOYMENTS_SOURCE="runtime-workers"
+else
   exit 0
 fi
-
-DEPLOYMENTS_INPUT=$(mktemp)
-prepare_json_input "$DEPLOYMENTS_JSON" "$DEPLOYMENTS_INPUT"
 
 NIX_CLUSTER_CONFIG_TEMPLATE_INPUT=""
 if [ -s "nix-cluster-config-template.json" ]; then
@@ -804,8 +879,8 @@ while read -r node; do
     --arg installer "$INSTALLER_SSH_PUB_KEY" \
     '[ $controller, $installer ] | map(select(length > 0)) | unique')
 
-  publish_node_inventory "deployments.json" "desired"
-  publish_join_state "desired" "inventory record loaded from deployments.json"
+  publish_node_inventory "$DEPLOYMENTS_SOURCE" "desired"
+  publish_join_state "desired" "inventory record loaded from $DEPLOYMENTS_SOURCE"
 
   if ! can_login_with_key nix-cluster "$INSTALLER_IP" \
     && ! can_login "$INSTALLER_USER" "$INSTALLER_IP" "$INSTALLER_PASSWORD" "$INSTALLER_AUTH_MODE" \

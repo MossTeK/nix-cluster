@@ -150,6 +150,56 @@ sync_encrypted_json_file() {
     fi
 }
 
+hydrate_deployments_from_runtime_workers() {
+        local target_file="$1"
+        local runtime_file="/etc/nix-cluster-runtime-config.json"
+        local source_file
+        local temp_file
+
+        if [ ! -r "$runtime_file" ] || ! jq -e '.workers? | type == "object" and length > 0' "$runtime_file" >/dev/null 2>&1; then
+                return 0
+        fi
+
+        source_file=$(mktemp)
+        temp_file=$(mktemp)
+        prepare_json_for_edit "$target_file" "$source_file"
+
+        jq --slurpfile runtime "$runtime_file" '
+            def normalized_existing:
+                if type == "array" then . else [] end;
+            def worker_entries($runtime):
+                ($runtime[0].workers // {} | to_entries | map({
+                    hostname: .key,
+                    installer_ip: (.value.installer_ip // ""),
+                    installer_user: (.value.installer_user // "nixos"),
+                    installer_auth_mode: (.value.installer_auth_mode // "ssh_key"),
+                    installer_ssh_pub_key: (.value.installer_ssh_pub_key // ""),
+                    installer_password: (.value.installer_password // ""),
+                    reinstall: (.value.reinstall // false),
+                    disk: (.value.disk // "/dev/sda"),
+                    fs: (.value.fs // "zfs"),
+                    node_group: (.value.node_group // "default"),
+                    node_role: (.value.node_role // "worker"),
+                    keepalived_role: (.value.keepalived_role // "backup"),
+                    node_admin: (.value.node_admin // "admin"),
+                    ssh_password_auth: (.value.ssh_password_auth // false),
+                    node_admin_pass: (.value.node_admin_pass // ""),
+                    node_admin_password_hash: (.value.node_admin_password_hash // ""),
+                    node_directory: (.value.node_directory // ("nodes/" + .key))
+                }));
+            (normalized_existing) as $existing |
+            (worker_entries($runtime)) as $workers |
+            ($existing | map({ key: .hostname, value: . }) | from_entries) as $existing_map |
+            reduce $workers[] as $worker ($existing_map; .[$worker.hostname] = ((.[$worker.hostname] // {}) + $worker)) |
+            to_entries | map(.value) | sort_by(.hostname)
+        ' "$source_file" > "$temp_file"
+
+        rm -f "$source_file"
+        sudo mv "$temp_file" "$target_file"
+        sudo chown "$SERVICE_USER:$SERVICE_GROUP" "$target_file"
+        sudo chmod 0644 "$target_file"
+}
+
 # Upserts a proxied Cloudflare CNAME record for the supplied name and target.
 upsert_cloudflare_cname_record() {
     local api_token="$1"
@@ -1035,6 +1085,7 @@ if [ "${IS_CONTROLLER:-false}" = "true" ]; then
         sudo mv "$CONTROLLER_DEPLOYMENTS_TMP" "$TARGET_DIR/deployments.json"
         sudo chown "$SERVICE_USER:$SERVICE_GROUP" "$TARGET_DIR/deployments.json"
         sudo chmod 0644 "$TARGET_DIR/deployments.json"
+        hydrate_deployments_from_runtime_workers "$TARGET_DIR/deployments.json"
     else
         log "Preserving controller-owned install templates from the existing repo."
 fi

@@ -148,6 +148,25 @@
         ++ cfg.observability.extraTrackedUnits
       );
       appCfg = cfg.apps;
+      workerInventory = lib.mapAttrs (name: worker: {
+        hostname = name;
+        node_directory = worker.nodeDirectory;
+        installer_ip = worker.installerIp;
+        installer_user = worker.installerUser;
+        installer_auth_mode = worker.installerAuthMode;
+        installer_ssh_pub_key = worker.installerSshPubKey;
+        installer_password = worker.installerPassword;
+        reinstall = worker.reinstall;
+        disk = worker.disk;
+        fs = worker.fs;
+        node_group = worker.nodeGroup;
+        node_role = worker.nodeRole;
+        keepalived_role = worker.keepalivedRole;
+        node_admin = worker.nodeAdmin;
+        ssh_password_auth = worker.sshPasswordAuth;
+        node_admin_pass = worker.nodeAdminPass;
+        node_admin_password_hash = worker.nodeAdminPasswordHash;
+      }) cfg.workers;
       # Serializes repo path and rebuild commands to a JSON file the Python daemon reads at startup.
     nixClusterConfig = pkgs.writeText "nix-cluster-config.json" (builtins.toJSON {
       is_controller = cfg.isController;
@@ -187,6 +206,7 @@
         ha_role = cfg.placement.haRole;
         keepalived_role = cfg.placement.keepalivedRole;
       };
+      workers = workerInventory;
       apps = {
         caddy = {
           enable = appCfg.caddy.enable;
@@ -672,6 +692,94 @@
             default = false;
             description = "Enable PostgreSQL backups for Forgejo.";
           };
+        };
+        workers = lib.mkOption {
+          type = lib.types.attrsOf (lib.types.submodule ({ name, ... }: {
+            options = {
+              nodeDirectory = lib.mkOption {
+                type = lib.types.str;
+                default = "nodes/${name}";
+                description = "Repo path for the worker node's authoritative NixOS configuration.";
+              };
+              installerIp = lib.mkOption {
+                type = lib.types.str;
+                default = "";
+                description = "IP address the controller should probe for the worker's live installer or installed OS.";
+              };
+              installerUser = lib.mkOption {
+                type = lib.types.str;
+                default = "nixos";
+                description = "Live installer username used during PXE provisioning.";
+              };
+              installerAuthMode = lib.mkOption {
+                type = lib.types.enum [ "ssh_key" "password" "auto" ];
+                default = "ssh_key";
+                description = "Authentication mode used by the controller when connecting to the live installer.";
+              };
+              installerSshPubKey = lib.mkOption {
+                type = lib.types.str;
+                default = "";
+                description = "SSH public key baked into the live installer for this worker relationship.";
+              };
+              installerPassword = lib.mkOption {
+                type = lib.types.str;
+                default = "";
+                description = "Optional live installer password for password-based recovery paths.";
+              };
+              reinstall = lib.mkOption {
+                type = lib.types.bool;
+                default = false;
+                description = "Whether the controller should reprovision this worker on the next reconcile.";
+              };
+              disk = lib.mkOption {
+                type = lib.types.str;
+                default = "/dev/sda";
+                description = "Target disk passed to the live installer for this worker.";
+              };
+              fs = lib.mkOption {
+                type = lib.types.str;
+                default = "zfs";
+                description = "Filesystem profile passed to the live installer for this worker.";
+              };
+              nodeGroup = lib.mkOption {
+                type = lib.types.str;
+                default = "default";
+                description = "Fleet group whose shared config should be applied when the worker enrolls.";
+              };
+              nodeRole = lib.mkOption {
+                type = lib.types.enum [ "controller" "worker" "service" "backup" "spare" ];
+                default = "worker";
+                description = "Relationship role the controller should assign during worker enrollment.";
+              };
+              keepalivedRole = lib.mkOption {
+                type = lib.types.enum [ "master" "backup" "disabled" ];
+                default = "backup";
+                description = "Keepalived role the controller should assign during worker enrollment.";
+              };
+              nodeAdmin = lib.mkOption {
+                type = lib.types.str;
+                default = "admin";
+                description = "Admin username the controller should use once the worker is on a base OS.";
+              };
+              sshPasswordAuth = lib.mkOption {
+                type = lib.types.bool;
+                default = false;
+                description = "Whether the enrolled worker should allow SSH password authentication for the declared admin user.";
+              };
+              nodeAdminPass = lib.mkOption {
+                type = lib.types.str;
+                default = "";
+                description = "Optional plaintext admin password used only for bootstrap compatibility paths.";
+              };
+              nodeAdminPasswordHash = lib.mkOption {
+                type = lib.types.str;
+                default = "";
+                description = "Password hash assigned to the declared admin user when the worker enrolls.";
+              };
+            };
+          }));
+          default = {};
+          description = "Controller-to-worker relationship inventory used to hydrate PXE/live install behavior while each worker still owns its full system config under its node directory.";
         };
         matrix = {
           enable = lib.mkOption {
