@@ -2,9 +2,9 @@
 
 {
   imports = [
-    ../../modules/caddy/caddy.nix
-    ../../modules/cloudflare/cloudflared.nix
-    ../../modules/backup/postgres.nix
-    ../../modules/ingress/keepalived.nix
+    ../../apps/caddy/caddy.nix
+    ../../apps/cloudflare/cloudflared.nix
+    ../../apps/backup/postgres.nix
+    ../../apps/ingress/keepalived.nix
   ];
 }

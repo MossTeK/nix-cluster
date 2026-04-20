@@ -1,7 +1,7 @@
 # Provides a base Caddy service so generated fleets can append reverse proxy routes.
 { config, pkgs, lib, ... }:
 
-lib.mkIf config.services."nix-cluster".modules.caddy.enable {
+lib.mkIf config.services."nix-cluster".apps.caddy.enable {
   services."nix-cluster".observability.monitoredServices = lib.mkAfter [
     "caddy.service"
   ];

@@ -147,6 +147,7 @@
         ++ cfg.observability.monitoredServices
         ++ cfg.observability.extraTrackedUnits
       );
+      appCfg = cfg.apps;
       # Serializes repo path and rebuild commands to a JSON file the Python daemon reads at startup.
     nixClusterConfig = pkgs.writeText "nix-cluster-config.json" (builtins.toJSON {
       is_controller = cfg.isController;
@@ -185,6 +186,37 @@
         node_role = cfg.placement.nodeRole;
         ha_role = cfg.placement.haRole;
         keepalived_role = cfg.placement.keepalivedRole;
+      };
+      apps = {
+        caddy = {
+          enable = appCfg.caddy.enable;
+        };
+        keepalived = {
+          enable = appCfg.keepalived.enable;
+          interface = appCfg.keepalived.interface;
+          virtual_router_id = appCfg.keepalived.virtualRouterId;
+          priority = appCfg.keepalived.priority;
+          vip_cidr = appCfg.keepalived.vipCidr;
+        };
+        cloudflare = {
+          enable = appCfg.cloudflare.enable;
+          tunnel = appCfg.cloudflare.tunnel;
+          tunnel_name = appCfg.cloudflare.tunnelName;
+          tunnel_domain = appCfg.cloudflare.tunnelDomain;
+          tunnel_vip = appCfg.cloudflare.vip;
+          zone_id = appCfg.cloudflare.zoneId;
+          account_id = appCfg.cloudflare.accountId;
+        };
+        pxe = {
+          enable = appCfg.pxe.enable;
+          dhcp_enable = appCfg.pxe.dhcpEnable;
+          interface = appCfg.pxe.interface;
+          http_port = appCfg.pxe.httpPort;
+          boot_url = appCfg.pxe.bootUrl;
+        };
+        postgres_backup = {
+          enable = appCfg.postgresBackup.enable;
+        };
       };
       observability = {
         tracked_units = trackedUnits;
@@ -231,33 +263,33 @@
       };
       modules = {
         caddy = {
-          enable = cfg.modules.caddy.enable;
+          enable = appCfg.caddy.enable;
         };
         keepalived = {
-          enable = cfg.modules.keepalived.enable;
-          interface = cfg.modules.keepalived.interface;
-          virtual_router_id = cfg.modules.keepalived.virtualRouterId;
-          priority = cfg.modules.keepalived.priority;
-          vip_cidr = cfg.modules.keepalived.vipCidr;
+          enable = appCfg.keepalived.enable;
+          interface = appCfg.keepalived.interface;
+          virtual_router_id = appCfg.keepalived.virtualRouterId;
+          priority = appCfg.keepalived.priority;
+          vip_cidr = appCfg.keepalived.vipCidr;
         };
         cloudflare = {
-          enable = cfg.modules.cloudflare.enable;
-          tunnel = cfg.modules.cloudflare.tunnel;
-          tunnel_name = cfg.modules.cloudflare.tunnelName;
-          tunnel_domain = cfg.modules.cloudflare.tunnelDomain;
-          tunnel_vip = cfg.modules.cloudflare.vip;
-          zone_id = cfg.modules.cloudflare.zoneId;
-          account_id = cfg.modules.cloudflare.accountId;
+          enable = appCfg.cloudflare.enable;
+          tunnel = appCfg.cloudflare.tunnel;
+          tunnel_name = appCfg.cloudflare.tunnelName;
+          tunnel_domain = appCfg.cloudflare.tunnelDomain;
+          tunnel_vip = appCfg.cloudflare.vip;
+          zone_id = appCfg.cloudflare.zoneId;
+          account_id = appCfg.cloudflare.accountId;
         };
         pxe = {
-          enable = cfg.modules.pxe.enable;
-          dhcp_enable = cfg.modules.pxe.dhcpEnable;
-          interface = cfg.modules.pxe.interface;
-          http_port = cfg.modules.pxe.httpPort;
-          boot_url = cfg.modules.pxe.bootUrl;
+          enable = appCfg.pxe.enable;
+          dhcp_enable = appCfg.pxe.dhcpEnable;
+          interface = appCfg.pxe.interface;
+          http_port = appCfg.pxe.httpPort;
+          boot_url = appCfg.pxe.bootUrl;
         };
         postgres_backup = {
-          enable = cfg.modules.postgresBackup.enable;
+          enable = appCfg.postgresBackup.enable;
         };
       };
       matrix = {
@@ -277,6 +309,7 @@
       imports = [
         sops-nix.nixosModules.sops
         (lib.mkRenamedOptionModule [ "services" "nops" ] [ "services" "nix-cluster" ])
+        (lib.mkRenamedOptionModule [ "services" "nix-cluster" "modules" ] [ "services" "nix-cluster" "apps" ])
       ];
       options.services."nix-cluster" = {
         enable = lib.mkEnableOption "nix-cluster - Nix Cluster Controller";
@@ -342,6 +375,7 @@
             default = [
               "nodes/${config.networking.hostName}/"
               "groups/"
+              "apps/"
               "modules/"
               "deployments.json"
               "secrets/"
@@ -388,17 +422,17 @@
           nodeRole = lib.mkOption {
             type = lib.types.enum [ "controller" "worker" "service" "backup" "spare" ];
             default = "worker";
-            description = "Default node placement role that modules can use for active/passive/spare decisions.";
+            description = "Default node placement role that apps can use for active/passive/spare decisions.";
           };
           haRole = lib.mkOption {
             type = lib.types.enum [ "active" "passive" "spare" ];
             default = "passive";
-            description = "Default HA service role that modules can use to decide whether to expose, standby, or stay idle.";
+            description = "Default HA service role that apps can use to decide whether to expose, standby, or stay idle.";
           };
           keepalivedRole = lib.mkOption {
             type = lib.types.enum [ "master" "backup" "disabled" ];
             default = "disabled";
-            description = "Derived Keepalived placement role for modules that need ingress/VIP awareness.";
+            description = "Derived Keepalived placement role for apps that need ingress/VIP awareness.";
           };
         };
         observability.extraTrackedUnits = lib.mkOption {
@@ -409,7 +443,7 @@
         observability.monitoredServices = lib.mkOption {
           type = lib.types.listOf lib.types.str;
           default = [];
-          description = "Systemd units appended by external or registry-backed modules so the HA reporter and diagnostics can track them without core hard-coding every module.";
+          description = "Systemd units appended by external or registry-backed apps so the HA reporter and diagnostics can track them without core hard-coding every app.";
         };
         observability.prometheus = {
           enable = lib.mkEnableOption "Prometheus node exporter integration for nix-cluster runtime metrics";
@@ -531,17 +565,17 @@
             };
           };
         };
-        modules = {
+        apps = {
           caddy.enable = lib.mkOption {
             type = lib.types.bool;
             default = false;
-            description = "Enable the Caddy reverse proxy module.";
+            description = "Enable the Caddy reverse proxy app.";
           };
           keepalived = {
             enable = lib.mkOption {
               type = lib.types.bool;
               default = false;
-              description = "Enable the Keepalived VIP module.";
+              description = "Enable the Keepalived VIP app.";
             };
             interface = lib.mkOption {
               type = lib.types.str;
@@ -568,7 +602,7 @@
             enable = lib.mkOption {
               type = lib.types.bool;
               default = false;
-              description = "Enable the Cloudflare tunnel module.";
+              description = "Enable the Cloudflare tunnel app.";
             };
             tunnel = lib.mkOption {
               type = lib.types.bool;
@@ -694,8 +728,8 @@
             else "passive"
           );
           keepalivedRole = lib.mkDefault (
-            if !cfg.modules.keepalived.enable then "disabled"
-            else if cfg.modules.keepalived.priority >= 150 then "master"
+            if !cfg.apps.keepalived.enable then "disabled"
+            else if cfg.apps.keepalived.priority >= 150 then "master"
             else "backup"
           );
         };

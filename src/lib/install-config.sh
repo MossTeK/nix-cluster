@@ -14,62 +14,62 @@ nix_cluster_escape_sed() {
 
 normalize_install_override_key() {
   case "$1" in
-    bootstrap_mode|is_controller|node_role|keepalived_role|git_user|git_token|repo_url|nix_cluster_repo_url|nops_repo_url|nixos_install_repo_url|registry_mode|module_registry_url|repo_host_ip|node_group|node_admin|node_admin_pass|node_admin_password_hash|node_ssh_pub_key|node_ssh_pub_keys|installer_auth_mode|installer_ssh_pub_key|ssh_password_auth|trigger_choice|fleet_private_key|matrix_bot_token|matrix_room_id|matrix_homeserver|webhook_secret|cloudflare_api_token|forgejo_public_host|custom_group_config|custom_group_imports|custom_node_config|custom_node_imports)
+    bootstrap_mode|is_controller|node_role|keepalived_role|git_user|git_token|repo_url|nix_cluster_repo_url|nops_repo_url|nixos_install_repo_url|registry_mode|module_registry_url|app_registry_url|repo_host_ip|node_group|node_admin|node_admin_pass|node_admin_password_hash|node_ssh_pub_key|node_ssh_pub_keys|installer_auth_mode|installer_ssh_pub_key|ssh_password_auth|trigger_choice|fleet_private_key|matrix_bot_token|matrix_room_id|matrix_homeserver|webhook_secret|cloudflare_api_token|forgejo_public_host|custom_group_config|custom_group_imports|custom_node_config|custom_node_imports)
       printf '%s\n' "$1"
       ;;
-    caddy_enable|modules.caddy.enable)
-      printf 'modules.caddy.enable\n'
+    caddy_enable|modules.caddy.enable|apps.caddy.enable)
+      printf 'apps.caddy.enable\n'
       ;;
-    keepalived_enable|modules.keepalived.enable)
-      printf 'modules.keepalived.enable\n'
+    keepalived_enable|modules.keepalived.enable|apps.keepalived.enable)
+      printf 'apps.keepalived.enable\n'
       ;;
-    keepalived_interface|modules.keepalived.interface)
-      printf 'modules.keepalived.interface\n'
+    keepalived_interface|modules.keepalived.interface|apps.keepalived.interface)
+      printf 'apps.keepalived.interface\n'
       ;;
-    keepalived_virtual_router_id|modules.keepalived.virtual_router_id|modules.keepalived.virtualRouterId)
-      printf 'modules.keepalived.virtual_router_id\n'
+    keepalived_virtual_router_id|modules.keepalived.virtual_router_id|modules.keepalived.virtualRouterId|apps.keepalived.virtual_router_id|apps.keepalived.virtualRouterId)
+      printf 'apps.keepalived.virtual_router_id\n'
       ;;
-    keepalived_priority|modules.keepalived.priority)
-      printf 'modules.keepalived.priority\n'
+    keepalived_priority|modules.keepalived.priority|apps.keepalived.priority)
+      printf 'apps.keepalived.priority\n'
       ;;
-    keepalived_vip_cidr|modules.keepalived.vip_cidr|modules.keepalived.vipCidr)
-      printf 'modules.keepalived.vip_cidr\n'
+    keepalived_vip_cidr|modules.keepalived.vip_cidr|modules.keepalived.vipCidr|apps.keepalived.vip_cidr|apps.keepalived.vipCidr)
+      printf 'apps.keepalived.vip_cidr\n'
       ;;
-    cloudflare_tunnel|modules.cloudflare.enable|modules.cloudflare.tunnel)
-      printf 'modules.cloudflare.enable\n'
+    cloudflare_tunnel|modules.cloudflare.enable|modules.cloudflare.tunnel|apps.cloudflare.enable|apps.cloudflare.tunnel)
+      printf 'apps.cloudflare.enable\n'
       ;;
-    cloudflare_tunnel_name|modules.cloudflare.tunnel_name|modules.cloudflare.tunnelName)
-      printf 'modules.cloudflare.tunnel_name\n'
+    cloudflare_tunnel_name|modules.cloudflare.tunnel_name|modules.cloudflare.tunnelName|apps.cloudflare.tunnel_name|apps.cloudflare.tunnelName)
+      printf 'apps.cloudflare.tunnel_name\n'
       ;;
-    cloudflare_tunnel_domain|modules.cloudflare.tunnel_domain|modules.cloudflare.tunnelDomain)
-      printf 'modules.cloudflare.tunnel_domain\n'
+    cloudflare_tunnel_domain|modules.cloudflare.tunnel_domain|modules.cloudflare.tunnelDomain|apps.cloudflare.tunnel_domain|apps.cloudflare.tunnelDomain)
+      printf 'apps.cloudflare.tunnel_domain\n'
       ;;
-    cloudflare_tunnel_vip|modules.cloudflare.tunnel_vip|modules.cloudflare.vip)
-      printf 'modules.cloudflare.tunnel_vip\n'
+    cloudflare_tunnel_vip|modules.cloudflare.tunnel_vip|modules.cloudflare.vip|apps.cloudflare.tunnel_vip|apps.cloudflare.vip)
+      printf 'apps.cloudflare.tunnel_vip\n'
       ;;
-    cloudflare_zone_id|modules.cloudflare.zone_id|modules.cloudflare.zoneId)
-      printf 'modules.cloudflare.zone_id\n'
+    cloudflare_zone_id|modules.cloudflare.zone_id|modules.cloudflare.zoneId|apps.cloudflare.zone_id|apps.cloudflare.zoneId)
+      printf 'apps.cloudflare.zone_id\n'
       ;;
-    cloudflare_account_id|modules.cloudflare.account_id|modules.cloudflare.accountId)
-      printf 'modules.cloudflare.account_id\n'
+    cloudflare_account_id|modules.cloudflare.account_id|modules.cloudflare.accountId|apps.cloudflare.account_id|apps.cloudflare.accountId)
+      printf 'apps.cloudflare.account_id\n'
       ;;
-    pxe_enable|modules.pxe.enable)
-      printf 'modules.pxe.enable\n'
+    pxe_enable|modules.pxe.enable|apps.pxe.enable)
+      printf 'apps.pxe.enable\n'
       ;;
-    pxe_dhcp_enable|modules.pxe.dhcp_enable|modules.pxe.dhcpEnable)
-      printf 'modules.pxe.dhcp_enable\n'
+    pxe_dhcp_enable|modules.pxe.dhcp_enable|modules.pxe.dhcpEnable|apps.pxe.dhcp_enable|apps.pxe.dhcpEnable)
+      printf 'apps.pxe.dhcp_enable\n'
       ;;
-    pxe_interface|modules.pxe.interface)
-      printf 'modules.pxe.interface\n'
+    pxe_interface|modules.pxe.interface|apps.pxe.interface)
+      printf 'apps.pxe.interface\n'
       ;;
-    pxe_http_port|modules.pxe.http_port|modules.pxe.httpPort)
-      printf 'modules.pxe.http_port\n'
+    pxe_http_port|modules.pxe.http_port|modules.pxe.httpPort|apps.pxe.http_port|apps.pxe.httpPort)
+      printf 'apps.pxe.http_port\n'
       ;;
-    pxe_boot_url|modules.pxe.boot_url|modules.pxe.bootUrl)
-      printf 'modules.pxe.boot_url\n'
+    pxe_boot_url|modules.pxe.boot_url|modules.pxe.bootUrl|apps.pxe.boot_url|apps.pxe.bootUrl)
+      printf 'apps.pxe.boot_url\n'
       ;;
-    postgres_backup_enable|modules.postgres_backup.enable|modules.postgresBackup.enable)
-      printf 'modules.postgres_backup.enable\n'
+    postgres_backup_enable|modules.postgres_backup.enable|modules.postgresBackup.enable|apps.postgres_backup.enable|apps.postgresBackup.enable)
+      printf 'apps.postgres_backup.enable\n'
       ;;
     *)
       return 1
@@ -143,7 +143,7 @@ apply_install_overrides() {
       nix_cluster_repo_url|nops_repo_url) NIX_CLUSTER_REPO_URL="$value" ;;
       nixos_install_repo_url) NIXOS_INSTALL_REPO_URL="$value" ;;
       registry_mode) REGISTRY_MODE="$value" ;;
-      module_registry_url) MODULE_REGISTRY_URL="$value" ;;
+      module_registry_url|app_registry_url) APP_REGISTRY_URL="$value" ;;
       repo_host_ip) REPO_HOST_IP="$value" ;;
       node_group) NODE_GROUP="$value" ;;
       node_admin) NODE_ADMIN="$value" ;;
@@ -166,24 +166,24 @@ apply_install_overrides() {
       custom_group_imports) CUSTOM_GROUP_IMPORTS="$value" ;;
       custom_node_config) CUSTOM_NODE_CONFIG="$value" ;;
       custom_node_imports) CUSTOM_NODE_IMPORTS="$value" ;;
-      modules.caddy.enable) CADDY_ENABLE="$value" ;;
-      modules.keepalived.enable) KEEPALIVED_ENABLE="$value" ;;
-      modules.keepalived.interface) KEEPALIVED_INTERFACE="$value" ;;
-      modules.keepalived.virtual_router_id) KEEPALIVED_ROUTER_ID="$value" ;;
-      modules.keepalived.priority) KEEPALIVED_PRIORITY="$value" ;;
-      modules.keepalived.vip_cidr) KEEPALIVED_VIP_CIDR="$value" ;;
-      modules.cloudflare.enable) CF_TUNNEL="$value" ;;
-      modules.cloudflare.tunnel_name) CF_TUNNEL_NAME="$value" ;;
-      modules.cloudflare.tunnel_domain) CF_TUNNEL_DOMAIN="$value" ;;
-      modules.cloudflare.tunnel_vip) CF_TUNNEL_VIP="$value" ;;
-      modules.cloudflare.zone_id) CF_ZONE_ID="$value" ;;
-      modules.cloudflare.account_id) CF_ACCOUNT_ID="$value" ;;
-      modules.pxe.enable) PXE_ENABLE="$value" ;;
-      modules.pxe.dhcp_enable) PXE_DHCP_ENABLE="$value" ;;
-      modules.pxe.interface) PXE_INTERFACE="$value" ;;
-      modules.pxe.http_port) PXE_HTTP_PORT="$value" ;;
-      modules.pxe.boot_url) PXE_BOOT_URL="$value" ;;
-      modules.postgres_backup.enable) POSTGRES_BACKUP_ENABLE="$value" ;;
+      apps.caddy.enable) CADDY_ENABLE="$value" ;;
+      apps.keepalived.enable) KEEPALIVED_ENABLE="$value" ;;
+      apps.keepalived.interface) KEEPALIVED_INTERFACE="$value" ;;
+      apps.keepalived.virtual_router_id) KEEPALIVED_ROUTER_ID="$value" ;;
+      apps.keepalived.priority) KEEPALIVED_PRIORITY="$value" ;;
+      apps.keepalived.vip_cidr) KEEPALIVED_VIP_CIDR="$value" ;;
+      apps.cloudflare.enable) CF_TUNNEL="$value" ;;
+      apps.cloudflare.tunnel_name) CF_TUNNEL_NAME="$value" ;;
+      apps.cloudflare.tunnel_domain) CF_TUNNEL_DOMAIN="$value" ;;
+      apps.cloudflare.tunnel_vip) CF_TUNNEL_VIP="$value" ;;
+      apps.cloudflare.zone_id) CF_ZONE_ID="$value" ;;
+      apps.cloudflare.account_id) CF_ACCOUNT_ID="$value" ;;
+      apps.pxe.enable) PXE_ENABLE="$value" ;;
+      apps.pxe.dhcp_enable) PXE_DHCP_ENABLE="$value" ;;
+      apps.pxe.interface) PXE_INTERFACE="$value" ;;
+      apps.pxe.http_port) PXE_HTTP_PORT="$value" ;;
+      apps.pxe.boot_url) PXE_BOOT_URL="$value" ;;
+      apps.postgres_backup.enable) POSTGRES_BACKUP_ENABLE="$value" ;;
     esac
   done
 }

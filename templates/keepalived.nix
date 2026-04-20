@@ -2,7 +2,7 @@
 { config, pkgs, lib, ... }:
 
 let
-  keepalivedCfg = config.services."nix-cluster".modules.keepalived;
+  keepalivedCfg = config.services."nix-cluster".apps.keepalived;
 in
 lib.mkIf (keepalivedCfg.enable && keepalivedCfg.interface != "" && keepalivedCfg.vipCidr != "") {
   services."nix-cluster".observability.monitoredServices = lib.mkAfter [

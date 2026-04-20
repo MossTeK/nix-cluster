@@ -1,7 +1,7 @@
 # Runs the Cloudflare tunnel daemon via Docker using a SOPS-decrypted token provisioned by the controller.
 { config, pkgs, lib, ... }:
 
-lib.mkIf config.services."nix-cluster".modules.cloudflare.enable {
+lib.mkIf config.services."nix-cluster".apps.cloudflare.enable {
   services."nix-cluster".observability.monitoredServices = lib.mkAfter [
     "cloudflared.service"
   ];

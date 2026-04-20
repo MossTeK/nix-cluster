@@ -58,6 +58,7 @@ class UpdateManager:
         relevant_paths = self.runtime_config.update.relevant_paths or [
             f"nodes/{self.hostname}/",
             "groups/",
+            "apps/",
             "modules/",
             "deployments.json",
             "secrets/",

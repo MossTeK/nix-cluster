@@ -9,7 +9,7 @@
   "nix_cluster_repo_url": "https://git.example.com/example/nix-cluster.git",
   "nixos_install_repo_url": "https://git.example.com/example/nixos-install.git",
   "registry_mode": "bundled",
-  "module_registry_url": "https://git.example.com/example/module-registry.git",
+  "app_registry_url": "https://git.example.com/example/app-registry.git",
   "repo_host_ip": "",
   "node_group": "homelab",
   "node_admin": "<admin>",
@@ -36,7 +36,7 @@
   "cloudflare_tunnel_vip": "",
   "cloudflare_zone_id": "",
   "cloudflare_account_id": "",
-  "modules": {
+  "apps": {
     "caddy": {
       "enable": false
     },

@@ -12,7 +12,7 @@
     nixCluster.inputs.nixpkgs.follows = "nixpkgs";
     nixCluster.inputs.sops-nix.follows = "sops-nix";
 
-    MODULE_REGISTRY_INPUT_PLACEHOLDER
+    APP_REGISTRY_INPUT_PLACEHOLDER
 
     # disko for declarative disk partitioning
     disko.url = "github:nix-community/disko";

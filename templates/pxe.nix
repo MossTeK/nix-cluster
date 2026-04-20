@@ -3,7 +3,7 @@
 { config, pkgs, lib, ... }:
 
 let
-  pxeCfg = config.services."nix-cluster".modules.pxe;
+  pxeCfg = config.services."nix-cluster".apps.pxe;
   bootScript = if pxeCfg.bootUrl != "" then ''
     #!ipxe
     echo nix-cluster PXE bootstrap

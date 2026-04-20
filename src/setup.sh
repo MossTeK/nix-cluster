@@ -8,7 +8,7 @@ trap 'exit 0' EXIT
 HOSTNAME=$(hostname)
 TEMPLATES_DIR="${NIX_CLUSTER_TEMPLATES_DIR:-${NOPS_TEMPLATES_DIR:-../templates}}"
 DEFAULT_NIX_CLUSTER_REPO_URL="https://git.smallguytech.org/SGT/nix-cluster.git"
-DEFAULT_MODULE_REGISTRY_URL="https://git.smallguytech.org/SGT/module-registry.git"
+DEFAULT_APP_REGISTRY_URL="https://git.smallguytech.org/SGT/app-registry.git"
 SERVICE_USER="nix-cluster"
 SERVICE_GROUP="nix-cluster"
 SERVICE_HOME="/home/${SERVICE_USER}"
@@ -378,7 +378,15 @@ prepare_forgejo_state() {
 run_cloudflare_provisioning() {
     local repo_dir="$1"
 
-    if [ "${CF_TUNNEL:-false}" != "true" ] || [ "${IS_CONTROLLER:-false}" != "true" ] || [ ! -d "$repo_dir/modules/terraform" ]; then
+    local terraform_dir=""
+
+    if [ -d "$repo_dir/apps/terraform" ]; then
+        terraform_dir="$repo_dir/apps/terraform"
+    elif [ -d "$repo_dir/modules/terraform" ]; then
+        terraform_dir="$repo_dir/modules/terraform"
+    fi
+
+    if [ "${CF_TUNNEL:-false}" != "true" ] || [ "${IS_CONTROLLER:-false}" != "true" ] || [ -z "$terraform_dir" ]; then
         return 0
     fi
 
@@ -395,8 +403,8 @@ run_cloudflare_provisioning() {
         TF_VAR_cloudflare_zone_id=$(sudo env SOPS_AGE_KEY_FILE=/var/lib/sops-nix/key.txt sops -d --extract '["cloudflare_zone_id"]' secrets/secrets.yaml)
         export TF_VAR_cloudflare_api_token TF_VAR_tunnel_name TF_VAR_tunnel_domain TF_VAR_cloudflare_account_id TF_VAR_cloudflare_zone_id
 
-        cd modules/terraform
-        log "Running terraform init in $repo_dir/modules/terraform..."
+        cd "$terraform_dir"
+        log "Running terraform init in $terraform_dir..."
         terraform init -input=false
         log "Running terraform plan for Cloudflare tunnel..."
         terraform plan -input=false -out=tfplan
@@ -479,7 +487,7 @@ if [ "$NON_INTERACTIVE" = true ]; then
     NIX_CLUSTER_REPO_URL=$(jq -r --arg default_repo "$DEFAULT_NIX_CLUSTER_REPO_URL" '.nix_cluster_repo_url // .nops_repo_url // $default_repo' "$CONFIG_FILE")
     NIXOS_INSTALL_REPO_URL=$(jq -r --arg default_repo "$DEFAULT_NIX_CLUSTER_REPO_URL" '.nixos_install_repo_url // .nix_cluster_repo_url // .nops_repo_url // $default_repo' "$CONFIG_FILE")
     REGISTRY_MODE=$(jq -r '.registry_mode // "bundled"' "$CONFIG_FILE")
-    MODULE_REGISTRY_URL=$(jq -r --arg default_repo "$DEFAULT_MODULE_REGISTRY_URL" '.module_registry_url // $default_repo' "$CONFIG_FILE")
+    APP_REGISTRY_URL=$(jq -r --arg default_repo "$DEFAULT_APP_REGISTRY_URL" '.app_registry_url // .module_registry_url // $default_repo' "$CONFIG_FILE")
     NODE_GROUP=$(jq -r '.node_group // "default"' "$CONFIG_FILE")
     NODE_ADMIN=$(jq -r '.node_admin // empty' "$CONFIG_FILE")
     NODE_ADMIN_PASS=$(jq -r '.node_admin_pass // empty' "$CONFIG_FILE")
@@ -499,25 +507,25 @@ if [ "$NON_INTERACTIVE" = true ]; then
     MATRIX_HOMESERVER=$(jq -r '.matrix_homeserver // ""' "$CONFIG_FILE")
     WEBHOOK_SECRET=$(jq -r '.webhook_secret // ""' "$CONFIG_FILE")
     CF_API_TOKEN=$(jq -r '.cloudflare_api_token // ""' "$CONFIG_FILE")
-    CADDY_ENABLE=$(jq -r '.modules.caddy.enable // .caddy_enable // "false"' "$CONFIG_FILE")
+    CADDY_ENABLE=$(jq -r '.apps.caddy.enable // .modules.caddy.enable // .caddy_enable // "false"' "$CONFIG_FILE")
     FORGEJO_PUBLIC_HOST=$(jq -r '.forgejo_public_host // ""' "$CONFIG_FILE")
-    KEEPALIVED_ENABLE=$(jq -r '.modules.keepalived.enable // .keepalived_enable // "false"' "$CONFIG_FILE")
-    KEEPALIVED_INTERFACE=$(jq -r '.modules.keepalived.interface // .keepalived_interface // ""' "$CONFIG_FILE")
-    KEEPALIVED_ROUTER_ID=$(jq -r '.modules.keepalived.virtual_router_id // .modules.keepalived.virtualRouterId // .keepalived_virtual_router_id // "51"' "$CONFIG_FILE")
-    KEEPALIVED_PRIORITY=$(jq -r '.modules.keepalived.priority // .keepalived_priority // "150"' "$CONFIG_FILE")
-    KEEPALIVED_VIP_CIDR=$(jq -r '.modules.keepalived.vip_cidr // .modules.keepalived.vipCidr // .keepalived_vip_cidr // ""' "$CONFIG_FILE")
-    CF_TUNNEL=$(jq -r '.modules.cloudflare.tunnel // .modules.cloudflare.enable // .cloudflare_tunnel // "false"' "$CONFIG_FILE")
-    CF_TUNNEL_NAME=$(jq -r '.modules.cloudflare.tunnel_name // .modules.cloudflare.tunnelName // .cloudflare_tunnel_name // ""' "$CONFIG_FILE")
-    CF_TUNNEL_DOMAIN=$(jq -r '.modules.cloudflare.tunnel_domain // .modules.cloudflare.tunnelDomain // .cloudflare_tunnel_domain // ""' "$CONFIG_FILE")
-    CF_TUNNEL_VIP=$(jq -r '.modules.cloudflare.tunnel_vip // .modules.cloudflare.vip // .cloudflare_tunnel_vip // ""' "$CONFIG_FILE")
-    CF_ZONE_ID=$(jq -r '.modules.cloudflare.zone_id // .modules.cloudflare.zoneId // .cloudflare_zone_id // ""' "$CONFIG_FILE")
-    CF_ACCOUNT_ID=$(jq -r '.modules.cloudflare.account_id // .modules.cloudflare.accountId // .cloudflare_account_id // ""' "$CONFIG_FILE")
-    PXE_ENABLE=$(jq -r '.modules.pxe.enable // .pxe_enable // "false"' "$CONFIG_FILE")
-    PXE_DHCP_ENABLE=$(jq -r '.modules.pxe.dhcp_enable // .modules.pxe.dhcpEnable // .pxe_dhcp_enable // "false"' "$CONFIG_FILE")
-    PXE_INTERFACE=$(jq -r '.modules.pxe.interface // .pxe_interface // ""' "$CONFIG_FILE")
-    PXE_HTTP_PORT=$(jq -r '.modules.pxe.http_port // .modules.pxe.httpPort // .pxe_http_port // "8081"' "$CONFIG_FILE")
-    PXE_BOOT_URL=$(jq -r '.modules.pxe.boot_url // .modules.pxe.bootUrl // .pxe_boot_url // ""' "$CONFIG_FILE")
-    POSTGRES_BACKUP_ENABLE=$(jq -r '.modules.postgresBackup.enable // .modules.postgres_backup.enable // .postgres_backup_enable // "false"' "$CONFIG_FILE")
+    KEEPALIVED_ENABLE=$(jq -r '.apps.keepalived.enable // .modules.keepalived.enable // .keepalived_enable // "false"' "$CONFIG_FILE")
+    KEEPALIVED_INTERFACE=$(jq -r '.apps.keepalived.interface // .modules.keepalived.interface // .keepalived_interface // ""' "$CONFIG_FILE")
+    KEEPALIVED_ROUTER_ID=$(jq -r '.apps.keepalived.virtual_router_id // .apps.keepalived.virtualRouterId // .modules.keepalived.virtual_router_id // .modules.keepalived.virtualRouterId // .keepalived_virtual_router_id // "51"' "$CONFIG_FILE")
+    KEEPALIVED_PRIORITY=$(jq -r '.apps.keepalived.priority // .modules.keepalived.priority // .keepalived_priority // "150"' "$CONFIG_FILE")
+    KEEPALIVED_VIP_CIDR=$(jq -r '.apps.keepalived.vip_cidr // .apps.keepalived.vipCidr // .modules.keepalived.vip_cidr // .modules.keepalived.vipCidr // .keepalived_vip_cidr // ""' "$CONFIG_FILE")
+    CF_TUNNEL=$(jq -r '.apps.cloudflare.tunnel // .apps.cloudflare.enable // .modules.cloudflare.tunnel // .modules.cloudflare.enable // .cloudflare_tunnel // "false"' "$CONFIG_FILE")
+    CF_TUNNEL_NAME=$(jq -r '.apps.cloudflare.tunnel_name // .apps.cloudflare.tunnelName // .modules.cloudflare.tunnel_name // .modules.cloudflare.tunnelName // .cloudflare_tunnel_name // ""' "$CONFIG_FILE")
+    CF_TUNNEL_DOMAIN=$(jq -r '.apps.cloudflare.tunnel_domain // .apps.cloudflare.tunnelDomain // .modules.cloudflare.tunnel_domain // .modules.cloudflare.tunnelDomain // .cloudflare_tunnel_domain // ""' "$CONFIG_FILE")
+    CF_TUNNEL_VIP=$(jq -r '.apps.cloudflare.tunnel_vip // .apps.cloudflare.vip // .modules.cloudflare.tunnel_vip // .modules.cloudflare.vip // .cloudflare_tunnel_vip // ""' "$CONFIG_FILE")
+    CF_ZONE_ID=$(jq -r '.apps.cloudflare.zone_id // .apps.cloudflare.zoneId // .modules.cloudflare.zone_id // .modules.cloudflare.zoneId // .cloudflare_zone_id // ""' "$CONFIG_FILE")
+    CF_ACCOUNT_ID=$(jq -r '.apps.cloudflare.account_id // .apps.cloudflare.accountId // .modules.cloudflare.account_id // .modules.cloudflare.accountId // .cloudflare_account_id // ""' "$CONFIG_FILE")
+    PXE_ENABLE=$(jq -r '.apps.pxe.enable // .modules.pxe.enable // .pxe_enable // "false"' "$CONFIG_FILE")
+    PXE_DHCP_ENABLE=$(jq -r '.apps.pxe.dhcp_enable // .apps.pxe.dhcpEnable // .modules.pxe.dhcp_enable // .modules.pxe.dhcpEnable // .pxe_dhcp_enable // "false"' "$CONFIG_FILE")
+    PXE_INTERFACE=$(jq -r '.apps.pxe.interface // .modules.pxe.interface // .pxe_interface // ""' "$CONFIG_FILE")
+    PXE_HTTP_PORT=$(jq -r '.apps.pxe.http_port // .apps.pxe.httpPort // .modules.pxe.http_port // .modules.pxe.httpPort // .pxe_http_port // "8081"' "$CONFIG_FILE")
+    PXE_BOOT_URL=$(jq -r '.apps.pxe.boot_url // .apps.pxe.bootUrl // .modules.pxe.boot_url // .modules.pxe.bootUrl // .pxe_boot_url // ""' "$CONFIG_FILE")
+    POSTGRES_BACKUP_ENABLE=$(jq -r '.apps.postgresBackup.enable // .apps.postgres_backup.enable // .modules.postgresBackup.enable // .modules.postgres_backup.enable // .postgres_backup_enable // "false"' "$CONFIG_FILE")
     IS_CONTROLLER=$(jq -r '.is_controller // "false"' "$CONFIG_FILE")
 
     CUSTOM_GROUP_CONFIG=$(jq -r '.custom_group_config // ""' "$CONFIG_FILE")
@@ -549,11 +557,11 @@ else
     NIX_CLUSTER_REPO_URL=${NIX_CLUSTER_REPO_URL:-$DEFAULT_NIX_CLUSTER_REPO_URL}
     read -p "nix-cluster install repo URL for controller provisioning [$DEFAULT_NIX_CLUSTER_REPO_URL]: " NIXOS_INSTALL_REPO_URL
     NIXOS_INSTALL_REPO_URL=${NIXOS_INSTALL_REPO_URL:-$DEFAULT_NIX_CLUSTER_REPO_URL}
-    read -p "Module source mode [bundled/registry] [bundled]: " REGISTRY_MODE
+    read -p "App source mode [bundled/registry] [bundled]: " REGISTRY_MODE
     REGISTRY_MODE=${REGISTRY_MODE:-bundled}
     if [ "$REGISTRY_MODE" = "registry" ]; then
-        read -p "Module registry URL [$DEFAULT_MODULE_REGISTRY_URL]: " MODULE_REGISTRY_URL
-        MODULE_REGISTRY_URL=${MODULE_REGISTRY_URL:-$DEFAULT_MODULE_REGISTRY_URL}
+        read -p "App registry URL [$DEFAULT_APP_REGISTRY_URL]: " APP_REGISTRY_URL
+        APP_REGISTRY_URL=${APP_REGISTRY_URL:-$DEFAULT_APP_REGISTRY_URL}
     fi
 
     read -p "Enter the group/tier for this node (e.g., media, signaling, db) [default]: " NODE_GROUP
@@ -679,7 +687,7 @@ else
 fi
 
 REGISTRY_MODE=${REGISTRY_MODE:-bundled}
-MODULE_REGISTRY_URL=${MODULE_REGISTRY_URL:-$DEFAULT_MODULE_REGISTRY_URL}
+APP_REGISTRY_URL=${APP_REGISTRY_URL:-${MODULE_REGISTRY_URL:-$DEFAULT_APP_REGISTRY_URL}}
 PRESERVE_EXISTING_NODE_FILES=${PRESERVE_EXISTING_NODE_FILES:-false}
 
 if [ "${IS_BOOTSTRAP:-false}" = "true" ]; then
@@ -811,8 +819,8 @@ sudo -u "$SERVICE_USER" git config --global --add safe.directory "$TARGET_DIR"
 
 # Ensures the standard fleet directory structure exists and bootstraps a base flake.nix if the repo is empty.
 log "Ensuring fleet root directory structure..."
-sudo -u "$SERVICE_USER" mkdir -p modules secrets scripts groups nodes
-sudo -u "$SERVICE_USER" touch modules/.keep secrets/.keep scripts/.keep groups/.keep nodes/.keep
+sudo -u "$SERVICE_USER" mkdir -p apps secrets scripts groups nodes
+sudo -u "$SERVICE_USER" touch apps/.keep secrets/.keep scripts/.keep groups/.keep nodes/.keep
 
 normalize_git_flake_url() {
     local url="$1"
@@ -859,13 +867,13 @@ if [ ! -f "flake.nix" ]; then
         NIX_CLUSTER_FLAKE_URL="$(normalize_git_flake_url "$NIX_CLUSTER_REPO_URL")"
         sudo -u "$SERVICE_USER" sed -i "s|git+https://git.smallguytech.org/SGT/nix-cluster.git|${NIX_CLUSTER_FLAKE_URL}|" "$TARGET_DIR/flake.nix"
     fi
-    if [ "${REGISTRY_MODE:-bundled}" = "registry" ] && [ -n "${MODULE_REGISTRY_URL:-}" ]; then
-        MODULE_REGISTRY_FLAKE_URL="$(normalize_git_flake_url "$MODULE_REGISTRY_URL")"
-        sudo -u "$SERVICE_USER" sed -i "/MODULE_REGISTRY_INPUT_PLACEHOLDER/c\
-    moduleRegistry.url = \"${MODULE_REGISTRY_FLAKE_URL}\";\
-    moduleRegistry.inputs.nixpkgs.follows = \"nixpkgs\";" "$TARGET_DIR/flake.nix"
+    if [ "${REGISTRY_MODE:-bundled}" = "registry" ] && [ -n "${APP_REGISTRY_URL:-}" ]; then
+        APP_REGISTRY_FLAKE_URL="$(normalize_git_flake_url "$APP_REGISTRY_URL")"
+        sudo -u "$SERVICE_USER" sed -i "/APP_REGISTRY_INPUT_PLACEHOLDER/c\
+    appRegistry.url = \"${APP_REGISTRY_FLAKE_URL}\";\
+    appRegistry.inputs.nixpkgs.follows = \"nixpkgs\";" "$TARGET_DIR/flake.nix"
     else
-        sudo -u "$SERVICE_USER" sed -i '/MODULE_REGISTRY_INPUT_PLACEHOLDER/d' "$TARGET_DIR/flake.nix"
+        sudo -u "$SERVICE_USER" sed -i '/APP_REGISTRY_INPUT_PLACEHOLDER/d' "$TARGET_DIR/flake.nix"
     fi
 fi
 
@@ -899,7 +907,7 @@ if [ "${IS_CONTROLLER:-false}" = "true" ]; then
         --arg repo_url "$REPO_URL" \
         --arg repo_host_ip "$REPO_HOST_IP" \
         --arg registry_mode "${REGISTRY_MODE:-bundled}" \
-        --arg module_registry_url "${MODULE_REGISTRY_URL:-$DEFAULT_MODULE_REGISTRY_URL}" \
+        --arg app_registry_url "${APP_REGISTRY_URL:-$DEFAULT_APP_REGISTRY_URL}" \
         --arg node_group "$NODE_GROUP" \
         --arg node_admin "$NODE_ADMIN" \
         --arg node_admin_password_hash "${NODE_ADMIN_PASSWORD_HASH:-}" \
@@ -937,7 +945,8 @@ if [ "${IS_CONTROLLER:-false}" = "true" ]; then
          .repo_url = $repo_url |
          .repo_host_ip = $repo_host_ip |
          .registry_mode = $registry_mode |
-         .module_registry_url = $module_registry_url |
+         .app_registry_url = $app_registry_url |
+         .module_registry_url = $app_registry_url |
          .node_group = $node_group |
          .node_admin = $node_admin |
          .node_admin_pass = "" |
@@ -1064,16 +1073,16 @@ if [ ! -d "$GROUP_DIR" ]; then
         log "Using custom group imports.nix from $CUSTOM_GROUP_IMPORTS"
         sudo -u "$SERVICE_USER" cp --no-preserve=mode "$CUSTOM_GROUP_IMPORTS" "$GROUP_DIR/imports.nix"
     else
-        if [ "${REGISTRY_MODE:-bundled}" = "registry" ]; then
+                if [ "${REGISTRY_MODE:-bundled}" = "registry" ]; then
             cat <<'EOF' | sudo -u "$SERVICE_USER" tee "$GROUP_DIR/imports.nix" > /dev/null
 { config, pkgs, inputs, ... }:
 
 {
   imports = [
-    inputs.moduleRegistry.nixosModules.official.caddy
-    inputs.moduleRegistry.nixosModules.official.cloudflared
-    inputs.moduleRegistry.nixosModules.official.postgresBackup
-    inputs.moduleRegistry.nixosModules.official.keepalived
+        inputs.appRegistry.nixosApps.official.caddy
+        inputs.appRegistry.nixosApps.official.cloudflared
+        inputs.appRegistry.nixosApps.official.postgresBackup
+        inputs.appRegistry.nixosApps.official.keepalived
   ];
 }
 EOF
@@ -1085,8 +1094,8 @@ EOF
 fi
 
 if [ "${REGISTRY_MODE:-bundled}" != "registry" ]; then
-    log "Ensuring standard module files exist..."
-    sudo -u "$SERVICE_USER" mkdir -p "$TARGET_DIR/modules/caddy" "$TARGET_DIR/modules/cloudflare" "$TARGET_DIR/modules/backup" "$TARGET_DIR/modules/ingress" "$TARGET_DIR/modules/pxe"
+    log "Ensuring standard app files exist..."
+    sudo -u "$SERVICE_USER" mkdir -p "$TARGET_DIR/apps/caddy" "$TARGET_DIR/apps/cloudflare" "$TARGET_DIR/apps/backup" "$TARGET_DIR/apps/ingress" "$TARGET_DIR/apps/pxe"
     for module_spec in \
         "caddy/caddy.nix:caddy.nix" \
         "cloudflare/cloudflared.nix:cloudflared.nix" \
@@ -1096,9 +1105,9 @@ if [ "${REGISTRY_MODE:-bundled}" != "registry" ]; then
     do
         module_target="${module_spec%%:*}"
         module_template="${module_spec##*:}"
-        if [ ! -f "$TARGET_DIR/modules/$module_target" ]; then
-            sudo -u "$SERVICE_USER" cp --no-preserve=mode "$TEMPLATES_DIR/$module_template" "$TARGET_DIR/modules/$module_target"
-            sudo -u "$SERVICE_USER" chmod u+w "$TARGET_DIR/modules/$module_target"
+        if [ ! -f "$TARGET_DIR/apps/$module_target" ]; then
+            sudo -u "$SERVICE_USER" cp --no-preserve=mode "$TEMPLATES_DIR/$module_template" "$TARGET_DIR/apps/$module_target"
+            sudo -u "$SERVICE_USER" chmod u+w "$TARGET_DIR/apps/$module_target"
         fi
     done
 fi
@@ -1108,12 +1117,12 @@ if [ "${CADDY_ENABLE:-false}" = "true" ]; then
     log "Base Caddy reverse proxy enabled. Scaffolding module..."
 
     if [ "${REGISTRY_MODE:-bundled}" != "registry" ]; then
-        CADDY_MODULE_DIR="$TARGET_DIR/modules/caddy"
+        CADDY_MODULE_DIR="$TARGET_DIR/apps/caddy"
         if [ ! -d "$CADDY_MODULE_DIR" ]; then
             sudo -u "$SERVICE_USER" mkdir -p "$CADDY_MODULE_DIR"
             sudo -u "$SERVICE_USER" cp --no-preserve=mode "$TEMPLATES_DIR/caddy.nix" "$CADDY_MODULE_DIR/caddy.nix"
             sudo -u "$SERVICE_USER" chmod u+w "$CADDY_MODULE_DIR/caddy.nix"
-            log "Created modules/caddy/caddy.nix"
+            log "Created apps/caddy/caddy.nix"
         fi
     fi
 fi
@@ -1139,7 +1148,7 @@ if [ "${KEEPALIVED_ENABLE:-false}" = "true" ]; then
     fi
 
     if [ "${REGISTRY_MODE:-bundled}" != "registry" ]; then
-        KEEPALIVED_MODULE_DIR="$TARGET_DIR/modules/ingress"
+        KEEPALIVED_MODULE_DIR="$TARGET_DIR/apps/ingress"
         if [ ! -d "$KEEPALIVED_MODULE_DIR" ]; then
             sudo -u "$SERVICE_USER" mkdir -p "$KEEPALIVED_MODULE_DIR"
         fi
@@ -1155,7 +1164,7 @@ if [ "${KEEPALIVED_ENABLE:-false}" = "true" ]; then
         sudo -u "$SERVICE_USER" sed -i "s|KEEPALIVED_ROUTER_ID_PLACEHOLDER|${KEEPALIVED_ROUTER_ID}|" "$KEEPALIVED_MODULE_DIR/keepalived.nix"
         sudo -u "$SERVICE_USER" sed -i "s|KEEPALIVED_PRIORITY_PLACEHOLDER|${KEEPALIVED_PRIORITY}|" "$KEEPALIVED_MODULE_DIR/keepalived.nix"
         sudo -u "$SERVICE_USER" sed -i "s|KEEPALIVED_VIP_CIDR_PLACEHOLDER|${KEEPALIVED_VIP_CIDR}|" "$KEEPALIVED_MODULE_DIR/keepalived.nix"
-        log "Created modules/ingress/keepalived.nix (interface: $KEEPALIVED_INTERFACE, vip: $KEEPALIVED_VIP_CIDR)"
+        log "Created apps/ingress/keepalived.nix (interface: $KEEPALIVED_INTERFACE, vip: $KEEPALIVED_VIP_CIDR)"
     fi
 fi
 
@@ -1164,7 +1173,7 @@ if [ "${IS_BOOTSTRAP:-false}" = "true" ]; then
     log "PostgreSQL backup support enabled. Scaffolding module..."
 
     if [ "${REGISTRY_MODE:-bundled}" != "registry" ]; then
-        POSTGRES_BACKUP_MODULE_DIR="$TARGET_DIR/modules/backup"
+        POSTGRES_BACKUP_MODULE_DIR="$TARGET_DIR/apps/backup"
         if [ ! -d "$POSTGRES_BACKUP_MODULE_DIR" ]; then
             sudo -u "$SERVICE_USER" mkdir -p "$POSTGRES_BACKUP_MODULE_DIR"
         fi
@@ -1180,17 +1189,17 @@ if [ "${CF_TUNNEL:-false}" = "true" ]; then
 
     if [ "${REGISTRY_MODE:-bundled}" != "registry" ]; then
         # Create cloudflared NixOS module
-        CF_MODULE_DIR="$TARGET_DIR/modules/cloudflare"
+        CF_MODULE_DIR="$TARGET_DIR/apps/cloudflare"
         if [ ! -d "$CF_MODULE_DIR" ]; then
             sudo -u "$SERVICE_USER" mkdir -p "$CF_MODULE_DIR"
             sudo -u "$SERVICE_USER" cp --no-preserve=mode "$TEMPLATES_DIR/cloudflared.nix" "$CF_MODULE_DIR/cloudflared.nix"
             sudo -u "$SERVICE_USER" chmod u+w "$CF_MODULE_DIR/cloudflared.nix"
-            log "Created modules/cloudflare/cloudflared.nix"
+            log "Created apps/cloudflare/cloudflared.nix"
         fi
     fi
 
     # Create Terraform config with substituted values
-    TF_MODULE_DIR="$TARGET_DIR/modules/terraform"
+    TF_MODULE_DIR="$TARGET_DIR/apps/terraform"
     if [ ! -d "$TF_MODULE_DIR" ]; then
         sudo -u "$SERVICE_USER" mkdir -p "$TF_MODULE_DIR"
         sudo -u "$SERVICE_USER" cp --no-preserve=mode "$TEMPLATES_DIR/main.tf" "$TF_MODULE_DIR/main.tf"
@@ -1198,7 +1207,7 @@ if [ "${CF_TUNNEL:-false}" = "true" ]; then
         sudo -u "$SERVICE_USER" sed -i "s|TUNNEL_NAME_PLACEHOLDER|${CF_TUNNEL_NAME}|" "$TF_MODULE_DIR/main.tf"
         sudo -u "$SERVICE_USER" sed -i "s|TUNNEL_DOMAIN_PLACEHOLDER|${CF_TUNNEL_DOMAIN}|" "$TF_MODULE_DIR/main.tf"
         sudo -u "$SERVICE_USER" sed -i "s|VIP_ADDRESS_PLACEHOLDER|${CF_TUNNEL_VIP}|" "$TF_MODULE_DIR/main.tf"
-        log "Created modules/terraform/main.tf (tunnel: $CF_TUNNEL_NAME, domain: $CF_TUNNEL_DOMAIN, vip: $CF_TUNNEL_VIP)"
+        log "Created apps/terraform/main.tf (tunnel: $CF_TUNNEL_NAME, domain: $CF_TUNNEL_DOMAIN, vip: $CF_TUNNEL_VIP)"
     fi
 
 fi
@@ -1250,12 +1259,12 @@ else
     echo "  ../../groups/$NODE_GROUP/configuration.nix" >> "$IMPORTS_FILE"
     echo "  ../../groups/$NODE_GROUP/imports.nix" >> "$IMPORTS_FILE"
     if [ "${REGISTRY_MODE:-bundled}" = "registry" ]; then
-        echo "  inputs.moduleRegistry.nixosModules.official.pxe" >> "$IMPORTS_FILE"
+        echo "  inputs.appRegistry.nixosApps.official.pxe" >> "$IMPORTS_FILE"
     else
-        echo "  ../../modules/pxe/pxe.nix" >> "$IMPORTS_FILE"
+        echo "  ../../apps/pxe/pxe.nix" >> "$IMPORTS_FILE"
     fi
     if [ "$IS_BOOTSTRAP" = "true" ]; then
-        echo "  ../../modules/forgejo/forgejo.nix" >> "$IMPORTS_FILE"
+        echo "  ../../apps/forgejo/forgejo.nix" >> "$IMPORTS_FILE"
     fi
     echo "];}" >> "$IMPORTS_FILE"
 fi
@@ -1355,7 +1364,7 @@ sudo -u "$SERVICE_USER" sed -i "s|POSTGRES_BACKUP_ENABLE_PLACEHOLDER|${POSTGRES_
 # Dynamically scaffold Forgejo module if this is the bootstrap node
 if [ "$IS_BOOTSTRAP" = "true" ]; then
     log "Scaffolding Forgejo module..."
-    FORGEJO_MODULE_DIR="$TARGET_DIR/modules/forgejo"
+    FORGEJO_MODULE_DIR="$TARGET_DIR/apps/forgejo"
     sudo -u "$SERVICE_USER" mkdir -p "$FORGEJO_MODULE_DIR"
     FORGEJO_FILE="$FORGEJO_MODULE_DIR/forgejo.nix"
     
@@ -1431,7 +1440,7 @@ fi
 if [ "${CF_TUNNEL:-false}" = "true" ] && [ "${IS_CONTROLLER:-false}" = "true" ]; then
     log "Injecting Cloudflare tunnel provisioning into controller script..."
     CF_SCRIPT=$(cat <<'CFEOF'
-      if [ -d "modules/terraform" ]; then
+          if [ -d "apps/terraform" ]; then
           echo "[NIX-CLUSTER] === Cloudflare Tunnel Provisioning ==="
           export TF_VAR_cloudflare_api_token=$(sudo env SOPS_AGE_KEY_FILE=/var/lib/sops-nix/key.txt sops -d --extract '["cloudflare_api_token"]' secrets/secrets.yaml)
           export TF_VAR_tunnel_name=$(sudo env SOPS_AGE_KEY_FILE=/var/lib/sops-nix/key.txt sops -d --extract '["cloudflare_tunnel_name"]' secrets/secrets.yaml)
@@ -1440,7 +1449,7 @@ if [ "${CF_TUNNEL:-false}" = "true" ] && [ "${IS_CONTROLLER:-false}" = "true" ];
           export TF_VAR_cloudflare_zone_id=$(sudo env SOPS_AGE_KEY_FILE=/var/lib/sops-nix/key.txt sops -d --extract '["cloudflare_zone_id"]' secrets/secrets.yaml)
           echo "[NIX-CLUSTER] Tunnel name: $TF_VAR_tunnel_name"
           echo "[NIX-CLUSTER] Tunnel domain: $TF_VAR_tunnel_domain"
-          cd modules/terraform
+              cd apps/terraform
           echo "[NIX-CLUSTER] Running terraform init..."
           terraform init -input=false
           echo "[NIX-CLUSTER] Running terraform plan..."
@@ -1582,7 +1591,7 @@ fi
 if [ "${PXE_ENABLE:-false}" = "true" ]; then
     log "PXE bootstrap enabled. Scaffolding module..."
 
-    PXE_MODULE_DIR="$TARGET_DIR/modules/pxe"
+    PXE_MODULE_DIR="$TARGET_DIR/apps/pxe"
     if [ ! -d "$PXE_MODULE_DIR" ]; then
         sudo -u "$SERVICE_USER" mkdir -p "$PXE_MODULE_DIR"
     fi

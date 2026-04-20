@@ -34,7 +34,7 @@
   "cloudflare_tunnel_vip": "",
   "cloudflare_zone_id": "",
   "cloudflare_account_id": "",
-  "modules": {
+  "apps": {
     "caddy": {
       "enable": false
     },
