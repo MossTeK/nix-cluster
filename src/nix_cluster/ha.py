@@ -10,7 +10,7 @@ from typing import Any
 
 from .config import RuntimeConfig
 from .core import atomic_write_json, atomic_write_text, configure_logging
-from .runtime import EtcdClient
+from .runtime import EtcdClient, RuntimeStoreRateLimited
 
 ACTIVE_STATES = {"active", "activating", "reloading"}
 
@@ -115,12 +115,14 @@ class ServiceReporter:
         etcd = EtcdClient(runtime_store.endpoint) if runtime_store.type == "etcd" and runtime_store.endpoint else None
         key_prefix = runtime_store.key_prefix.rstrip("/")
         interval = max(1, self.config.ha.reporting.interval_seconds)
+        backoff_until = 0.0
 
         self.logger.info("starting service reporter on %s", self.hostname)
         while True:
             try:
                 units = self.selected_units(self.list_all_service_units())
                 services: dict[str, dict[str, Any]] = {}
+                etcd_updates: dict[str, dict[str, Any]] = {}
                 for unit in units:
                     payload = self.collect_unit_status(unit)
                     services[unit] = payload
@@ -133,10 +135,20 @@ class ServiceReporter:
                         )
                     self.previous_states[unit] = current
                     if etcd:
-                        etcd.put_json(f"{key_prefix}/{self.hostname}/{unit}", payload)
+                        etcd_updates[f"{key_prefix}/{self.hostname}/{unit}"] = payload
 
                 atomic_write_json(snapshot_path, {"host": self.hostname, "observed_at": int(time.time()), "services": services})
                 atomic_write_text(metrics_path, self.build_metric_lines(services))
+                if etcd and time.monotonic() >= backoff_until:
+                    etcd.put_json_many(etcd_updates)
+            except RuntimeStoreRateLimited as error:
+                retry_after = error.retry_after if error.retry_after is not None else max(5.0, float(interval))
+                backoff_until = time.monotonic() + retry_after
+                self.logger.warning(
+                    "runtime_store_rate_limited endpoint=%s retry_after=%.1fs",
+                    runtime_store.endpoint,
+                    retry_after,
+                )
             except urllib.error.URLError as error:
                 self.logger.warning("runtime_store_unreachable endpoint=%s error=%s", runtime_store.endpoint, error)
             except Exception as error:
@@ -191,10 +203,14 @@ class ClusterMonitor:
         cluster_state_path = Path(self.config.directories.state) / "ha" / "cluster-state.json"
         metrics_path = Path(self.config.directories.metrics) / "cluster-state.prom"
         etcd = EtcdClient(endpoint)
+        backoff_until = 0.0
 
         self.logger.info("starting controller monitor on %s", self.controller)
         while True:
             try:
+                if time.monotonic() < backoff_until:
+                    time.sleep(interval)
+                    continue
                 now = int(time.time())
                 records = etcd.get_prefix(prefix)
                 services: dict[str, dict[str, Any]] = {}
@@ -237,6 +253,14 @@ class ClusterMonitor:
                 cluster_state = {"controller": self.controller, "observed_at": now, "runtime_store": endpoint, "services": services}
                 atomic_write_json(cluster_state_path, cluster_state)
                 atomic_write_text(metrics_path, self.build_cluster_metrics(cluster_state))
+            except RuntimeStoreRateLimited as error:
+                retry_after = error.retry_after if error.retry_after is not None else max(5.0, float(interval))
+                backoff_until = time.monotonic() + retry_after
+                self.logger.warning(
+                    "runtime_store_rate_limited endpoint=%s retry_after=%.1fs",
+                    endpoint,
+                    retry_after,
+                )
             except urllib.error.URLError as error:
                 self.logger.warning("runtime_store_unreachable endpoint=%s error=%s", endpoint, error)
             except Exception as error:
