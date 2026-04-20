@@ -521,6 +521,27 @@ wait_for_login() {
   return 0
 }
 
+wait_for_ssh_login() {
+  local user="$1"
+  local host="$2"
+  local password="$3"
+  local auth_mode="${4:-auto}"
+  local max_attempts="${5:-60}"
+  local attempt=1
+
+  until can_login "$user" "$host" "$password" "$auth_mode"; do
+    if [ "$attempt" -ge "$max_attempts" ]; then
+      return 1
+    fi
+
+    echo "[nix-cluster] waiting for live installer SSH on $host..."
+    sleep 10
+    attempt=$((attempt + 1))
+  done
+
+  return 0
+}
+
 subnet_prefix_from_ip() {
   local ip="$1"
 
@@ -929,13 +950,13 @@ while read -r node; do
       run_remote_sudo_command "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" auto "nohup sh -c 'sleep 2; reboot' >/dev/null 2>&1 &" || true
 
       echo "[nix-cluster] Waiting for $HOSTNAME to come back on the live installer..."
-      if ! wait_for_login "$INSTALLER_USER" "$INSTALLER_IP" "$INSTALLER_PASSWORD" 18; then
+      if ! wait_for_ssh_login "$INSTALLER_USER" "$INSTALLER_IP" "$INSTALLER_PASSWORD" "$INSTALLER_AUTH_MODE" 60; then
         if can_login "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS"; then
           echo "[nix-cluster] $HOSTNAME came back on the installed system instead of netboot. Ensure PXE/network boot is selected first, then rerun the controller."
           capture_failure_artifacts "node rebooted back into installed system instead of installer"
           publish_join_state "reinstall-blocked" "node rebooted back into installed system instead of installer; logs in $CURRENT_NODE_LOG_DIR"
         else
-          echo "[nix-cluster] $HOSTNAME did not become reachable on the live installer after reboot. Skipping reinstall."
+          echo "[nix-cluster] $HOSTNAME did not become SSH-reachable on the live installer after reboot. Skipping reinstall."
           capture_failure_artifacts "node did not return on live installer after reboot"
           publish_join_state "reinstall-failed" "node did not return on live installer; logs in $CURRENT_NODE_LOG_DIR"
         fi

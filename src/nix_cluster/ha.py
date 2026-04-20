@@ -13,6 +13,7 @@ from .core import atomic_write_json, atomic_write_text, configure_logging
 from .runtime import EtcdClient, RuntimeStoreRateLimited
 
 ACTIVE_STATES = {"active", "activating", "reloading"}
+REPEATED_WARNING_INTERVAL_SECONDS = 60.0
 
 
 class ServiceReporter:
@@ -21,6 +22,18 @@ class ServiceReporter:
         self.logger = configure_logging("nix-cluster-reporter")
         self.hostname = socket.gethostname()
         self.previous_states: dict[str, bool] = {}
+        self.last_runtime_store_warning: tuple[str, str] | None = None
+        self.last_runtime_store_warning_at = 0.0
+
+    def log_runtime_store_warning(self, endpoint: str, message: str, *args: Any) -> None:
+        rendered = message % args if args else message
+        signature = (endpoint, rendered)
+        now = time.monotonic()
+        if signature == self.last_runtime_store_warning and (now - self.last_runtime_store_warning_at) < REPEATED_WARNING_INTERVAL_SECONDS:
+            return
+        self.last_runtime_store_warning = signature
+        self.last_runtime_store_warning_at = now
+        self.logger.warning(message, *args)
 
     def run_command(self, command: list[str]) -> str:
         result = subprocess.run(command, capture_output=True, text=True, check=False)
@@ -144,13 +157,19 @@ class ServiceReporter:
             except RuntimeStoreRateLimited as error:
                 retry_after = error.retry_after if error.retry_after is not None else max(5.0, float(interval))
                 backoff_until = time.monotonic() + retry_after
-                self.logger.warning(
+                self.log_runtime_store_warning(
+                    runtime_store.endpoint,
                     "runtime_store_rate_limited endpoint=%s retry_after=%.1fs",
                     runtime_store.endpoint,
                     retry_after,
                 )
             except urllib.error.URLError as error:
-                self.logger.warning("runtime_store_unreachable endpoint=%s error=%s", runtime_store.endpoint, error)
+                self.log_runtime_store_warning(
+                    runtime_store.endpoint,
+                    "runtime_store_unreachable endpoint=%s error=%s",
+                    runtime_store.endpoint,
+                    error,
+                )
             except Exception as error:
                 self.logger.exception("reporter_loop_failed: %s", error)
             time.sleep(interval)
@@ -162,6 +181,31 @@ class ClusterMonitor:
         self.logger = configure_logging("nix-cluster-monitor")
         self.controller = socket.gethostname()
         self.previous_targets: dict[str, str] = {}
+        self.previous_unavailable_signatures: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {}
+        self.previous_unavailable_logged_at: dict[str, float] = {}
+        self.last_runtime_store_warning: tuple[str, str] | None = None
+        self.last_runtime_store_warning_at = 0.0
+
+    def log_runtime_store_warning(self, endpoint: str, message: str, *args: Any) -> None:
+        rendered = message % args if args else message
+        signature = (endpoint, rendered)
+        now = time.monotonic()
+        if signature == self.last_runtime_store_warning and (now - self.last_runtime_store_warning_at) < REPEATED_WARNING_INTERVAL_SECONDS:
+            return
+        self.last_runtime_store_warning = signature
+        self.last_runtime_store_warning_at = now
+        self.logger.warning(message, *args)
+
+    def should_log_service_unavailable(self, service: str, unhealthy_nodes: list[str], stale_nodes: list[str]) -> bool:
+        signature = (tuple(unhealthy_nodes), tuple(stale_nodes))
+        now = time.monotonic()
+        previous_signature = self.previous_unavailable_signatures.get(service)
+        previous_logged_at = self.previous_unavailable_logged_at.get(service, 0.0)
+        if previous_signature == signature and (now - previous_logged_at) < REPEATED_WARNING_INTERVAL_SECONDS:
+            return False
+        self.previous_unavailable_signatures[service] = signature
+        self.previous_unavailable_logged_at[service] = now
+        return True
 
     @staticmethod
     def service_and_host_from_key(prefix: str, key: str) -> tuple[str, str]:
@@ -245,10 +289,11 @@ class ClusterMonitor:
                     payload["recommended_target"] = target
                     self.previous_targets[service] = target or ""
                     if not healthy_nodes:
-                        self.logger.warning(
-                            "service_unavailable service=%s unhealthy_nodes=%s stale_nodes=%s",
-                            service, ",".join(payload["unhealthy_nodes"]), ",".join(payload["stale_nodes"]),
-                        )
+                        if self.should_log_service_unavailable(service, payload["unhealthy_nodes"], payload["stale_nodes"]):
+                            self.logger.warning(
+                                "service_unavailable service=%s unhealthy_nodes=%s stale_nodes=%s",
+                                service, ",".join(payload["unhealthy_nodes"]), ",".join(payload["stale_nodes"]),
+                            )
 
                 cluster_state = {"controller": self.controller, "observed_at": now, "runtime_store": endpoint, "services": services}
                 atomic_write_json(cluster_state_path, cluster_state)
@@ -256,13 +301,19 @@ class ClusterMonitor:
             except RuntimeStoreRateLimited as error:
                 retry_after = error.retry_after if error.retry_after is not None else max(5.0, float(interval))
                 backoff_until = time.monotonic() + retry_after
-                self.logger.warning(
+                self.log_runtime_store_warning(
+                    endpoint,
                     "runtime_store_rate_limited endpoint=%s retry_after=%.1fs",
                     endpoint,
                     retry_after,
                 )
             except urllib.error.URLError as error:
-                self.logger.warning("runtime_store_unreachable endpoint=%s error=%s", endpoint, error)
+                self.log_runtime_store_warning(
+                    endpoint,
+                    "runtime_store_unreachable endpoint=%s error=%s",
+                    endpoint,
+                    error,
+                )
             except Exception as error:
                 self.logger.exception("monitor_loop_failed: %s", error)
             time.sleep(interval)
