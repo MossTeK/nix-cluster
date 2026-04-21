@@ -270,6 +270,20 @@ It handles:
 
 In practice, `setup.sh` is the installer/state-machine for fleet enrollment.
 
+### Controller provisioning observability
+
+The controller-side autoprovision script also maintains a per-attempt artifact tree under `/home/nix-cluster/log/provisioning/<host>/<timestamp>/`.
+
+That tree is intended to capture:
+
+- controller-side probe snapshots
+- remote live-installer runtime snapshots
+- pulled installer logs from `/var/log/nixos-install/`
+- persisted installer logs from `/mnt/var/log/nixos-install/`
+- rendered target files from `/mnt/etc/nixos/`
+
+Installer log lines copied back to the controller are also mirrored into journald with syslog identifier `nix-cluster-install`, so operators can correlate controller events with pulled installer logs by using `journalctl -t nix-cluster-install`.
+
 ### [src/lib/install-config.sh](../src/lib/install-config.sh)
 
 This is a helper library sourced by `setup.sh`.

@@ -17,6 +17,11 @@ TEMP_FILES=()
 CONTROLLER_LOG_DIR="/home/nix-cluster/log"
 PROVISIONING_LOG_ROOT="${CONTROLLER_LOG_DIR}/provisioning"
 CURRENT_NODE_LOG_DIR=""
+INSTALL_LOG_SYSLOG_TAG="nix-cluster-install"
+REMOTE_INSTALLER_LOG_DIR="/var/log/nixos-install"
+REMOTE_INSTALLER_LOG_FILE="${REMOTE_INSTALLER_LOG_DIR}/install.log"
+REMOTE_INSTALLER_STATE_FILE="${REMOTE_INSTALLER_LOG_DIR}/state.env"
+REMOTE_PERSISTED_INSTALL_LOG_DIR="/mnt/var/log/nixos-install"
 
 timestamp_utc() {
   date -u +"%Y-%m-%dT%H:%M:%SZ"
@@ -52,6 +57,87 @@ node_log_path() {
   printf '%s/%s\n' "$CURRENT_NODE_LOG_DIR" "$file_name"
 }
 
+emit_install_journal() {
+  local message="$1"
+
+  if command -v logger >/dev/null 2>&1; then
+    logger -t "$INSTALL_LOG_SYSLOG_TAG" -- "$message" || true
+  fi
+}
+
+capture_remote_command_output() {
+  local output_name="$1"
+  local remote_user="$2"
+  local remote_password="$3"
+  local remote_auth_mode="$4"
+  local remote_command="$5"
+  local run_mode="${6:-sudo}"
+  local output_path
+
+  output_path=$(node_log_path "$output_name")
+  if [ "$run_mode" = "direct" ]; then
+    run_remote "$remote_user" "$INSTALLER_IP" "$remote_password" "$remote_auth_mode" "$remote_command" >"$output_path" 2>&1 || return 1
+  else
+    run_remote_sudo_command "$remote_user" "$INSTALLER_IP" "$remote_password" "$remote_auth_mode" "$remote_command" >"$output_path" 2>&1 || return 1
+  fi
+
+  [ -s "$output_path" ]
+}
+
+capture_remote_file() {
+  local output_name="$1"
+  local remote_user="$2"
+  local remote_password="$3"
+  local remote_auth_mode="$4"
+  local remote_path="$5"
+  local run_mode="${6:-sudo}"
+  local remote_command
+
+  remote_command=$(printf "if [ -f %q ]; then cat %q; fi" "$remote_path" "$remote_path")
+  capture_remote_command_output "$output_name" "$remote_user" "$remote_password" "$remote_auth_mode" "$remote_command" "$run_mode"
+}
+
+ingest_local_file_to_journal() {
+  local source_name="$1"
+  local local_path="$2"
+  local line
+
+  [ -s "$local_path" ] || return 0
+
+  while IFS= read -r line; do
+    emit_install_journal "host=$HOSTNAME ip=$INSTALLER_IP source=$source_name $line"
+  done < "$local_path"
+}
+
+capture_remote_installer_artifacts() {
+  local remote_user="$1"
+  local remote_password="$2"
+  local remote_auth_mode="$3"
+  local prefix="${4:-installer}"
+  local live_log_path
+  local persisted_log_path
+
+  capture_remote_command_output "${prefix}-paths.txt" "$remote_user" "$remote_password" "$remote_auth_mode" "for path in '$REMOTE_INSTALLER_LOG_DIR' '$REMOTE_PERSISTED_INSTALL_LOG_DIR' /mnt/etc/nixos; do echo \"== \\$path ==\"; ls -lah \"\\$path\" 2>/dev/null || true; echo; done" || true
+
+  capture_remote_file "${prefix}-live-install.log" "$remote_user" "$remote_password" "$remote_auth_mode" "$REMOTE_INSTALLER_LOG_FILE" || true
+  live_log_path=$(node_log_path "${prefix}-live-install.log")
+  ingest_local_file_to_journal "${prefix}-live-install" "$live_log_path"
+
+  capture_remote_file "${prefix}-live-state.env" "$remote_user" "$remote_password" "$remote_auth_mode" "$REMOTE_INSTALLER_STATE_FILE" || true
+  capture_remote_file "${prefix}-persisted-install.log" "$remote_user" "$remote_password" "$remote_auth_mode" "$REMOTE_PERSISTED_INSTALL_LOG_DIR/install.log" || true
+  persisted_log_path=$(node_log_path "${prefix}-persisted-install.log")
+  ingest_local_file_to_journal "${prefix}-persisted-install" "$persisted_log_path"
+  capture_remote_file "${prefix}-persisted-state.env" "$remote_user" "$remote_password" "$remote_auth_mode" "$REMOTE_PERSISTED_INSTALL_LOG_DIR/state.env" || true
+  capture_remote_file "${prefix}-lsblk.before.txt" "$remote_user" "$remote_password" "$remote_auth_mode" "$REMOTE_INSTALLER_LOG_DIR/lsblk.before.txt" || true
+  capture_remote_file "${prefix}-ip.addr.txt" "$remote_user" "$remote_password" "$remote_auth_mode" "$REMOTE_INSTALLER_LOG_DIR/ip.addr.txt" || true
+  capture_remote_file "${prefix}-ip.route.txt" "$remote_user" "$remote_password" "$remote_auth_mode" "$REMOTE_INSTALLER_LOG_DIR/ip.route.txt" || true
+  capture_remote_file "${prefix}-findmnt.mnt.txt" "$remote_user" "$remote_password" "$remote_auth_mode" "$REMOTE_INSTALLER_LOG_DIR/findmnt.mnt.txt" || true
+  capture_remote_file "${prefix}-target.nixos.tree.txt" "$remote_user" "$remote_password" "$remote_auth_mode" "$REMOTE_INSTALLER_LOG_DIR/target.nixos.tree.txt" || true
+  capture_remote_file "${prefix}-target-configuration.nix" "$remote_user" "$remote_password" "$remote_auth_mode" "/mnt/etc/nixos/configuration.nix" || true
+  capture_remote_file "${prefix}-target-hardware-configuration.nix" "$remote_user" "$remote_password" "$remote_auth_mode" "/mnt/etc/nixos/hardware-configuration.nix" || true
+  capture_remote_file "${prefix}-target-disko.nix" "$remote_user" "$remote_password" "$remote_auth_mode" "/mnt/etc/nixos/disko.nix" || true
+}
+
 capture_controller_probe_snapshot() {
   local probe_log
 
@@ -64,6 +150,9 @@ capture_controller_probe_snapshot() {
     echo "installer_user=$INSTALLER_USER"
     echo "node_admin=$NODE_ADMIN"
     echo "installer_auth_mode=$INSTALLER_AUTH_MODE"
+    echo "controller_ssh_pub_key_fingerprint=$(ssh-keygen -lf \"${NIX_CLUSTER_SSH_KEY}.pub\" 2>/dev/null | awk '{print $2, $4}' || true)"
+    echo "expected_live_install_log=$REMOTE_INSTALLER_LOG_FILE"
+    echo "expected_persisted_install_log=$REMOTE_PERSISTED_INSTALL_LOG_DIR/install.log"
     echo
     echo "== ping =="
     ping -c 1 -W 2 "$INSTALLER_IP" || true
@@ -142,6 +231,7 @@ capture_failure_artifacts() {
 
   if can_login "$INSTALLER_USER" "$INSTALLER_IP" "$INSTALLER_PASSWORD" "$INSTALLER_AUTH_MODE"; then
     capture_remote_snapshot "installer-runtime.txt" "$INSTALLER_USER" "$INSTALLER_PASSWORD" "$INSTALLER_AUTH_MODE"
+    capture_remote_installer_artifacts "$INSTALLER_USER" "$INSTALLER_PASSWORD" "$INSTALLER_AUTH_MODE" "installer" || true
   fi
 
   if can_login "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" auto; then
@@ -534,7 +624,8 @@ wait_for_ssh_login() {
       return 1
     fi
 
-    echo "[nix-cluster] waiting for live installer SSH on $host..."
+    echo "[nix-cluster] waiting for live installer SSH on $host (attempt $attempt/$max_attempts, auth=$auth_mode, user=$user)..."
+    emit_install_journal "live-installer-wait host=$HOSTNAME ip=$host attempt=$attempt/$max_attempts auth=$auth_mode user=$user"
     sleep 10
     attempt=$((attempt + 1))
   done
@@ -728,6 +819,9 @@ publish_join_state() {
   local detail="$2"
   local join_payload
 
+  echo "[nix-cluster] join-state host=$HOSTNAME phase=$phase detail=$detail"
+  emit_install_journal "join-state host=$HOSTNAME ip=$INSTALLER_IP phase=$phase detail=$detail"
+
   join_payload=$(jq -nc \
     --arg hostname "$HOSTNAME" \
     --arg installer_ip "$INSTALLER_IP" \
@@ -766,7 +860,7 @@ provision_live_installer() {
     return 1
   fi
 
-  publish_join_state "provisioning-live-installer" "running nixos-install over ssh"
+  publish_join_state "provisioning-live-installer" "running nixos-install over ssh; live log at $REMOTE_INSTALLER_LOG_FILE"
   if [ -n "$NODE_ADMIN_PASSWORD_HASH" ]; then
     HASHED_PASS="$NODE_ADMIN_PASSWORD_HASH"
   elif [ -n "$NODE_ADMIN_PASS" ]; then
@@ -812,6 +906,9 @@ provision_live_installer() {
     echo "hostname=$HOSTNAME"
     echo "installer_ip=$INSTALLER_IP"
     echo "installer_user=$INSTALLER_USER"
+    echo "installer_auth_mode=$INSTALLER_AUTH_MODE"
+    echo "remote_live_log=$REMOTE_INSTALLER_LOG_FILE"
+    echo "remote_persisted_log=$REMOTE_PERSISTED_INSTALL_LOG_DIR/install.log"
     echo "install_command=$install_cmd_quoted"
     echo
   } >"$install_log_file"
@@ -822,6 +919,8 @@ provision_live_installer() {
     publish_join_state "install-failed" "remote nixos-install command failed; logs in $CURRENT_NODE_LOG_DIR"
     return 1
   fi
+
+  capture_remote_installer_artifacts "$INSTALLER_USER" "$INSTALLER_PASSWORD" "$INSTALLER_AUTH_MODE" "post-install" || true
 
   if stop_pixiecore_for_disk_boot; then
     PXE_TEMP_DISABLED=1
