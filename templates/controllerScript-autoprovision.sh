@@ -11,6 +11,7 @@ RUNTIME_CONFIG="/etc/nix-cluster-runtime-config.json"
 SSH_BASE_OPTS=(
   -o StrictHostKeyChecking=no
   -o UserKnownHostsFile=/dev/null
+  -o GlobalKnownHostsFile=/dev/null
   -o ConnectTimeout=5
 )
 TEMP_FILES=()
