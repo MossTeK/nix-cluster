@@ -51,6 +51,18 @@ log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') [nix-cluster-setup] [INFO] $1" | sudo tee -a "$LOG_FILE" > /dev/null
 }
 
+success_banner() {
+    local message="$1"
+
+    log "============================================================"
+    log "$message"
+    log "============================================================"
+    if command -v logger >/dev/null 2>&1; then
+        logger -t nix-cluster-setup -- "$message" || true
+    fi
+    printf '%b\n' "${GREEN}${message}${NC}"
+}
+
 # Prints a yellow warning to stdout only.
 warn() {
     echo -e "${YELLOW}[WARNING]${NC} $1"
@@ -1799,4 +1811,5 @@ if [ "$IS_BOOTSTRAP" = "true" ]; then
     log "Bootstrap Complete. Fleet repository is now live at $REPO_URL"
 fi
 
+success_banner "[SUCCESS] NODE JOINED: ${HOSTNAME} role=${NODE_ROLE:-worker} repo=${REPO_URL}"
 echo -e "${GREEN}[SUCCESS]${NC} Enrollment complete."

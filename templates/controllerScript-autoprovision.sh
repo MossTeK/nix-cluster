@@ -1080,6 +1080,7 @@ while read -r node; do
         --arg git_user "$GIT_USER" \
         --arg git_token "$GIT_PASS" \
         --arg repo_url "$REPO_URL" \
+        --arg repo_host_ip "$CONTROLLER_PRIMARY_IP" \
         --arg node_group "$NODE_GROUP" \
         --arg admin "$NODE_ADMIN" \
         --arg admin_password_hash "$NODE_ADMIN_PASSWORD_HASH" \
@@ -1098,6 +1099,7 @@ while read -r node; do
          .git_user = $git_user |
          .git_token = $git_token |
          .repo_url = $repo_url |
+         .repo_host_ip = $repo_host_ip |
          .node_group = $node_group |
          .node_admin = $admin |
          .node_admin_pass = "" |
@@ -1118,6 +1120,7 @@ while read -r node; do
         --arg git_user "$GIT_USER" \
         --arg git_token "$GIT_PASS" \
         --arg repo_url "$REPO_URL" \
+        --arg repo_host_ip "$CONTROLLER_PRIMARY_IP" \
         --arg node_group "$NODE_GROUP" \
         --arg admin "$NODE_ADMIN" \
         --arg admin_password_hash "$NODE_ADMIN_PASSWORD_HASH" \
@@ -1130,12 +1133,19 @@ while read -r node; do
         --arg keepalived_role "$KEEPALIVED_ROLE" \
         --arg fleet_private_key "$(sudo cat "$SOPS_KEY")" \
         --arg webhook_secret "$WEBHOOK_SECRET" \
-        '{bootstrap_mode: false, is_controller: ($node_role == "controller"), preserve_existing_node_files: true, git_user: $git_user, git_token: $git_token, repo_url: $repo_url, node_group: $node_group, node_admin: $admin, node_admin_pass: "", node_admin_password_hash: $admin_password_hash, node_ssh_pub_key: $node_ssh_pub_key, node_ssh_pub_keys: $node_ssh_pub_keys, ssh_password_auth: $ssh_password_auth, installer_auth_mode: $installer_auth_mode, installer_ssh_pub_key: $installer_ssh_pub_key, node_role: $node_role, keepalived_role: $keepalived_role, fleet_private_key: $fleet_private_key, trigger_choice: "2", webhook_secret: $webhook_secret}' > "$CONFIG_JSON"
+        '{bootstrap_mode: false, is_controller: ($node_role == "controller"), preserve_existing_node_files: true, git_user: $git_user, git_token: $git_token, repo_url: $repo_url, repo_host_ip: $repo_host_ip, node_group: $node_group, node_admin: $admin, node_admin_pass: "", node_admin_password_hash: $admin_password_hash, node_ssh_pub_key: $node_ssh_pub_key, node_ssh_pub_keys: $node_ssh_pub_keys, ssh_password_auth: $ssh_password_auth, installer_auth_mode: $installer_auth_mode, installer_ssh_pub_key: $installer_ssh_pub_key, node_role: $node_role, keepalived_role: $keepalived_role, fleet_private_key: $fleet_private_key, trigger_choice: "2", webhook_secret: $webhook_secret}' > "$CONFIG_JSON"
     fi
 
     if copy_to_remote "$CONFIG_JSON" "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" /tmp/nix-cluster-config.json auto; then
-      run_remote_sudo_command "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" auto "nix --extra-experimental-features 'nix-command flakes' shell nixpkgs#git -c nix --extra-experimental-features 'nix-command flakes' run git+NIX_CLUSTER_INSTALL_REPO_URL_PLACEHOLDER#install -- --config /tmp/nix-cluster-config.json"
       publish_join_state "install-triggered" "remote nix-cluster install command started"
+      if run_remote_sudo_command "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" auto "nix --extra-experimental-features 'nix-command flakes' shell nixpkgs#git -c nix --extra-experimental-features 'nix-command flakes' run git+NIX_CLUSTER_INSTALL_REPO_URL_PLACEHOLDER#install -- --config /tmp/nix-cluster-config.json"; then
+        echo "[nix-cluster] === NODE JOINED SUCCESSFULLY: $HOSTNAME ==="
+        emit_install_journal "NODE_JOINED_SUCCESS host=$HOSTNAME ip=$INSTALLER_IP"
+        publish_join_state "join-complete" "worker enrollment completed successfully"
+      else
+        echo "[nix-cluster] $HOSTNAME enrollment command failed."
+        publish_join_state "enroll-failed" "remote nix-cluster install command failed"
+      fi
     else
       echo "[nix-cluster] Failed to copy worker config to $HOSTNAME. Skipping enrollment."
       publish_join_state "enroll-failed" "failed to copy installer config to target"

@@ -48,7 +48,16 @@ If you are using `nix-cluster` with a private fleet repository, keep environment
 
 If you want the controller to also host a PXE helper stack, set `pxe_enable: true` in the JSON. Keep `pxe_dhcp_enable: false` if your firewall already owns DHCP reservations; only enable it if the controller should also run DHCP/TFTP. `pxe_interface` is only needed in that case, while `pxe_http_port` and `pxe_boot_url` control the HTTP boot side.
 
-## 🖥️ Scaling the Fleet: Zero-Touch Node Addition
+## 🖥️ Scaling the Fleet: Node Addition
+
+`nix-cluster` supports two worker enrollment styles:
+
+1. **Controller-led live installer enrollment** for environments where the controller can reach a live ISO or PXE session over SSH.
+2. **Manual ISO install plus local join** for environments where PXE, DNS, or early-network assumptions are not reliable yet.
+
+The controller-led path remains supported, but the manual ISO flow is often the safer staged rollout for existing homelabs.
+
+### Option A: controller-led live installer enrollment
 
 1. Boot the worker node into the NixOS live ISO.
 2. Set a password for the live installer user, usually `nixos`, so the controller can SSH in.
@@ -80,6 +89,29 @@ If you want the controller to also host a PXE helper stack, set `pxe_enable: tru
 7. The controller hydrates `nix-cluster-config-template.json` with the node-specific values, runs `nix-cluster-install` remotely, adds the node under `nodes/<hostname>/`, updates `flake.nix`, injects the SOPS key, and pushes the enrollment commit.
 8. The new node rebuilds into the fleet config and joins automatically.
 
+### Option B: manual DHCP ISO install and local join
+
+This is the recommended path when DNS is not ready yet or PXE behavior is unstable.
+
+High-level flow:
+
+1. Build a host-specific installer ISO from the private fleet repo.
+2. Boot the node from that ISO.
+3. Run `worker-base-install` from the live environment.
+4. Reboot into the installed base OS.
+5. SSH in as the created admin user.
+6. Run `sudo /usr/local/bin/join-homelab-worker`.
+
+That staged flow lets you separate:
+
+- base disk install debugging
+- first-boot validation
+- `nix-cluster-install` enrollment debugging
+
+The ISO helper can also carry a pre-rendered worker join config and a join script that pins the Git host in `/etc/hosts` through `repo_host_ip`, which removes the need for working internal DNS during first join.
+
+If you are documenting or operating that path, keep the exact host-specific runbook in the private fleet repo rather than this public repo.
+
 For live ISO or live USB enrollment, set `installer_auth_mode` to `ssh_key`, `auto`, or `password`. `ssh_key` is now the default and is the expected mode for PXE-driven installs.
 
 Use `node_role` and `keepalived_role` to make HA placement explicit. The bootstrap controller defaults to `controller` plus `master`, while worker and backup nodes can be assigned `backup` or `service` roles for later module placement. You can also mark additional controller nodes with `node_role: controller`.
@@ -105,8 +137,59 @@ If `keepalived_enable` is `true` during bootstrap, the installer also scaffolds 
 
 `repo_host_ip` is optional. When set, `nix-cluster` writes a host override on the installing node so the hostname from `repo_url` resolves to that internal IP even before internal DNS is ready. This is useful during first-node bootstrap when the public hostname already exists in Cloudflare but the homelab should reach Forgejo through a LAN VIP.
 
+For manual worker enrollment, `repo_host_ip` is also the preferred way to make first-join cloning deterministic before local DNS exists.
+
 If `repo_host_ip` is omitted during bootstrap, `nix-cluster` now defaults it to `cloudflare_tunnel_vip` when the hostname in `repo_url` matches `forgejo_public_host`. That covers the common first-node case where Git should use the same ingress VIP as the tunnel and Caddy path.
 
 `keepalived_virtual_router_id` must be a unique integer from 1 to 255 on that subnet. Reusing a VRID from another VIP group on the same LAN will cause VRRP collisions even when the VIP addresses differ.
 
 **Note:** When a custom node `configuration.nix` is provided, the installer still runs hydration for hostname, admin user, repo path, trigger mode, and controller flag substitutions. These become no-ops if your custom file does not contain the expected placeholders. Custom group files are copied as-is. Group configs are only created when the group directory does not already exist.
+
+## 🔎 Enrollment observability and debugging
+
+Recent installer and enrollment changes add clearer success markers and step-by-step debugging support.
+
+### Success markers
+
+- local installer success logs under `/var/log/nixos-install/`
+- local join banner from `nix-cluster-install`:
+  - `[SUCCESS] NODE JOINED: <hostname> role=<role> repo=<repo_url>`
+- controller-side enrollment banner:
+  - `=== NODE JOINED SUCCESSFULLY: <hostname> ===`
+- controller runtime-store phase:
+  - `join-complete`
+
+### Debug mode
+
+For shell-level tracing during install or join, export:
+
+```bash
+export NIX_CLUSTER_DEBUG=1
+```
+
+For the base OS installer itself, the helper forwards that into:
+
+```bash
+NIXOS_INSTALL_DEBUG=1
+```
+
+This enables `set -x` style tracing in the generated helper scripts and in `nixos-install`.
+
+### Useful log paths
+
+On the installing node or live ISO:
+
+- `/var/log/nixos-install-launcher.log`
+- `/var/log/nixos-install/install.log`
+- `/var/log/nixos-install/state.env`
+
+On the enrolled node after first boot:
+
+- `/var/log/nix-cluster-join.log`
+- `/var/log/nix-cluster-setup.log`
+
+On the controller:
+
+- provisioning artifact tree under `/home/nix-cluster/log/provisioning/<hostname>/latest/`
+- `journalctl -t nix-cluster-install`
+- `journalctl -u nix-cluster.service`
