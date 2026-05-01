@@ -180,7 +180,7 @@ class ClusterMonitor:
         self.config = RuntimeConfig.from_path(config_path)
         self.logger = configure_logging("nix-cluster-monitor")
         self.controller = socket.gethostname()
-        self.previous_targets: dict[str, str] = {}
+        self.previous_targets: dict[str, str | None] = {}
         self.previous_unavailable_signatures: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {}
         self.previous_unavailable_logged_at: dict[str, float] = {}
         self.last_runtime_store_warning: tuple[str, str] | None = None
@@ -278,16 +278,16 @@ class ClusterMonitor:
                     payload["healthy_nodes"].sort()
                     payload["unhealthy_nodes"].sort()
                     payload["stale_nodes"].sort()
-                    prior = self.previous_targets.get(service) or None
+                    prior = self.previous_targets.get(service)
                     healthy_nodes = payload["healthy_nodes"]
                     target = prior if prior in healthy_nodes else (healthy_nodes[0] if healthy_nodes else None)
-                    if prior != target:
+                    if prior != target and (prior is not None or target is not None):
                         self.logger.info(
                             "service_target_change service=%s previous=%s current=%s healthy_nodes=%s",
                             service, prior or "", target or "", ",".join(healthy_nodes),
                         )
                     payload["recommended_target"] = target
-                    self.previous_targets[service] = target or ""
+                    self.previous_targets[service] = target
                     if not healthy_nodes:
                         if self.should_log_service_unavailable(service, payload["unhealthy_nodes"], payload["stale_nodes"]):
                             self.logger.warning(
