@@ -278,7 +278,7 @@ class ClusterMonitor:
                     payload["healthy_nodes"].sort()
                     payload["unhealthy_nodes"].sort()
                     payload["stale_nodes"].sort()
-                    prior = self.previous_targets.get(service)
+                    prior = self.previous_targets.get(service) or None
                     healthy_nodes = payload["healthy_nodes"]
                     target = prior if prior in healthy_nodes else (healthy_nodes[0] if healthy_nodes else None)
                     if prior != target:
