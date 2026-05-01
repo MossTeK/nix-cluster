@@ -4,7 +4,11 @@ set -euo pipefail
 
 # Configuration Paths
 DEPLOYMENTS_JSON="deployments.json"
+SSH_PUBLIC_KEYS_FILE="ssh-public-keys.json"
+SECRETS_FILE="secrets/secrets.yaml"
+SSH_SECRETS_FILE="secrets/ssh-keys.yaml"
 NIX_CLUSTER_SSH_KEY="/home/nix-cluster/.ssh/id_ed25519"
+MOSS_LOCAL_SSH_KEY="/home/moss/.ssh/id_ed25519_homelab"
 SOPS_KEY="/var/lib/sops-nix/key.txt"
 RUNTIME_CONFIG="/etc/nix-cluster-runtime-config.json"
 
@@ -428,11 +432,147 @@ publish_join_record() {
   etcd_put_json "$ETCD_JOIN_PREFIX/$node_name" "$payload"
 }
 
+read_secret_value() {
+  local secret_key="$1"
+
+  sudo env SOPS_AGE_KEY_FILE="$SOPS_KEY" sops -d --extract "[\"${secret_key}\"]" "$SSH_SECRETS_FILE" 2>/dev/null || true
+}
+
+write_secret_value() {
+  local secret_key="$1"
+  local secret_value="$2"
+  local json_value
+
+  json_value=$(printf '%s' "$secret_value" | jq -Rs .)
+  sudo env SOPS_AGE_KEY_FILE="$SOPS_KEY" sops --set "[\"${secret_key}\"] ${json_value}" "$SSH_SECRETS_FILE" >/dev/null
+}
+
+ensure_private_key_file() {
+  local key_path="$1"
+  local private_key="$2"
+  local owner="$3"
+  local group="$4"
+
+  install -d -m 0700 -o "$owner" -g "$group" "$(dirname "$key_path")"
+  printf '%s\n' "$private_key" > "$key_path"
+  chown "$owner:$group" "$key_path"
+  chmod 0600 "$key_path"
+}
+
+ensure_public_key_file() {
+  local key_path="$1"
+  local public_key="$2"
+  local owner="$3"
+  local group="$4"
+
+  printf '%s\n' "$public_key" > "$key_path"
+  chown "$owner:$group" "$key_path"
+  chmod 0644 "$key_path"
+}
+
+generate_temp_keypair() {
+  local output_prefix="$1"
+  local comment="$2"
+
+  ssh-keygen -q -t ed25519 -f "$output_prefix" -N "" -C "$comment" >/dev/null
+}
+
+ensure_shared_ssh_secrets() {
+  local node_private_secret node_public_secret admin_private_secret admin_public_secret
+  local local_node_private local_node_public local_admin_private local_admin_public
+  local temp_key_prefix
+
+  node_private_secret=$(read_secret_value bootstrap_node_ssh_private_key)
+  node_public_secret=$(read_secret_value bootstrap_node_ssh_public_key)
+
+  if [ -f "$NIX_CLUSTER_SSH_KEY" ]; then
+    local_node_private=$(cat "$NIX_CLUSTER_SSH_KEY")
+  else
+    local_node_private=""
+  fi
+
+  if [ -f "${NIX_CLUSTER_SSH_KEY}.pub" ]; then
+    local_node_public=$(tr -d '\n' < "${NIX_CLUSTER_SSH_KEY}.pub")
+  else
+    local_node_public=""
+  fi
+
+  if [ -z "$node_private_secret" ] || [ -z "$node_public_secret" ]; then
+    if [ -n "$local_node_private" ] && [ -n "$local_node_public" ]; then
+      node_private_secret="$local_node_private"
+      node_public_secret="$local_node_public"
+    else
+      temp_key_prefix=$(mktemp -u)
+      generate_temp_keypair "$temp_key_prefix" "nix-cluster@controller-bootstrap"
+      node_private_secret=$(cat "$temp_key_prefix")
+      node_public_secret=$(tr -d '\n' < "${temp_key_prefix}.pub")
+      rm -f "$temp_key_prefix" "${temp_key_prefix}.pub"
+    fi
+    write_secret_value bootstrap_node_ssh_private_key "$node_private_secret"
+    write_secret_value bootstrap_node_ssh_public_key "$node_public_secret"
+  fi
+
+  ensure_private_key_file "$NIX_CLUSTER_SSH_KEY" "$node_private_secret" nix-cluster nix-cluster
+  ensure_public_key_file "${NIX_CLUSTER_SSH_KEY}.pub" "$node_public_secret" nix-cluster nix-cluster
+
+  admin_private_secret=$(read_secret_value moss_admin_ssh_private_key)
+  admin_public_secret=$(read_secret_value moss_admin_ssh_public_key)
+
+  if [ -f "$MOSS_LOCAL_SSH_KEY" ]; then
+    local_admin_private=$(cat "$MOSS_LOCAL_SSH_KEY")
+  else
+    local_admin_private=""
+  fi
+
+  if [ -f "${MOSS_LOCAL_SSH_KEY}.pub" ]; then
+    local_admin_public=$(tr -d '\n' < "${MOSS_LOCAL_SSH_KEY}.pub")
+  else
+    local_admin_public=""
+  fi
+
+  if [ -z "$admin_private_secret" ] || [ -z "$admin_public_secret" ]; then
+    if [ -n "$local_admin_private" ] && [ -n "$local_admin_public" ]; then
+      admin_private_secret="$local_admin_private"
+      admin_public_secret="$local_admin_public"
+    else
+      temp_key_prefix=$(mktemp -u)
+      generate_temp_keypair "$temp_key_prefix" "moss@homelab-fleet"
+      admin_private_secret=$(cat "$temp_key_prefix")
+      admin_public_secret=$(tr -d '\n' < "${temp_key_prefix}.pub")
+      rm -f "$temp_key_prefix" "${temp_key_prefix}.pub"
+    fi
+    write_secret_value moss_admin_ssh_private_key "$admin_private_secret"
+    write_secret_value moss_admin_ssh_public_key "$admin_public_secret"
+  fi
+
+  CONTROLLER_SSH_PUB_KEY="$node_public_secret"
+  SHARED_ADMIN_SSH_PUB_KEY="$admin_public_secret"
+}
+
+ensure_shared_ssh_public_keys_file() {
+  local tmp_file
+
+  tmp_file=$(mktemp)
+  jq -n \
+    --arg bootstrap "$CONTROLLER_SSH_PUB_KEY" \
+    --arg admin "$SHARED_ADMIN_SSH_PUB_KEY" '
+      {
+        bootstrap_controller_key: $bootstrap,
+        admin_user_keys: ([ $admin ] | map(select(length > 0)) | unique),
+        live_installer_keys: ([ $bootstrap, $admin ] | map(select(length > 0)) | unique),
+        moss_authorized_keys: ([ $admin, $bootstrap ] | map(select(length > 0)) | unique)
+      }
+    ' > "$tmp_file"
+
+  if ! cmp -s "$tmp_file" "$SSH_PUBLIC_KEYS_FILE" 2>/dev/null; then
+    mv "$tmp_file" "$SSH_PUBLIC_KEYS_FILE"
+  else
+    rm -f "$tmp_file"
+  fi
+}
+
 # Ensure SSH key exists for the controller to access new nodes
-if [ ! -f "$NIX_CLUSTER_SSH_KEY" ]; then
-  mkdir -p "$(dirname "$NIX_CLUSTER_SSH_KEY")"
-  ssh-keygen -t ed25519 -f "$NIX_CLUSTER_SSH_KEY" -N ""
-fi
+ensure_shared_ssh_secrets
 
 CONTROLLER_HOSTNAME=$(hostname -s)
 CONTROLLER_PRIMARY_IP=$(detect_primary_ip)
@@ -842,6 +982,7 @@ provision_live_installer() {
   local install_cmd=()
   local install_cmd_quoted=""
   local install_log_file
+  local admin_key
   local arg
 
   ensure_node_log_dir >/dev/null
@@ -889,6 +1030,13 @@ provision_live_installer() {
   if [ -n "$INSTALLER_SSH_PUB_KEY" ] && [ "$INSTALLER_SSH_PUB_KEY" != "$CONTROLLER_SSH_PUB_KEY" ]; then
     install_cmd+=(--ssh-key "$INSTALLER_SSH_PUB_KEY")
   fi
+
+  while IFS= read -r admin_key; do
+    [ -n "$admin_key" ] || continue
+    if [ "$admin_key" != "$CONTROLLER_SSH_PUB_KEY" ] && [ "$admin_key" != "$INSTALLER_SSH_PUB_KEY" ]; then
+      install_cmd+=(--ssh-key "$admin_key")
+    fi
+  done < <(jq -r '.[]' <<< "$SHARED_ADMIN_KEYS_JSON")
 
   install_cmd+=(
     --admin-password-hash "$HASHED_PASS"
@@ -962,8 +1110,15 @@ GIT_USER=$(sudo env SOPS_AGE_KEY_FILE=$SOPS_KEY sops -d --extract '["git_usernam
 GIT_PASS=$(sudo env SOPS_AGE_KEY_FILE=$SOPS_KEY sops -d --extract '["git_password"]' secrets/secrets.yaml)
 WEBHOOK_SECRET=$(sudo env SOPS_AGE_KEY_FILE=$SOPS_KEY sops -d --extract '["webhook_secret"]' secrets/secrets.yaml)
 REPO_URL=$(git remote get-url origin | sed -E 's|^https?://[^/@]+:[^/@]+@|https://|')
-CONTROLLER_SSH_PUB_KEY=$(cat "${NIX_CLUSTER_SSH_KEY}.pub")
+CONTROLLER_SSH_PUB_KEY=$(tr -d '\n' < "${NIX_CLUSTER_SSH_KEY}.pub")
 CONTROLLER_SSH_PUB_KEY_ESCAPED=$(printf "%q" "$CONTROLLER_SSH_PUB_KEY")
+ensure_shared_ssh_public_keys_file
+SHARED_BOOTSTRAP_SSH_PUB_KEY=$(jq -r '.bootstrap_controller_key // empty' "$SSH_PUBLIC_KEYS_FILE")
+SHARED_ADMIN_KEYS_JSON=$(jq -c '.admin_user_keys // []' "$SSH_PUBLIC_KEYS_FILE")
+
+if [ -z "$SHARED_BOOTSTRAP_SSH_PUB_KEY" ]; then
+  SHARED_BOOTSTRAP_SSH_PUB_KEY="$CONTROLLER_SSH_PUB_KEY"
+fi
 
 publish_controller_inventory
 
@@ -974,7 +1129,7 @@ while read -r node; do
   INSTALLER_USER=$(echo "$node" | jq -r '.installer_user // "nixos"')
   INSTALLER_PASSWORD=$(echo "$node" | jq -r '.installer_password // empty')
   INSTALLER_AUTH_MODE=$(echo "$node" | jq -r '.installer_auth_mode // "ssh_key"')
-  INSTALLER_SSH_PUB_KEY=$(echo "$node" | jq -r '.installer_ssh_pub_key // empty')
+  INSTALLER_SSH_PUB_KEY="$SHARED_BOOTSTRAP_SSH_PUB_KEY"
   DISK=$(echo "$node" | jq -r '.disk')
   FS=$(echo "$node" | jq -r '.fs')
   NODE_GROUP=$(echo "$node" | jq -r '.node_group')
@@ -991,14 +1146,11 @@ while read -r node; do
     continue
   fi
 
-  if [ -z "$INSTALLER_SSH_PUB_KEY" ]; then
-    INSTALLER_SSH_PUB_KEY="$CONTROLLER_SSH_PUB_KEY"
-  fi
-
   NODE_SSH_KEYS_JSON=$(jq -cn \
+    --argjson admin "$SHARED_ADMIN_KEYS_JSON" \
     --arg controller "$CONTROLLER_SSH_PUB_KEY" \
     --arg installer "$INSTALLER_SSH_PUB_KEY" \
-    '[ $controller, $installer ] | map(select(length > 0)) | unique')
+    '$admin + [ $controller, $installer ] | map(select(length > 0)) | unique')
 
   publish_node_inventory "$DEPLOYMENTS_SOURCE" "desired"
   publish_join_state "desired" "inventory record loaded from $DEPLOYMENTS_SOURCE"

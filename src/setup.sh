@@ -8,6 +8,7 @@ trap 'exit 0' EXIT
 HOSTNAME=$(hostname)
 TEMPLATES_DIR="${NIX_CLUSTER_TEMPLATES_DIR:-${NOPS_TEMPLATES_DIR:-../templates}}"
 DEFAULT_NIX_CLUSTER_REPO_URL="https://git.smallguytech.org/SGT/nix-cluster.git"
+DEFAULT_NIXOS_INSTALL_REPO_URL="https://git.example.com/example/nixos-install.git"
 DEFAULT_APP_REGISTRY_URL="https://git.smallguytech.org/SGT/app-registry.git"
 SERVICE_USER="nix-cluster"
 SERVICE_GROUP="nix-cluster"
@@ -547,7 +548,7 @@ if [ "$NON_INTERACTIVE" = true ]; then
     REPO_URL=$(jq -r '.repo_url // empty' "$CONFIG_FILE")
     REPO_HOST_IP=$(jq -r '.repo_host_ip // empty' "$CONFIG_FILE")
     NIX_CLUSTER_REPO_URL=$(jq -r --arg default_repo "$DEFAULT_NIX_CLUSTER_REPO_URL" '.nix_cluster_repo_url // .nops_repo_url // $default_repo' "$CONFIG_FILE")
-    NIXOS_INSTALL_REPO_URL=$(jq -r --arg default_repo "$DEFAULT_NIX_CLUSTER_REPO_URL" '.nixos_install_repo_url // .nix_cluster_repo_url // .nops_repo_url // $default_repo' "$CONFIG_FILE")
+    NIXOS_INSTALL_REPO_URL=$(jq -r --arg default_repo "$DEFAULT_NIXOS_INSTALL_REPO_URL" '.nixos_install_repo_url // .nops_repo_url // $default_repo' "$CONFIG_FILE")
     REGISTRY_MODE=$(jq -r '.registry_mode // "bundled"' "$CONFIG_FILE")
     APP_REGISTRY_URL=$(jq -r --arg default_repo "$DEFAULT_APP_REGISTRY_URL" '.app_registry_url // .module_registry_url // $default_repo' "$CONFIG_FILE")
     NODE_GROUP=$(jq -r '.node_group // "default"' "$CONFIG_FILE")
@@ -617,8 +618,8 @@ else
     read -p "Optional internal IP for the repo hostname (writes /etc/hosts on this node): " REPO_HOST_IP
     read -p "nix-cluster repo URL for generated fleet flakes [$DEFAULT_NIX_CLUSTER_REPO_URL]: " NIX_CLUSTER_REPO_URL
     NIX_CLUSTER_REPO_URL=${NIX_CLUSTER_REPO_URL:-$DEFAULT_NIX_CLUSTER_REPO_URL}
-    read -p "nix-cluster install repo URL for controller provisioning [$DEFAULT_NIX_CLUSTER_REPO_URL]: " NIXOS_INSTALL_REPO_URL
-    NIXOS_INSTALL_REPO_URL=${NIXOS_INSTALL_REPO_URL:-$DEFAULT_NIX_CLUSTER_REPO_URL}
+    read -p "nix-cluster install repo URL for controller provisioning [$DEFAULT_NIXOS_INSTALL_REPO_URL]: " NIXOS_INSTALL_REPO_URL
+    NIXOS_INSTALL_REPO_URL=${NIXOS_INSTALL_REPO_URL:-$DEFAULT_NIXOS_INSTALL_REPO_URL}
     read -p "App source mode [bundled/registry] [bundled]: " REGISTRY_MODE
     REGISTRY_MODE=${REGISTRY_MODE:-bundled}
     if [ "$REGISTRY_MODE" = "registry" ]; then

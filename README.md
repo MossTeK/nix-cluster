@@ -110,6 +110,13 @@ That staged flow lets you separate:
 
 The ISO helper can also carry a pre-rendered worker join config and a join script that pins the Git host in `/etc/hosts` through `repo_host_ip`, which removes the need for working internal DNS during first join.
 
+In the homelab-fleet-style workflow, it is also common to maintain two shared SSH identities:
+
+- a shared bootstrap node key used by the controller and live installer access
+- a shared human admin key for the default admin user such as `moss`
+
+Those public keys can live in a small tracked registry file, while the private keys remain in SOPS-managed secrets in the private fleet repo.
+
 If you are documenting or operating that path, keep the exact host-specific runbook in the private fleet repo rather than this public repo.
 
 For live ISO or live USB enrollment, set `installer_auth_mode` to `ssh_key`, `auto`, or `password`. `ssh_key` is now the default and is the expected mode for PXE-driven installs.
@@ -193,3 +200,13 @@ On the controller:
 - provisioning artifact tree under `/home/nix-cluster/log/provisioning/<hostname>/latest/`
 - `journalctl -t nix-cluster-install`
 - `journalctl -u nix-cluster.service`
+
+### Live vs installed SSH users
+
+For the staged manual and PXE-assisted flows, these roles are intentionally separate:
+
+- live installer environment: `nixos`
+- installed admin account: `moss` or your configured admin user
+- service automation account: `nix-cluster`
+
+This separation keeps live bootstrap access simple while still allowing a stable local admin identity after install.
