@@ -124,7 +124,7 @@ capture_remote_installer_artifacts() {
   local live_log_path
   local persisted_log_path
 
-  capture_remote_command_output "${prefix}-paths.txt" "$remote_user" "$remote_password" "$remote_auth_mode" "for path in '$REMOTE_INSTALLER_LOG_DIR' '$REMOTE_PERSISTED_INSTALL_LOG_DIR' /mnt/etc/nixos; do echo \"== \\$path ==\"; ls -lah \"\\$path\" 2>/dev/null || true; echo; done" || true
+  capture_remote_command_output "${prefix}-paths.txt" "$remote_user" "$remote_password" "$remote_auth_mode" "for path in '$REMOTE_INSTALLER_LOG_DIR' '$REMOTE_PERSISTED_INSTALL_LOG_DIR' /mnt/etc/nixos; do echo \"== \$path ==\"; ls -lah \"\$path\" 2>/dev/null || true; echo; done" || true
 
   capture_remote_file "${prefix}-live-install.log" "$remote_user" "$remote_password" "$remote_auth_mode" "$REMOTE_INSTALLER_LOG_FILE" || true
   live_log_path=$(node_log_path "${prefix}-live-install.log")
