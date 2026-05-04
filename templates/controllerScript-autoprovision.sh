@@ -17,6 +17,8 @@ SSH_BASE_OPTS=(
   -o UserKnownHostsFile=/dev/null
   -o GlobalKnownHostsFile=/dev/null
   -o ConnectTimeout=5
+  -o ServerAliveInterval=30
+  -o ServerAliveCountMax=20
 )
 TEMP_FILES=()
 CONTROLLER_LOG_DIR="/home/nix-cluster/log"
