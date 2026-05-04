@@ -820,6 +820,9 @@ ping_sweep_subnet() {
 
 candidate_node_ips() {
   local prefix=""
+  local default_gateway=""
+
+  default_gateway=$(ip route show default 2>/dev/null | awk '/default/ {print $3; exit}')
 
   {
     printf '%s\n' "$INSTALLER_IP"
@@ -829,7 +832,7 @@ candidate_node_ips() {
     if prefix=$(subnet_prefix_from_ip "$INSTALLER_IP"); then
       ping_sweep_subnet "$prefix"
     fi
-  } | awk 'NF && !seen[$0]++'
+  } | awk 'NF && !seen[$0]++' | awk -v gw="$default_gateway" '$0 != gw'
 }
 
 remote_hostname_matches() {
