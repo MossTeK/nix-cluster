@@ -349,7 +349,7 @@ merge_runtime_workers_into_deployments() {
     (normalized_existing) as $existing |
     (worker_entries($runtime)) as $workers |
     ($existing | map({ key: .hostname, value: . }) | from_entries) as $existing_map |
-    reduce $workers[] as $worker ($existing_map; .[$worker.hostname] = ((.[$worker.hostname] // {}) + $worker)) |
+    reduce $workers[] as $worker ($existing_map; if has($worker.hostname) then . else .[$worker.hostname] = $worker end) |
     to_entries | map(.value) | sort_by(.hostname)
   ' "$existing_json" > "$output_file"
 }
