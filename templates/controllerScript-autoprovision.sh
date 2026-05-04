@@ -1041,6 +1041,7 @@ provision_live_installer() {
   install_cmd+=(
     --admin-password-hash "$HASHED_PASS"
     --packages git vim
+    --reboot
     --force
   )
 
@@ -1075,8 +1076,7 @@ provision_live_installer() {
     PXE_TEMP_DISABLED=1
   fi
 
-  echo "[nix-cluster] Rebooting $HOSTNAME into the installed system..."
-  run_remote_sudo_command "$INSTALLER_USER" "$INSTALLER_IP" "$INSTALLER_PASSWORD" "$INSTALLER_AUTH_MODE" "nohup sh -c 'sleep 2; reboot' >/dev/null 2>&1 &" || true
+  echo "[nix-cluster] Installer finished on $HOSTNAME; waiting for installer-triggered reboot into the installed system..."
   publish_join_state "waiting-for-installed-os" "waiting for first boot after install"
 
   echo "[nix-cluster] Waiting for $HOSTNAME to reboot..."
