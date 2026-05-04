@@ -648,6 +648,25 @@ can_login() {
   esac
 }
 
+can_login_retry() {
+  local user="$1"
+  local host="$2"
+  local password="${3:-}"
+  local auth_mode="${4:-auto}"
+  local max_attempts="${5:-3}"
+  local attempt=1
+
+  while [ "$attempt" -le "$max_attempts" ]; do
+    if can_login "$user" "$host" "$password" "$auth_mode"; then
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    sleep 1
+  done
+
+  return 1
+}
+
 run_remote() {
   local user="$1"
   local host="$2"
@@ -1152,7 +1171,7 @@ while read -r node; do
 
   if ! can_login_with_key nix-cluster "$INSTALLER_IP" \
     && ! can_login "$INSTALLER_USER" "$INSTALLER_IP" "$INSTALLER_PASSWORD" "$INSTALLER_AUTH_MODE" \
-    && ! can_login "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" auto; then
+    && ! can_login_retry "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" auto 3; then
     refresh_node_ip_if_needed "preflight node discovery" || true
   fi
 
@@ -1181,7 +1200,7 @@ while read -r node; do
   fi
 
   # State 3: Base OS (answers as admin user)
-  if can_login "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS"; then
+  if can_login_retry "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" auto 3; then
     publish_node_inventory "controller-probe" "base-os"
     publish_join_state "base-os" "base operating system reachable"
     if [ "$REINSTALL" != "true" ] && run_remote_sudo_command "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" auto "systemctl cat nix-cluster.service >/dev/null 2>&1 || systemctl cat nops.service >/dev/null 2>&1"; then
