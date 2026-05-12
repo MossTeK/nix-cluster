@@ -71,6 +71,10 @@ The controller-led path remains supported, but the manual ISO flow is often the 
   "installer_auth_mode": "ssh_key",
   "installer_ssh_pub_key": "",
   "installer_password": "",
+  "installer_mode": "default",
+  "installer_script": "",
+  "installer_pre_script": "",
+  "installer_post_script": "",
   "disk": "/dev/sda",
   "fs": "zfs",
   "node_group": "web",
@@ -82,6 +86,12 @@ The controller-led path remains supported, but the manual ISO flow is often the 
   "node_admin_password_hash": ""
 }
 ```
+
+`installer_mode` behavior:
+
+- `default`: run the built-in `nixos-install` flow
+- `replace`: run only `installer_script`
+- `hooks`: run `installer_pre_script`, then the default installer, then `installer_post_script`
 
 4. Save the encrypted file, then commit and push your changes to the fleet repository.
 5. On the next controller update cycle, the controller SSHes into the live installer at `installer_user@installer_ip`, runs `nixos-anywhere` with Disko, and reboots the machine into the base OS.
@@ -120,6 +130,8 @@ Those public keys can live in a small tracked registry file, while the private k
 If you are documenting or operating that path, keep the exact host-specific runbook in the private fleet repo rather than this public repo.
 
 For live ISO or live USB enrollment, set `installer_auth_mode` to `ssh_key`, `auto`, or `password`. `ssh_key` is now the default and is the expected mode for PXE-driven installs.
+
+When worker inventory is declared in `services."nix-cluster".workers.<hostname>`, those fields are merged into controller inventory at runtime and can drive install mode/script behavior without editing deployment entries first.
 
 Use `node_role` and `keepalived_role` to make HA placement explicit. The bootstrap controller defaults to `controller` plus `master`, while worker and backup nodes can be assigned `backup` or `service` roles for later module placement. You can also mark additional controller nodes with `node_role: controller`.
 

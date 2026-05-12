@@ -156,6 +156,10 @@
         installer_auth_mode = worker.installerAuthMode;
         installer_ssh_pub_key = worker.installerSshPubKey;
         installer_password = worker.installerPassword;
+        installer_mode = worker.installerMode;
+        installer_script = worker.installerScript;
+        installer_pre_script = worker.installerPreScript;
+        installer_post_script = worker.installerPostScript;
         reinstall = worker.reinstall;
         disk = worker.disk;
         fs = worker.fs;
@@ -725,6 +729,26 @@
                 type = lib.types.str;
                 default = "";
                 description = "Optional live installer password for password-based recovery paths.";
+              };
+              installerMode = lib.mkOption {
+                type = lib.types.enum [ "default" "replace" "hooks" ];
+                default = "default";
+                description = "Install strategy for this worker: default runs nixos-install, replace runs only installerScript, hooks runs installerPreScript + default install + installerPostScript.";
+              };
+              installerScript = lib.mkOption {
+                type = lib.types.lines;
+                default = "";
+                description = "Custom install script body used when installerMode is set to replace.";
+              };
+              installerPreScript = lib.mkOption {
+                type = lib.types.lines;
+                default = "";
+                description = "Optional pre-install hook script body used when installerMode is hooks.";
+              };
+              installerPostScript = lib.mkOption {
+                type = lib.types.lines;
+                default = "";
+                description = "Optional post-install hook script body used when installerMode is hooks.";
               };
               reinstall = lib.mkOption {
                 type = lib.types.bool;

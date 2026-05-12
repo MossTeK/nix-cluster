@@ -305,6 +305,10 @@ render_runtime_workers_json() {
       installer_auth_mode: (.value.installer_auth_mode // "ssh_key"),
       installer_ssh_pub_key: (.value.installer_ssh_pub_key // ""),
       installer_password: (.value.installer_password // ""),
+      installer_mode: (.value.installer_mode // "default"),
+      installer_script: (.value.installer_script // ""),
+      installer_pre_script: (.value.installer_pre_script // ""),
+      installer_post_script: (.value.installer_post_script // ""),
       reinstall: (.value.reinstall // false),
       disk: (.value.disk // "/dev/sda"),
       fs: (.value.fs // "zfs"),
@@ -334,6 +338,10 @@ merge_runtime_workers_into_deployments() {
         installer_auth_mode: (.value.installer_auth_mode // "ssh_key"),
         installer_ssh_pub_key: (.value.installer_ssh_pub_key // ""),
         installer_password: (.value.installer_password // ""),
+        installer_mode: (.value.installer_mode // "default"),
+        installer_script: (.value.installer_script // ""),
+        installer_pre_script: (.value.installer_pre_script // ""),
+        installer_post_script: (.value.installer_post_script // ""),
         reinstall: (.value.reinstall // false),
         disk: (.value.disk // "/dev/sda"),
         fs: (.value.fs // "zfs"),
@@ -954,6 +962,7 @@ publish_node_inventory() {
     --arg installer_ip "$INSTALLER_IP" \
     --arg installer_user "$INSTALLER_USER" \
     --arg installer_auth_mode "$INSTALLER_AUTH_MODE" \
+    --arg installer_mode "$INSTALLER_MODE" \
     --arg disk "$DISK" \
     --arg fs "$FS" \
     --arg node_group "$NODE_GROUP" \
@@ -964,7 +973,7 @@ publish_node_inventory() {
     --arg state "$state_name" \
     --arg controller "$CONTROLLER_HOSTNAME" \
     --arg seen_at "$(timestamp_utc)" \
-    '{hostname: $hostname, installer_ip: $installer_ip, installer_user: $installer_user, installer_auth_mode: $installer_auth_mode, disk: $disk, fs: $fs, node_group: $node_group, node_role: $node_role, keepalived_role: $keepalived_role, node_admin: $node_admin, source: $source, state: $state, controller: $controller, seen_at: $seen_at}')
+    '{hostname: $hostname, installer_ip: $installer_ip, installer_user: $installer_user, installer_auth_mode: $installer_auth_mode, installer_mode: $installer_mode, disk: $disk, fs: $fs, node_group: $node_group, node_role: $node_role, keepalived_role: $keepalived_role, node_admin: $node_admin, source: $source, state: $state, controller: $controller, seen_at: $seen_at}')
 
   publish_inventory_record "$HOSTNAME" "$inventory_payload"
 }
@@ -987,6 +996,68 @@ publish_join_state() {
     '{hostname: $hostname, installer_ip: $installer_ip, controller: $controller, phase: $phase, detail: $detail, updated_at: $updated_at}')
 
   publish_join_record "$HOSTNAME" "$join_payload"
+}
+
+run_custom_install_phase() {
+  local phase_name="$1"
+  local script_body="$2"
+  local install_log_file="$3"
+  local script_body_b64
+  local remote_command
+  local install_env
+  local install_env_b64
+
+  if [ -z "$script_body" ]; then
+    return 0
+  fi
+
+  install_env=$(cat <<EOF
+export INSTALL_HOSTNAME=$(printf '%q' "$HOSTNAME")
+export INSTALL_DISK=$(printf '%q' "$DISK")
+export INSTALL_FS=$(printf '%q' "$FS")
+export INSTALL_ADMIN=$(printf '%q' "$NODE_ADMIN")
+export INSTALLER_IP=$(printf '%q' "$INSTALLER_IP")
+export INSTALLER_USER=$(printf '%q' "$INSTALLER_USER")
+export INSTALLER_AUTH_MODE=$(printf '%q' "$INSTALLER_AUTH_MODE")
+export INSTALLER_FLAKE_URL=$(printf '%q' "$INSTALLER_FLAKE_URL")
+export INSTALL_CONTROLLER_SSH_PUB_KEY=$(printf '%q' "$CONTROLLER_SSH_PUB_KEY")
+export INSTALL_NODE_ADMIN_PASSWORD_HASH=$(printf '%q' "$HASHED_PASS")
+export INSTALL_SSH_KEYS_JSON=$(printf '%q' "$NODE_SSH_KEYS_JSON")
+export INSTALL_SHARED_ADMIN_KEYS_JSON=$(printf '%q' "$SHARED_ADMIN_KEYS_JSON")
+EOF
+)
+
+  script_body_b64=$(printf '%s' "$script_body" | base64 | tr -d '\n')
+  install_env_b64=$(printf '%s' "$install_env" | base64 | tr -d '\n')
+
+  remote_command=$(cat <<EOF
+tmp_script=\$(mktemp /tmp/nix-cluster-installer-script.XXXXXX)
+tmp_env=\$(mktemp /tmp/nix-cluster-installer-env.XXXXXX)
+trap 'rm -f "\$tmp_script" "\$tmp_env"' EXIT
+printf '%s' '$install_env_b64' | base64 -d > "\$tmp_env"
+. "\$tmp_env"
+printf '%s' '$script_body_b64' | base64 -d > "\$tmp_script"
+chmod 0700 "\$tmp_script"
+/bin/bash "\$tmp_script"
+EOF
+)
+
+  publish_join_state "$phase_name" "running custom installer phase"
+  {
+    echo "custom_phase=$phase_name"
+    echo "custom_phase_started_at=$(timestamp_utc)"
+    echo
+  } >>"$install_log_file"
+
+  if ! run_remote_sudo_command "$INSTALLER_USER" "$INSTALLER_IP" "$INSTALLER_PASSWORD" "$INSTALLER_AUTH_MODE" "$remote_command" 2>&1 | tee -a "$install_log_file"; then
+    echo "[nix-cluster] Custom installer phase '$phase_name' failed on $HOSTNAME."
+    capture_failure_artifacts "custom installer phase $phase_name failed"
+    publish_join_state "install-failed" "custom installer phase $phase_name failed; logs in $CURRENT_NODE_LOG_DIR"
+    return 1
+  fi
+
+  publish_join_state "$phase_name" "custom installer phase completed"
+  return 0
 }
 
 provision_live_installer() {
@@ -1016,7 +1087,25 @@ provision_live_installer() {
     return 1
   fi
 
-  publish_join_state "provisioning-live-installer" "running nixos-install over ssh; live log at $REMOTE_INSTALLER_LOG_FILE"
+  case "$INSTALLER_MODE" in
+    default|replace|hooks)
+      ;;
+    *)
+      echo "[nix-cluster] $HOSTNAME has invalid installer_mode '$INSTALLER_MODE'. Expected default, replace, or hooks."
+      capture_failure_artifacts "invalid installer_mode"
+      publish_join_state "invalid-config" "invalid installer_mode=$INSTALLER_MODE; logs in $CURRENT_NODE_LOG_DIR"
+      return 1
+      ;;
+  esac
+
+  if [ "$INSTALLER_MODE" = "replace" ] && [ -z "$INSTALLER_SCRIPT" ]; then
+    echo "[nix-cluster] $HOSTNAME requested installer_mode=replace but installer_script is empty."
+    capture_failure_artifacts "installer_mode replace missing installer_script"
+    publish_join_state "invalid-config" "installer_mode=replace requires installer_script; logs in $CURRENT_NODE_LOG_DIR"
+    return 1
+  fi
+
+  publish_join_state "provisioning-live-installer" "mode=$INSTALLER_MODE live log at $REMOTE_INSTALLER_LOG_FILE"
   if [ -n "$NODE_ADMIN_PASSWORD_HASH" ]; then
     HASHED_PASS="$NODE_ADMIN_PASSWORD_HASH"
   elif [ -n "$NODE_ADMIN_PASS" ]; then
@@ -1077,11 +1166,32 @@ provision_live_installer() {
     echo
   } >"$install_log_file"
 
-  if ! run_remote_sudo_command "$INSTALLER_USER" "$INSTALLER_IP" "$INSTALLER_PASSWORD" "$INSTALLER_AUTH_MODE" "$install_cmd_quoted" 2>&1 | tee -a "$install_log_file"; then
-    echo "[nix-cluster] Failed to run nixos-install on $HOSTNAME."
-    capture_failure_artifacts "remote nixos-install command failed"
-    publish_join_state "install-failed" "remote nixos-install command failed; logs in $CURRENT_NODE_LOG_DIR"
-    return 1
+  if [ "$INSTALLER_MODE" = "hooks" ] && [ -n "$INSTALLER_PRE_SCRIPT" ]; then
+    if ! run_custom_install_phase "installer-pre-hook" "$INSTALLER_PRE_SCRIPT" "$install_log_file"; then
+      return 1
+    fi
+  fi
+
+  if [ "$INSTALLER_MODE" != "replace" ]; then
+    publish_join_state "installer-default-run" "running default nixos-install"
+    if ! run_remote_sudo_command "$INSTALLER_USER" "$INSTALLER_IP" "$INSTALLER_PASSWORD" "$INSTALLER_AUTH_MODE" "$install_cmd_quoted" 2>&1 | tee -a "$install_log_file"; then
+      echo "[nix-cluster] Failed to run nixos-install on $HOSTNAME."
+      capture_failure_artifacts "remote nixos-install command failed"
+      publish_join_state "install-failed" "remote nixos-install command failed; logs in $CURRENT_NODE_LOG_DIR"
+      return 1
+    fi
+  fi
+
+  if [ "$INSTALLER_MODE" = "replace" ]; then
+    if ! run_custom_install_phase "installer-replace-script" "$INSTALLER_SCRIPT" "$install_log_file"; then
+      return 1
+    fi
+  fi
+
+  if [ "$INSTALLER_MODE" = "hooks" ] && [ -n "$INSTALLER_POST_SCRIPT" ]; then
+    if ! run_custom_install_phase "installer-post-hook" "$INSTALLER_POST_SCRIPT" "$install_log_file"; then
+      return 1
+    fi
   fi
 
   capture_remote_installer_artifacts "$INSTALLER_USER" "$INSTALLER_PASSWORD" "$INSTALLER_AUTH_MODE" "post-install" || true
@@ -1143,6 +1253,10 @@ while read -r node; do
   INSTALLER_USER=$(echo "$node" | jq -r '.installer_user // "nixos"')
   INSTALLER_PASSWORD=$(echo "$node" | jq -r '.installer_password // empty')
   INSTALLER_AUTH_MODE=$(echo "$node" | jq -r '.installer_auth_mode // "ssh_key"')
+  INSTALLER_MODE=$(echo "$node" | jq -r '.installer_mode // "default"')
+  INSTALLER_SCRIPT=$(echo "$node" | jq -r '.installer_script // empty')
+  INSTALLER_PRE_SCRIPT=$(echo "$node" | jq -r '.installer_pre_script // empty')
+  INSTALLER_POST_SCRIPT=$(echo "$node" | jq -r '.installer_post_script // empty')
   INSTALLER_SSH_PUB_KEY="$SHARED_BOOTSTRAP_SSH_PUB_KEY"
   DISK=$(echo "$node" | jq -r '.disk')
   FS=$(echo "$node" | jq -r '.fs')

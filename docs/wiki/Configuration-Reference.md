@@ -124,6 +124,40 @@ Ordered list of controller IPs or hostnames that workers will probe.
 
 ---
 
+## Worker inventory options
+
+### `services."nix-cluster".workers.<hostname>.installerMode`
+
+Controls installer behavior for that worker.
+
+Allowed values:
+
+- `default`: run the built-in `nixos-install` flow.
+- `replace`: run only `installerScript`.
+- `hooks`: run `installerPreScript`, then default installer, then `installerPostScript`.
+
+### `services."nix-cluster".workers.<hostname>.installerScript`
+
+Custom script body executed when `installerMode = "replace"`.
+
+### `services."nix-cluster".workers.<hostname>.installerPreScript`
+
+Optional script body executed before default install when `installerMode = "hooks"`.
+
+### `services."nix-cluster".workers.<hostname>.installerPostScript`
+
+Optional script body executed after default install when `installerMode = "hooks"`.
+
+### `services."nix-cluster".workers.<hostname>.installerAuthMode`
+
+Live installer auth strategy (`ssh_key`, `password`, `auto`) used by controller SSH.
+
+### `services."nix-cluster".workers.<hostname>.reinstall`
+
+When `true`, controller will reprovision the worker during reconcile.
+
+---
+
 ## Trigger options
 
 ## Matrix

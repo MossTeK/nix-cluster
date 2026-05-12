@@ -169,6 +169,18 @@ Typical high-level flow:
 
 That controller-driven inventory belongs in the private fleet repo, not in the public `nix-cluster` repo.
 
+## Worker installer strategy
+
+Worker install behavior is configurable per worker through `services."nix-cluster".workers.<hostname>`:
+
+- `installerMode = "default"`: run the built-in `nixos-install` command path.
+- `installerMode = "replace"`: skip default installer and run `installerScript` only.
+- `installerMode = "hooks"`: run `installerPreScript`, then default installer, then `installerPostScript`.
+
+Defaults are backward-compatible and stay on `default` unless explicitly changed.
+
+Custom script phases run on the live installer as root through the same SSH/auth path used for default provisioning. The controller captures failure artifacts and emits join-state phases so operators can watch progress in real time.
+
 ---
 
 ## Trigger loop prevention
