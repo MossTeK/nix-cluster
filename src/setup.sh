@@ -811,6 +811,7 @@ fi
 
 REPO_NAME=$(basename "$REPO_URL" .git)
 REPO_HOST=$(extract_repo_host "$REPO_URL")
+PERSIST_REPO_HOST_ENTRY="false"
 
 if [ -z "${REPO_HOST_IP:-}" ] && [ "${IS_BOOTSTRAP:-false}" = "true" ] && [ -n "${FORGEJO_PUBLIC_HOST:-}" ] && [ -n "${CF_TUNNEL_VIP:-}" ] && [ "${REPO_HOST:-}" = "${FORGEJO_PUBLIC_HOST}" ]; then
     REPO_HOST_IP="$CF_TUNNEL_VIP"
@@ -820,6 +821,7 @@ fi
 if [ -n "${REPO_HOST_IP:-}" ] && [ -n "${REPO_HOST:-}" ]; then
     log "Pinning ${REPO_HOST} to ${REPO_HOST_IP} in /etc/hosts for this install..."
     set_hosts_entry "$REPO_HOST" "$REPO_HOST_IP"
+    PERSIST_REPO_HOST_ENTRY="true"
 elif [ -n "${REPO_HOST:-}" ]; then
     warn_if_repo_host_resolves_publicly "$REPO_HOST"
 fi
@@ -1342,6 +1344,33 @@ else
 fi
     sudo chown "$SERVICE_USER:$SERVICE_GROUP" "$IMPORTS_FILE"
 sudo chmod u+w "$IMPORTS_FILE"
+
+if [ "$PERSIST_REPO_HOST_ENTRY" = "true" ]; then
+        REPO_HOSTS_NIX_FILE="$NODE_DIR/repo-hosts.nix"
+        log "Persisting ${REPO_HOST} to ${REPO_HOST_IP} in declarative networking.hosts via $(basename "$REPO_HOSTS_NIX_FILE")"
+
+        cat > "$REPO_HOSTS_NIX_FILE" <<EOF
+{ lib, ... }:
+{
+    networking.hosts = lib.mkAfter {
+        "$REPO_HOST_IP" = [ "$REPO_HOST" ];
+    };
+}
+EOF
+        sudo chown "$SERVICE_USER:$SERVICE_GROUP" "$REPO_HOSTS_NIX_FILE"
+        sudo chmod 0644 "$REPO_HOSTS_NIX_FILE"
+
+        if ! grep -Fq './repo-hosts.nix' "$IMPORTS_FILE"; then
+                imports_tmp_file=$(mktemp)
+                awk '
+                    /\];}/ && !done { print "  ./repo-hosts.nix"; done=1 }
+                    { print }
+                ' "$IMPORTS_FILE" > "$imports_tmp_file"
+                mv "$imports_tmp_file" "$IMPORTS_FILE"
+                sudo chown "$SERVICE_USER:$SERVICE_GROUP" "$IMPORTS_FILE"
+                sudo chmod u+w "$IMPORTS_FILE"
+        fi
+fi
 
 if [ "$PRESERVE_PREFAB_NODE_DIR" = "true" ] && [ -f "$NODE_DIR/hardware-configuration.nix" ]; then
     log "Preserving existing hardware-configuration.nix in $NODE_DIR"

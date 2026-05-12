@@ -586,6 +586,20 @@ ensure_shared_ssh_secrets
 
 CONTROLLER_HOSTNAME=$(hostname -s)
 CONTROLLER_PRIMARY_IP=$(detect_primary_ip)
+REPO_HOST_IP_FOR_WORKERS="$CONTROLLER_PRIMARY_IP"
+
+if [ -r "$RUNTIME_CONFIG" ]; then
+  KEEPALIVED_VIP_CIDR=$(jq -r '.apps.keepalived.vip_cidr // empty' "$RUNTIME_CONFIG" 2>/dev/null || true)
+  KEEPALIVED_VIP_IP=${KEEPALIVED_VIP_CIDR%%/*}
+  if [ -n "$KEEPALIVED_VIP_IP" ]; then
+    REPO_HOST_IP_FOR_WORKERS="$KEEPALIVED_VIP_IP"
+    echo "[nix-cluster] repo_host_ip source=keepalived_vip value=$REPO_HOST_IP_FOR_WORKERS fallback=$CONTROLLER_PRIMARY_IP"
+  else
+    echo "[nix-cluster] repo_host_ip source=controller_primary value=$REPO_HOST_IP_FOR_WORKERS"
+  fi
+else
+  echo "[nix-cluster] repo_host_ip source=controller_primary value=$REPO_HOST_IP_FOR_WORKERS"
+fi
 
 ssh_with_key() {
   local remote="$1"
@@ -1360,7 +1374,7 @@ while read -r node; do
         --arg git_user "$GIT_USER" \
         --arg git_token "$GIT_PASS" \
         --arg repo_url "$REPO_URL" \
-        --arg repo_host_ip "$CONTROLLER_PRIMARY_IP" \
+        --arg repo_host_ip "$REPO_HOST_IP_FOR_WORKERS" \
         --arg node_group "$NODE_GROUP" \
         --arg admin "$NODE_ADMIN" \
         --arg admin_password_hash "$NODE_ADMIN_PASSWORD_HASH" \
@@ -1400,7 +1414,7 @@ while read -r node; do
         --arg git_user "$GIT_USER" \
         --arg git_token "$GIT_PASS" \
         --arg repo_url "$REPO_URL" \
-        --arg repo_host_ip "$CONTROLLER_PRIMARY_IP" \
+        --arg repo_host_ip "$REPO_HOST_IP_FOR_WORKERS" \
         --arg node_group "$NODE_GROUP" \
         --arg admin "$NODE_ADMIN" \
         --arg admin_password_hash "$NODE_ADMIN_PASSWORD_HASH" \

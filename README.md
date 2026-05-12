@@ -154,9 +154,9 @@ If `keepalived_enable` is `true` during bootstrap, the installer also scaffolds 
 
 `repo_url` should be the final shared Git URL that every node can reach after bootstrap. During bootstrap, `nix-cluster` temporarily pushes through the local Forgejo instance, then restores `origin` back to `repo_url`. If you keep `repo_url` set to `localhost`, worker nodes will not be able to clone or pull the fleet repository.
 
-`repo_host_ip` is optional. When set, `nix-cluster` writes a host override on the installing node so the hostname from `repo_url` resolves to that internal IP even before internal DNS is ready. This is useful during first-node bootstrap when the public hostname already exists in Cloudflare but the homelab should reach Forgejo through a LAN VIP.
+`repo_host_ip` is optional. When set, `nix-cluster` writes a host override on the installing node so the hostname from `repo_url` resolves to that internal IP even before internal DNS is ready. The installer now also persists this mapping declaratively through a generated node import (`./repo-hosts.nix`) so it survives later `nixos-rebuild switch` runs instead of being lost with transient `/etc/hosts` edits.
 
-For manual worker enrollment, `repo_host_ip` is also the preferred way to make first-join cloning deterministic before local DNS exists.
+For manual worker enrollment, `repo_host_ip` is also the preferred way to make first-join cloning deterministic before local DNS exists. In controller-managed enrollment, `repo_host_ip` now prefers the Keepalived VIP (when available in runtime config) and falls back to the controller primary IP.
 
 If `repo_host_ip` is omitted during bootstrap, `nix-cluster` now defaults it to `cloudflare_tunnel_vip` when the hostname in `repo_url` matches `forgejo_public_host`. That covers the common first-node case where Git should use the same ingress VIP as the tunnel and Caddy path.
 
