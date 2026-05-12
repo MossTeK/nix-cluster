@@ -939,6 +939,26 @@ wait_for_installed_node_login() {
   return 0
 }
 
+verify_worker_enrollment() {
+  local max_attempts="${1:-12}"
+  local attempt=1
+  local verify_command
+
+  verify_command="test -s /etc/nix-cluster-runtime-config.json && (systemctl cat nix-cluster.service >/dev/null 2>&1 || systemctl cat nops.service >/dev/null 2>&1)"
+
+  while [ "$attempt" -le "$max_attempts" ]; do
+    if can_login "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" auto \
+      && run_remote_sudo_command "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" auto "$verify_command"; then
+      return 0
+    fi
+
+    sleep 5
+    attempt=$((attempt + 1))
+  done
+
+  return 1
+}
+
 seed_installer_authorized_key() {
   local ssh_pub_key_escaped="$1"
 
@@ -1433,9 +1453,16 @@ while read -r node; do
     if copy_to_remote "$CONFIG_JSON" "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" /tmp/nix-cluster-config.json auto; then
       publish_join_state "install-triggered" "remote nix-cluster install command started"
       if run_remote_sudo_command "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" auto "nix --extra-experimental-features 'nix-command flakes' shell nixpkgs#git -c nix --extra-experimental-features 'nix-command flakes' run git+NIX_CLUSTER_INSTALL_REPO_URL_PLACEHOLDER#install -- --config /tmp/nix-cluster-config.json"; then
-        echo "[nix-cluster] === NODE JOINED SUCCESSFULLY: $HOSTNAME ==="
-        emit_install_journal "NODE_JOINED_SUCCESS host=$HOSTNAME ip=$INSTALLER_IP"
-        publish_join_state "join-complete" "worker enrollment completed successfully"
+        publish_join_state "post-install-verify" "verifying runtime config and nix-cluster service"
+        if verify_worker_enrollment 18; then
+          echo "[nix-cluster] === NODE JOINED SUCCESSFULLY: $HOSTNAME ==="
+          emit_install_journal "NODE_JOINED_SUCCESS host=$HOSTNAME ip=$INSTALLER_IP"
+          publish_join_state "join-complete" "worker enrollment completed successfully"
+        else
+          echo "[nix-cluster] $HOSTNAME enrollment finished but verification failed."
+          capture_failure_artifacts "post-enrollment verification failed"
+          publish_join_state "enroll-incomplete" "post-enrollment verification failed; logs in $CURRENT_NODE_LOG_DIR"
+        fi
       else
         echo "[nix-cluster] $HOSTNAME enrollment command failed."
         publish_join_state "enroll-failed" "remote nix-cluster install command failed"
