@@ -586,20 +586,8 @@ ensure_shared_ssh_secrets
 
 CONTROLLER_HOSTNAME=$(hostname -s)
 CONTROLLER_PRIMARY_IP=$(detect_primary_ip)
-REPO_HOST_IP_FOR_WORKERS="$CONTROLLER_PRIMARY_IP"
-
-if [ -r "$RUNTIME_CONFIG" ]; then
-  KEEPALIVED_VIP_CIDR=$(jq -r '.apps.keepalived.vip_cidr // empty' "$RUNTIME_CONFIG" 2>/dev/null || true)
-  KEEPALIVED_VIP_IP=${KEEPALIVED_VIP_CIDR%%/*}
-  if [ -n "$KEEPALIVED_VIP_IP" ]; then
-    REPO_HOST_IP_FOR_WORKERS="$KEEPALIVED_VIP_IP"
-    echo "[nix-cluster] repo_host_ip source=keepalived_vip value=$REPO_HOST_IP_FOR_WORKERS fallback=$CONTROLLER_PRIMARY_IP"
-  else
-    echo "[nix-cluster] repo_host_ip source=controller_primary value=$REPO_HOST_IP_FOR_WORKERS"
-  fi
-else
-  echo "[nix-cluster] repo_host_ip source=controller_primary value=$REPO_HOST_IP_FOR_WORKERS"
-fi
+REPO_HOST_IP_FOR_WORKERS=""
+echo "[nix-cluster] repo_host_ip source=public_dns value=unset"
 
 ssh_with_key() {
   local remote="$1"
@@ -687,6 +675,55 @@ can_login_retry() {
   done
 
   return 1
+}
+
+emit_login_probe() {
+  local probe_name="$1"
+  local user="$2"
+  local host="$3"
+  local password="${4:-}"
+  local auth_mode="${5:-auto}"
+  local probe_log
+  local rc=1
+  local detail="none"
+
+  probe_log=$(mktemp)
+
+  case "$auth_mode" in
+    ssh_key)
+      if ssh_with_key "$user@$host" hostname >"$probe_log" 2>&1; then
+        rc=0
+      else
+        rc=$?
+      fi
+      ;;
+    password)
+      if [ -n "$password" ] && ssh_with_password "$password" "$user@$host" hostname >"$probe_log" 2>&1; then
+        rc=0
+      else
+        rc=$?
+      fi
+      ;;
+    *)
+      if ssh_with_key "$user@$host" hostname >"$probe_log" 2>&1; then
+        rc=0
+      else
+        rc=$?
+        if [ -n "$password" ] && ssh_with_password "$password" "$user@$host" hostname >>"$probe_log" 2>&1; then
+          rc=0
+        else
+          rc=$?
+        fi
+      fi
+      ;;
+  esac
+
+  if [ -s "$probe_log" ]; then
+    detail=$(tail -n 1 "$probe_log" | sed 's/[[:space:]]\+/ /g')
+  fi
+
+  emit_install_journal "login-probe host=$HOSTNAME ip=$host probe=$probe_name user=$user auth=$auth_mode rc=$rc detail=$detail"
+  rm -f "$probe_log"
 }
 
 run_remote() {
@@ -1323,6 +1360,109 @@ while read -r node; do
     refresh_node_ip_if_needed "preflight node discovery" || true
   fi
 
+  # For nodes that are not being reinstalled, prefer the known admin user first.
+  # Otherwise the invalid nix-cluster/nixos probes can trigger sshd source penalties
+  # before the controller reaches the valid base-OS login.
+  if [ "$REINSTALL" != "true" ] && can_login_retry "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" auto 3; then
+    publish_node_inventory "controller-probe" "base-os"
+    publish_join_state "base-os" "base operating system reachable"
+    if run_remote_sudo_command "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" auto "systemctl cat nix-cluster.service >/dev/null 2>&1 || systemctl cat nops.service >/dev/null 2>&1"; then
+      echo "[nix-cluster] $HOSTNAME detected as Base OS and already enrolled, skipping."
+      publish_join_state "enrolled" "nix-cluster service already present"
+      continue
+    fi
+
+    echo "[nix-cluster] $HOSTNAME detected as Base OS, enrolling..."
+    publish_join_state "enrolling" "copying runtime config and running installer"
+
+    CONFIG_JSON=$(mktemp)
+    if [ -n "$NIX_CLUSTER_CONFIG_TEMPLATE_INPUT" ]; then
+      jq \
+        --arg git_user "$GIT_USER" \
+        --arg git_token "$GIT_PASS" \
+        --arg repo_url "$REPO_URL" \
+        --arg repo_host_ip "$REPO_HOST_IP_FOR_WORKERS" \
+        --arg node_group "$NODE_GROUP" \
+        --arg admin "$NODE_ADMIN" \
+        --arg admin_password_hash "$NODE_ADMIN_PASSWORD_HASH" \
+        --arg node_ssh_pub_key "$CONTROLLER_SSH_PUB_KEY" \
+        --argjson node_ssh_pub_keys "$NODE_SSH_KEYS_JSON" \
+        --arg installer_auth_mode "$INSTALLER_AUTH_MODE" \
+        --arg installer_ssh_pub_key "$INSTALLER_SSH_PUB_KEY" \
+        --argjson ssh_password_auth "$SSH_PASSWORD_AUTH" \
+        --arg node_role "$NODE_ROLE" \
+        --arg keepalived_role "$KEEPALIVED_ROLE" \
+        --arg fleet_private_key "$(sudo cat "$SOPS_KEY")" \
+        --arg webhook_secret "$WEBHOOK_SECRET" \
+        '.bootstrap_mode = false |
+         .is_controller = ($node_role == "controller") |
+         .preserve_existing_node_files = true |
+         .git_user = $git_user |
+         .git_token = $git_token |
+         .repo_url = $repo_url |
+         .repo_host_ip = $repo_host_ip |
+         .node_group = $node_group |
+         .node_admin = $admin |
+         .node_admin_pass = "" |
+         .node_admin_password_hash = $admin_password_hash |
+         .node_ssh_pub_key = $node_ssh_pub_key |
+         .node_ssh_pub_keys = $node_ssh_pub_keys |
+         .ssh_password_auth = $ssh_password_auth |
+         .installer_auth_mode = $installer_auth_mode |
+         .installer_ssh_pub_key = $installer_ssh_pub_key |
+         .node_role = $node_role |
+         .keepalived_role = $keepalived_role |
+         .fleet_private_key = $fleet_private_key |
+         .trigger_choice = "2" |
+         .webhook_secret = $webhook_secret' \
+        "$NIX_CLUSTER_CONFIG_TEMPLATE_INPUT" > "$CONFIG_JSON"
+    else
+      jq -n \
+        --arg git_user "$GIT_USER" \
+        --arg git_token "$GIT_PASS" \
+        --arg repo_url "$REPO_URL" \
+        --arg repo_host_ip "$REPO_HOST_IP_FOR_WORKERS" \
+        --arg node_group "$NODE_GROUP" \
+        --arg admin "$NODE_ADMIN" \
+        --arg admin_password_hash "$NODE_ADMIN_PASSWORD_HASH" \
+        --arg node_ssh_pub_key "$CONTROLLER_SSH_PUB_KEY" \
+        --argjson node_ssh_pub_keys "$NODE_SSH_KEYS_JSON" \
+        --arg installer_auth_mode "$INSTALLER_AUTH_MODE" \
+        --arg installer_ssh_pub_key "$INSTALLER_SSH_PUB_KEY" \
+        --argjson ssh_password_auth "$SSH_PASSWORD_AUTH" \
+        --arg node_role "$NODE_ROLE" \
+        --arg keepalived_role "$KEEPALIVED_ROLE" \
+        --arg fleet_private_key "$(sudo cat "$SOPS_KEY")" \
+        --arg webhook_secret "$WEBHOOK_SECRET" \
+        '{bootstrap_mode: false, is_controller: ($node_role == "controller"), preserve_existing_node_files: true, git_user: $git_user, git_token: $git_token, repo_url: $repo_url, repo_host_ip: $repo_host_ip, node_group: $node_group, node_admin: $admin, node_admin_pass: "", node_admin_password_hash: $admin_password_hash, node_ssh_pub_key: $node_ssh_pub_key, node_ssh_pub_keys: $node_ssh_pub_keys, ssh_password_auth: $ssh_password_auth, installer_auth_mode: $installer_auth_mode, installer_ssh_pub_key: $installer_ssh_pub_key, node_role: $node_role, keepalived_role: $keepalived_role, fleet_private_key: $fleet_private_key, trigger_choice: "2", webhook_secret: $webhook_secret}' > "$CONFIG_JSON"
+    fi
+
+    if copy_to_remote "$CONFIG_JSON" "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" /tmp/nix-cluster-config.json auto; then
+      publish_join_state "install-triggered" "remote nix-cluster install command started"
+      if run_remote_sudo_command "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" auto "sed -i '/git.smallguytech.org/d' /etc/hosts 2>/dev/null || true; nix --extra-experimental-features 'nix-command flakes' shell nixpkgs#git -c nix --extra-experimental-features 'nix-command flakes' run git+NIX_CLUSTER_INSTALL_REPO_URL_PLACEHOLDER#install -- --config /tmp/nix-cluster-config.json"; then
+        publish_join_state "post-install-verify" "verifying runtime config and nix-cluster service"
+        if verify_worker_enrollment 18; then
+          echo "[nix-cluster] === NODE JOINED SUCCESSFULLY: $HOSTNAME ==="
+          emit_install_journal "NODE_JOINED_SUCCESS host=$HOSTNAME ip=$INSTALLER_IP"
+          publish_join_state "join-complete" "worker enrollment completed successfully"
+        else
+          echo "[nix-cluster] $HOSTNAME enrollment finished but verification failed."
+          capture_failure_artifacts "post-enrollment verification failed"
+          publish_join_state "enroll-incomplete" "post-enrollment verification failed; logs in $CURRENT_NODE_LOG_DIR"
+        fi
+      else
+        echo "[nix-cluster] $HOSTNAME enrollment command failed."
+        publish_join_state "enroll-failed" "remote nix-cluster install command failed"
+      fi
+    else
+      echo "[nix-cluster] Failed to copy worker config to $HOSTNAME. Skipping enrollment."
+      publish_join_state "enroll-failed" "failed to copy installer config to target"
+    fi
+
+    rm -f "$CONFIG_JSON"
+    continue
+  fi
+
   # State 1: Already active (answers as nix-cluster)
   if can_login_with_key nix-cluster "$INSTALLER_IP"; then
     publish_node_inventory "controller-probe" "active"
@@ -1452,7 +1592,7 @@ while read -r node; do
 
     if copy_to_remote "$CONFIG_JSON" "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" /tmp/nix-cluster-config.json auto; then
       publish_join_state "install-triggered" "remote nix-cluster install command started"
-      if run_remote_sudo_command "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" auto "nix --extra-experimental-features 'nix-command flakes' shell nixpkgs#git -c nix --extra-experimental-features 'nix-command flakes' run git+NIX_CLUSTER_INSTALL_REPO_URL_PLACEHOLDER#install -- --config /tmp/nix-cluster-config.json"; then
+      if run_remote_sudo_command "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" auto "sed -i '/git.smallguytech.org/d' /etc/hosts 2>/dev/null || true; nix --extra-experimental-features 'nix-command flakes' shell nixpkgs#git -c nix --extra-experimental-features 'nix-command flakes' run git+NIX_CLUSTER_INSTALL_REPO_URL_PLACEHOLDER#install -- --config /tmp/nix-cluster-config.json"; then
         publish_join_state "post-install-verify" "verifying runtime config and nix-cluster service"
         if verify_worker_enrollment 18; then
           echo "[nix-cluster] === NODE JOINED SUCCESSFULLY: $HOSTNAME ==="
@@ -1477,5 +1617,8 @@ while read -r node; do
   fi
 
   publish_node_inventory "controller-probe" "unreachable"
+  emit_login_probe "active" "nix-cluster" "$INSTALLER_IP" "" ssh_key
+  emit_login_probe "installer" "$INSTALLER_USER" "$INSTALLER_IP" "$INSTALLER_PASSWORD" "$INSTALLER_AUTH_MODE"
+  emit_login_probe "base-os" "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" auto
   publish_join_state "unreachable" "installer and base os both unreachable"
 done < <(jq -c '.[]' "$DEPLOYMENTS_INPUT")
