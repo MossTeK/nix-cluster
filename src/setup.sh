@@ -75,13 +75,19 @@ extract_repo_host() {
 }
 
 # Pins a hostname to a specific IP address in /etc/hosts on the current node.
-set_hosts_entry() {
+remove_hosts_entry() {
     local host_name="$1"
-    local host_ip="$2"
     local escaped_host
 
     escaped_host=$(printf '%s\n' "$host_name" | sed 's/[][\\.^$*+?(){}|/]/\\&/g')
     sudo sed -i -E "/(^|[[:space:]])${escaped_host}([[:space:]]|$)/d" /etc/hosts
+}
+
+set_hosts_entry() {
+    local host_name="$1"
+    local host_ip="$2"
+
+    remove_hosts_entry "$host_name"
     printf '%s %s\n' "$host_ip" "$host_name" | sudo tee -a /etc/hosts > /dev/null
 }
 
@@ -823,6 +829,7 @@ if [ -n "${REPO_HOST_IP:-}" ] && [ -n "${REPO_HOST:-}" ]; then
     set_hosts_entry "$REPO_HOST" "$REPO_HOST_IP"
     PERSIST_REPO_HOST_ENTRY="true"
 elif [ -n "${REPO_HOST:-}" ]; then
+    remove_hosts_entry "$REPO_HOST"
     warn_if_repo_host_resolves_publicly "$REPO_HOST"
 fi
 
@@ -1370,6 +1377,20 @@ EOF
                 sudo chown "$SERVICE_USER:$SERVICE_GROUP" "$IMPORTS_FILE"
                 sudo chmod u+w "$IMPORTS_FILE"
         fi
+        else
+            REPO_HOSTS_NIX_FILE="$NODE_DIR/repo-hosts.nix"
+            if [ -f "$REPO_HOSTS_NIX_FILE" ]; then
+                log "Removing stale declarative repo host override from $(basename "$REPO_HOSTS_NIX_FILE")"
+                sudo rm -f "$REPO_HOSTS_NIX_FILE"
+            fi
+
+            if grep -Fq './repo-hosts.nix' "$IMPORTS_FILE"; then
+                sed_tmp_file=$(mktemp)
+                grep -Fv './repo-hosts.nix' "$IMPORTS_FILE" > "$sed_tmp_file"
+                mv "$sed_tmp_file" "$IMPORTS_FILE"
+                sudo chown "$SERVICE_USER:$SERVICE_GROUP" "$IMPORTS_FILE"
+                sudo chmod u+w "$IMPORTS_FILE"
+            fi
 fi
 
 if [ "$PRESERVE_PREFAB_NODE_DIR" = "true" ] && [ -f "$NODE_DIR/hardware-configuration.nix" ]; then
