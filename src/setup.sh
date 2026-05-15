@@ -1756,9 +1756,10 @@ else
 fi
 
 # Triggers the initial nixos-rebuild to activate the enrolled configuration.
+# NOTE: --upgrade removed to avoid nixpkgs flake updates during enrollment (locked in flake.lock)
 log "Executing initial system rebuild..."
 export NIXPKGS_ALLOW_UNFREE=1
-if ! sudo NIXPKGS_ALLOW_UNFREE=1 nixos-rebuild switch --flake "$TARGET_DIR#$HOSTNAME" --upgrade --impure; then
+if ! sudo NIXPKGS_ALLOW_UNFREE=1 nixos-rebuild switch --flake "$TARGET_DIR#$HOSTNAME" --impure; then
     log_rebuild_failure_details
     warn "Initial rebuild failed. Check secrets authorization or syntax errors and run activation manually."
     exit 1
