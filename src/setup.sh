@@ -1758,7 +1758,18 @@ fi
 # Triggers the initial nixos-rebuild to activate the enrolled configuration.
 # NOTE: --upgrade removed to avoid nixpkgs flake updates during enrollment (locked in flake.lock)
 log "Executing initial system rebuild..."
-export NIXPKGS_ALLOW_UNFREE=1
+
+# Adjust build parallelism for low-memory systems to prevent OOM during evaluation.
+# Systems with <16GB RAM should limit parallel builds to reduce memory pressure.
+AVAILABLE_GB=$(grep MemTotal /proc/meminfo | awk '{print int($2/1024/1024)}')
+if [ "$AVAILABLE_GB" -lt 16 ]; then
+    log "Low memory system detected (${AVAILABLE_GB}GB RAM). Limiting nix build parallelism to prevent OOM."
+    export NIX_BUILD_CORES="$(( $(nproc) / 2 > 1 ? $(nproc) / 2 : 1 ))"  # Use half the CPU cores
+    export NIXPKGS_ALLOW_UNFREE=1
+else
+    export NIXPKGS_ALLOW_UNFREE=1
+fi
+
 if ! sudo NIXPKGS_ALLOW_UNFREE=1 nixos-rebuild switch --flake "$TARGET_DIR#$HOSTNAME" --impure; then
     log_rebuild_failure_details
     warn "Initial rebuild failed. Check secrets authorization or syntax errors and run activation manually."
@@ -1850,6 +1861,7 @@ if [ "$IS_BOOTSTRAP" = "true" ]; then
         log "Starting immediate Cloudflare tunnel provisioning before the final repository push..."
         if run_cloudflare_provisioning "$TARGET_DIR"; then
             log "Running follow-up rebuild to materialize Cloudflare tunnel token..."
+            [ "$AVAILABLE_GB" -lt 16 ] && export NIX_BUILD_CORES="$(( $(nproc) / 2 > 1 ? $(nproc) / 2 : 1 ))"
             sudo NIXPKGS_ALLOW_UNFREE=1 nixos-rebuild switch --flake "$TARGET_DIR#$HOSTNAME" --impure || warn "Follow-up rebuild failed after Cloudflare provisioning."
         else
             warn "Immediate Cloudflare provisioning failed during bootstrap handoff."
@@ -1862,6 +1874,7 @@ if [ "$IS_BOOTSTRAP" = "true" ]; then
 
     if [ "${CF_TUNNEL:-false}" = "true" ] && [ "${IS_CONTROLLER:-false}" = "true" ]; then
         log "Running final rebuild to ensure cloudflared is active after the repo push..."
+        [ "$AVAILABLE_GB" -lt 16 ] && export NIX_BUILD_CORES="$(( $(nproc) / 2 > 1 ? $(nproc) / 2 : 1 ))"
         sudo NIXPKGS_ALLOW_UNFREE=1 nixos-rebuild switch --flake "$TARGET_DIR#$HOSTNAME" --impure || warn "Final rebuild failed after bootstrap push."
     fi
 
