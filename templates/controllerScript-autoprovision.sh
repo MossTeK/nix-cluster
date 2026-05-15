@@ -981,7 +981,7 @@ verify_worker_enrollment() {
   local attempt=1
   local verify_command
 
-  verify_command="test -s /etc/nix-cluster-runtime-config.json && (systemctl cat nix-cluster.service >/dev/null 2>&1 || systemctl cat nops.service >/dev/null 2>&1)"
+  verify_command="test -s /etc/nix-cluster-runtime-config.json && (systemctl is-active --quiet nix-cluster.service || systemctl is-active --quiet nops.service)"
 
   while [ "$attempt" -le "$max_attempts" ]; do
     if can_login "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" auto \
@@ -1366,7 +1366,7 @@ while read -r node; do
   if [ "$REINSTALL" != "true" ] && can_login_retry "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" auto 3; then
     publish_node_inventory "controller-probe" "base-os"
     publish_join_state "base-os" "base operating system reachable"
-    if run_remote_sudo_command "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" auto "systemctl cat nix-cluster.service >/dev/null 2>&1 || systemctl cat nops.service >/dev/null 2>&1"; then
+    if run_remote_sudo_command "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" auto "systemctl is-active --quiet nix-cluster.service || systemctl is-active --quiet nops.service"; then
       echo "[nix-cluster] $HOSTNAME detected as Base OS and already enrolled, skipping."
       publish_join_state "enrolled" "nix-cluster service already present"
       continue
@@ -1491,7 +1491,7 @@ while read -r node; do
   if can_login_retry "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" auto 3; then
     publish_node_inventory "controller-probe" "base-os"
     publish_join_state "base-os" "base operating system reachable"
-    if [ "$REINSTALL" != "true" ] && run_remote_sudo_command "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" auto "systemctl cat nix-cluster.service >/dev/null 2>&1 || systemctl cat nops.service >/dev/null 2>&1"; then
+    if [ "$REINSTALL" != "true" ] && run_remote_sudo_command "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" auto "systemctl is-active --quiet nix-cluster.service || systemctl is-active --quiet nops.service"; then
       echo "[nix-cluster] $HOSTNAME detected as Base OS and already enrolled, skipping."
       publish_join_state "enrolled" "nix-cluster service already present"
       continue
