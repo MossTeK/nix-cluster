@@ -1771,10 +1771,43 @@ else
     export NIXPKGS_ALLOW_UNFREE=1
 fi
 
+# On low-memory systems, swapDevices defined in hardware-configuration.nix are only
+# created BY the first nixos-rebuild — not before it.  Pre-create a temporary swap
+# so the rebuild itself doesn't OOM.  Cleaned up after the rebuild completes.
+BOOTSTRAP_SWAP_FILE="/var/lib/nix-cluster-bootstrap-swap"
+BOOTSTRAP_SWAP_CREATED=0
+if [ "$AVAILABLE_GB" -lt 16 ]; then
+    CURRENT_SWAP_KB=$(grep -s SwapTotal /proc/meminfo | awk '{print $2}')
+    if [ "${CURRENT_SWAP_KB:-0}" -lt 1024 ]; then
+        log "No swap found on low-memory system. Pre-creating 4GB bootstrap swap to protect initial rebuild..."
+        if fallocate -l 4G "$BOOTSTRAP_SWAP_FILE" 2>/dev/null \
+           || dd if=/dev/zero of="$BOOTSTRAP_SWAP_FILE" bs=1M count=4096 status=none 2>/dev/null; then
+            chmod 600 "$BOOTSTRAP_SWAP_FILE"
+            if mkswap "$BOOTSTRAP_SWAP_FILE" >/dev/null 2>&1 && swapon "$BOOTSTRAP_SWAP_FILE"; then
+                log "Bootstrap swap activated (4GB) at $BOOTSTRAP_SWAP_FILE"
+                BOOTSTRAP_SWAP_CREATED=1
+            else
+                rm -f "$BOOTSTRAP_SWAP_FILE"
+                warn "Failed to activate bootstrap swap — proceeding without it."
+            fi
+        else
+            warn "Failed to create bootstrap swapfile — proceeding without it (may OOM)."
+        fi
+    fi
+fi
+
 if ! sudo NIXPKGS_ALLOW_UNFREE=1 nixos-rebuild switch --flake "$TARGET_DIR#$HOSTNAME" --impure; then
     log_rebuild_failure_details
     warn "Initial rebuild failed. Check secrets authorization or syntax errors and run activation manually."
     exit 1
+fi
+
+# Remove the temporary bootstrap swap now that the rebuild has activated the
+# permanent swapDevices entry from hardware-configuration.nix.
+if [ "$BOOTSTRAP_SWAP_CREATED" -eq 1 ]; then
+    swapoff "$BOOTSTRAP_SWAP_FILE" 2>/dev/null || true
+    rm -f "$BOOTSTRAP_SWAP_FILE"
+    log "Bootstrap swap cleaned up."
 fi
 
 # Bootstrap Handoff: API integration with Forgejo
