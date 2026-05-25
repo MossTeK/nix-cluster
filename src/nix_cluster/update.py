@@ -68,6 +68,9 @@ class UpdateManager:
         ]
 
         for changed_file in changed_files:
+            if changed_file == "deployments.json":
+                logger.info("CONTROLLER-ONLY CHANGE DETECTED: %s", changed_file)
+                continue
             if any(changed_file.startswith(path) for path in relevant_paths):
                 logger.info("RELEVANT CHANGE DETECTED: %s", changed_file)
                 return True
@@ -118,7 +121,8 @@ class UpdateManager:
                 except subprocess.CalledProcessError as error:
                     logger.warning("CONTROLLER-HOOK FAILED (non-fatal, continuing with rebuild): %s", error)
                 self._fetch(repo_dir, "GIT-FETCH-POST")
-                needs_rebuild = True
+                changed_files = self._get_changed_files(repo_dir)
+                needs_rebuild = self._should_rebuild(changed_files)
             elif not is_controller:
                 logger.info(
                     "NODE IS WORKER. PAUSING %ss FOR CONTROLLER TO PROVISION SECRETS...",

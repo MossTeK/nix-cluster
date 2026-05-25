@@ -250,6 +250,23 @@ capture_failure_artifacts() {
   fi
 }
 
+clear_reinstall_request() {
+  local host_name="$1"
+  local temp_json
+
+  [ -f "$DEPLOYMENTS_JSON" ] || return 1
+
+  temp_json=$(mktemp)
+  if ! jq --arg host_name "$host_name" '
+    map(if .hostname == $host_name then . + { reinstall: false } else . end)
+  ' "$DEPLOYMENTS_JSON" >"$temp_json"; then
+    rm -f "$temp_json"
+    return 1
+  fi
+
+  mv "$temp_json" "$DEPLOYMENTS_JSON"
+}
+
 detect_primary_ip() {
   local primary_ip
 
@@ -311,7 +328,7 @@ render_runtime_workers_json() {
       installer_post_script: (.value.installer_post_script // ""),
       reinstall: (.value.reinstall // false),
       disk: (.value.disk // "/dev/sda"),
-      fs: (.value.fs // "zfs"),
+      fs: "zfs",
       node_group: (.value.node_group // "default"),
       node_role: (.value.node_role // "worker"),
       keepalived_role: (.value.keepalived_role // "backup"),
@@ -344,7 +361,7 @@ merge_runtime_workers_into_deployments() {
         installer_post_script: (.value.installer_post_script // ""),
         reinstall: (.value.reinstall // false),
         disk: (.value.disk // "/dev/sda"),
-        fs: (.value.fs // "zfs"),
+        fs: "zfs",
         node_group: (.value.node_group // "default"),
         node_role: (.value.node_role // "worker"),
         keepalived_role: (.value.keepalived_role // "backup"),
@@ -570,7 +587,7 @@ ensure_shared_ssh_public_keys_file() {
         bootstrap_controller_key: $bootstrap,
         admin_user_keys: ([ $admin ] | map(select(length > 0)) | unique),
         live_installer_keys: ([ $bootstrap, $admin ] | map(select(length > 0)) | unique),
-        moss_authorized_keys: ([ $admin, $bootstrap ] | map(select(length > 0)) | unique)
+        moss_authorized_keys: ([ $admin ] | map(select(length > 0)) | unique)
       }
     ' > "$tmp_file"
 
@@ -1035,7 +1052,7 @@ publish_node_inventory() {
     --arg installer_auth_mode "$INSTALLER_AUTH_MODE" \
     --arg installer_mode "$INSTALLER_MODE" \
     --arg disk "$DISK" \
-    --arg fs "$FS" \
+    --arg fs "${FS:-zfs}" \
     --arg node_group "$NODE_GROUP" \
     --arg node_role "$NODE_ROLE" \
     --arg keepalived_role "$KEEPALIVED_ROLE" \
@@ -1085,7 +1102,7 @@ run_custom_install_phase() {
   install_env=$(cat <<EOF
 export INSTALL_HOSTNAME=$(printf '%q' "$HOSTNAME")
 export INSTALL_DISK=$(printf '%q' "$DISK")
-export INSTALL_FS=$(printf '%q' "$FS")
+export INSTALL_FS=$(printf '%q' "${FS:-zfs}")
 export INSTALL_ADMIN=$(printf '%q' "$NODE_ADMIN")
 export INSTALLER_IP=$(printf '%q' "$INSTALLER_IP")
 export INSTALLER_USER=$(printf '%q' "$INSTALLER_USER")
@@ -1094,6 +1111,7 @@ export INSTALLER_FLAKE_URL=$(printf '%q' "$INSTALLER_FLAKE_URL")
 export INSTALL_CONTROLLER_SSH_PUB_KEY=$(printf '%q' "$CONTROLLER_SSH_PUB_KEY")
 export INSTALL_NODE_ADMIN_PASSWORD_HASH=$(printf '%q' "$HASHED_PASS")
 export INSTALL_SSH_KEYS_JSON=$(printf '%q' "$NODE_SSH_KEYS_JSON")
+export INSTALL_NIX_CLUSTER_SSH_KEYS_JSON=$(printf '%q' "$NIX_CLUSTER_SSH_KEYS_JSON")
 export INSTALL_SHARED_ADMIN_KEYS_JSON=$(printf '%q' "$SHARED_ADMIN_KEYS_JSON")
 EOF
 )
@@ -1143,10 +1161,19 @@ provision_live_installer() {
 
   ensure_node_log_dir >/dev/null
 
-  if [ -z "$DISK" ] || [ -z "$FS" ]; then
-    echo "[nix-cluster] $HOSTNAME is missing disk or fs in deployments.json. Skipping."
-    capture_failure_artifacts "missing disk or fs in deployments.json"
-    publish_join_state "invalid-config" "missing disk or fs; logs in $CURRENT_NODE_LOG_DIR"
+  FS="${FS:-zfs}"
+
+  if [ -z "$DISK" ]; then
+    echo "[nix-cluster] $HOSTNAME is missing disk in deployments.json. Skipping."
+    capture_failure_artifacts "missing disk in deployments.json"
+    publish_join_state "invalid-config" "missing disk; logs in $CURRENT_NODE_LOG_DIR"
+    return 1
+  fi
+
+  if [ "$FS" != "zfs" ]; then
+    echo "[nix-cluster] $HOSTNAME requested unsupported filesystem '$FS'. Only zfs is supported."
+    capture_failure_artifacts "unsupported filesystem requested in deployments.json"
+    publish_join_state "invalid-config" "unsupported filesystem=$FS; only zfs is supported; logs in $CURRENT_NODE_LOG_DIR"
     return 1
   fi
 
@@ -1198,18 +1225,15 @@ provision_live_installer() {
     --disk "$DISK"
     --fs "$FS"
     --admin "$NODE_ADMIN"
-    --ssh-key "$CONTROLLER_SSH_PUB_KEY"
+    --service-user "nix-cluster"
+    --service-home "/home/nix-cluster"
+    --service-shell "bash"
+    --service-ssh-key "$SHARED_BOOTSTRAP_SSH_PUB_KEY"
   )
-
-  if [ -n "$INSTALLER_SSH_PUB_KEY" ] && [ "$INSTALLER_SSH_PUB_KEY" != "$CONTROLLER_SSH_PUB_KEY" ]; then
-    install_cmd+=(--ssh-key "$INSTALLER_SSH_PUB_KEY")
-  fi
 
   while IFS= read -r admin_key; do
     [ -n "$admin_key" ] || continue
-    if [ "$admin_key" != "$CONTROLLER_SSH_PUB_KEY" ] && [ "$admin_key" != "$INSTALLER_SSH_PUB_KEY" ]; then
-      install_cmd+=(--ssh-key "$admin_key")
-    fi
+    install_cmd+=(--ssh-key "$admin_key")
   done < <(jq -r '.[]' <<< "$SHARED_ADMIN_KEYS_JSON")
 
   install_cmd+=(
@@ -1296,6 +1320,7 @@ provision_live_installer() {
   fi
 
   publish_join_state "installed-os-online" "installed system is reachable at $INSTALLER_IP"
+  JUST_PROVISIONED_INSTALLED_OS=1
 
   return 0
 }
@@ -1330,7 +1355,7 @@ while read -r node; do
   INSTALLER_POST_SCRIPT=$(echo "$node" | jq -r '.installer_post_script // empty')
   INSTALLER_SSH_PUB_KEY="$SHARED_BOOTSTRAP_SSH_PUB_KEY"
   DISK=$(echo "$node" | jq -r '.disk')
-  FS=$(echo "$node" | jq -r '.fs')
+  FS=$(echo "$node" | jq -r '.fs // "zfs"')
   NODE_GROUP=$(echo "$node" | jq -r '.node_group')
   NODE_ROLE=$(echo "$node" | jq -r '.node_role // "worker"')
   KEEPALIVED_ROLE=$(echo "$node" | jq -r '.keepalived_role // "backup"')
@@ -1339,6 +1364,7 @@ while read -r node; do
   NODE_ADMIN_PASSWORD_HASH=$(echo "$node" | jq -r '.node_admin_password_hash // empty')
   SSH_PASSWORD_AUTH=$(echo "$node" | jq -r '.ssh_password_auth // false')
   REINSTALL=$(echo "$node" | jq -r '.reinstall // "false"')
+  JUST_PROVISIONED_INSTALLED_OS=0
 
   if [ -z "$HOSTNAME" ] || [ -z "$INSTALLER_IP" ]; then
     echo "[nix-cluster] Skipping malformed deployment entry: $node"
@@ -1347,9 +1373,12 @@ while read -r node; do
 
   NODE_SSH_KEYS_JSON=$(jq -cn \
     --argjson admin "$SHARED_ADMIN_KEYS_JSON" \
-    --arg controller "$CONTROLLER_SSH_PUB_KEY" \
-    --arg installer "$INSTALLER_SSH_PUB_KEY" \
-    '$admin + [ $controller, $installer ] | map(select(length > 0)) | unique')
+    '$admin | map(select(length > 0)) | unique')
+  NIX_CLUSTER_SSH_KEYS_JSON=$(jq -cn \
+    --arg bootstrap "$SHARED_BOOTSTRAP_SSH_PUB_KEY" \
+    '[ $bootstrap ] | map(select(length > 0)) | unique')
+  NODE_SSH_PUB_KEY=$(jq -r '.[0] // ""' <<< "$NODE_SSH_KEYS_JSON")
+  NIX_CLUSTER_SSH_PUB_KEY=$(jq -r '.[0] // ""' <<< "$NIX_CLUSTER_SSH_KEYS_JSON")
 
   publish_node_inventory "$DEPLOYMENTS_SOURCE" "desired"
   publish_join_state "desired" "inventory record loaded from $DEPLOYMENTS_SOURCE"
@@ -1385,8 +1414,10 @@ while read -r node; do
         --arg node_group "$NODE_GROUP" \
         --arg admin "$NODE_ADMIN" \
         --arg admin_password_hash "$NODE_ADMIN_PASSWORD_HASH" \
-        --arg node_ssh_pub_key "$CONTROLLER_SSH_PUB_KEY" \
+        --arg node_ssh_pub_key "$NODE_SSH_PUB_KEY" \
         --argjson node_ssh_pub_keys "$NODE_SSH_KEYS_JSON" \
+        --arg nix_cluster_ssh_pub_key "$NIX_CLUSTER_SSH_PUB_KEY" \
+        --argjson nix_cluster_ssh_pub_keys "$NIX_CLUSTER_SSH_KEYS_JSON" \
         --arg installer_auth_mode "$INSTALLER_AUTH_MODE" \
         --arg installer_ssh_pub_key "$INSTALLER_SSH_PUB_KEY" \
         --argjson ssh_password_auth "$SSH_PASSWORD_AUTH" \
@@ -1407,6 +1438,8 @@ while read -r node; do
          .node_admin_password_hash = $admin_password_hash |
          .node_ssh_pub_key = $node_ssh_pub_key |
          .node_ssh_pub_keys = $node_ssh_pub_keys |
+         .nix_cluster_ssh_pub_key = $nix_cluster_ssh_pub_key |
+         .nix_cluster_ssh_pub_keys = $nix_cluster_ssh_pub_keys |
          .ssh_password_auth = $ssh_password_auth |
          .installer_auth_mode = $installer_auth_mode |
          .installer_ssh_pub_key = $installer_ssh_pub_key |
@@ -1425,8 +1458,10 @@ while read -r node; do
         --arg node_group "$NODE_GROUP" \
         --arg admin "$NODE_ADMIN" \
         --arg admin_password_hash "$NODE_ADMIN_PASSWORD_HASH" \
-        --arg node_ssh_pub_key "$CONTROLLER_SSH_PUB_KEY" \
+        --arg node_ssh_pub_key "$NODE_SSH_PUB_KEY" \
         --argjson node_ssh_pub_keys "$NODE_SSH_KEYS_JSON" \
+        --arg nix_cluster_ssh_pub_key "$NIX_CLUSTER_SSH_PUB_KEY" \
+        --argjson nix_cluster_ssh_pub_keys "$NIX_CLUSTER_SSH_KEYS_JSON" \
         --arg installer_auth_mode "$INSTALLER_AUTH_MODE" \
         --arg installer_ssh_pub_key "$INSTALLER_SSH_PUB_KEY" \
         --argjson ssh_password_auth "$SSH_PASSWORD_AUTH" \
@@ -1434,7 +1469,7 @@ while read -r node; do
         --arg keepalived_role "$KEEPALIVED_ROLE" \
         --arg fleet_private_key "$(sudo cat "$SOPS_KEY")" \
         --arg webhook_secret "$WEBHOOK_SECRET" \
-        '{bootstrap_mode: false, is_controller: ($node_role == "controller"), preserve_existing_node_files: true, git_user: $git_user, git_token: $git_token, repo_url: $repo_url, repo_host_ip: $repo_host_ip, node_group: $node_group, node_admin: $admin, node_admin_pass: "", node_admin_password_hash: $admin_password_hash, node_ssh_pub_key: $node_ssh_pub_key, node_ssh_pub_keys: $node_ssh_pub_keys, ssh_password_auth: $ssh_password_auth, installer_auth_mode: $installer_auth_mode, installer_ssh_pub_key: $installer_ssh_pub_key, node_role: $node_role, keepalived_role: $keepalived_role, fleet_private_key: $fleet_private_key, trigger_choice: "2", webhook_secret: $webhook_secret}' > "$CONFIG_JSON"
+        '{bootstrap_mode: false, is_controller: ($node_role == "controller"), preserve_existing_node_files: true, git_user: $git_user, git_token: $git_token, repo_url: $repo_url, repo_host_ip: $repo_host_ip, node_group: $node_group, node_admin: $admin, node_admin_pass: "", node_admin_password_hash: $admin_password_hash, node_ssh_pub_key: $node_ssh_pub_key, node_ssh_pub_keys: $node_ssh_pub_keys, nix_cluster_ssh_pub_key: $nix_cluster_ssh_pub_key, nix_cluster_ssh_pub_keys: $nix_cluster_ssh_pub_keys, ssh_password_auth: $ssh_password_auth, installer_auth_mode: $installer_auth_mode, installer_ssh_pub_key: $installer_ssh_pub_key, node_role: $node_role, keepalived_role: $keepalived_role, fleet_private_key: $fleet_private_key, trigger_choice: "2", webhook_secret: $webhook_secret}' > "$CONFIG_JSON"
     fi
 
     if copy_to_remote "$CONFIG_JSON" "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" /tmp/nix-cluster-config.json auto; then
@@ -1491,6 +1526,16 @@ while read -r node; do
   if can_login_retry "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" auto 3; then
     publish_node_inventory "controller-probe" "base-os"
     publish_join_state "base-os" "base operating system reachable"
+    if [ "$REINSTALL" = "true" ] && [ "$JUST_PROVISIONED_INSTALLED_OS" -eq 1 ]; then
+      if clear_reinstall_request "$HOSTNAME"; then
+        echo "[nix-cluster] $HOSTNAME reached first boot after reinstall. Clearing reinstall=true and continuing to enrollment."
+        publish_join_state "reinstall-complete" "first boot after reinstall reached; reinstall flag cleared"
+      else
+        echo "[nix-cluster] Failed to persist reinstall=false for $HOSTNAME. Continuing to enrollment for this controller pass."
+        publish_join_state "reinstall-complete" "first boot after reinstall reached; continuing to enrollment without persisting reinstall=false"
+      fi
+      REINSTALL="false"
+    fi
     if [ "$REINSTALL" != "true" ] && run_remote_sudo_command "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" auto "systemctl is-active --quiet nix-cluster.service || systemctl is-active --quiet nops.service"; then
       echo "[nix-cluster] $HOSTNAME detected as Base OS and already enrolled, skipping."
       publish_join_state "enrolled" "nix-cluster service already present"
@@ -1538,8 +1583,10 @@ while read -r node; do
         --arg node_group "$NODE_GROUP" \
         --arg admin "$NODE_ADMIN" \
         --arg admin_password_hash "$NODE_ADMIN_PASSWORD_HASH" \
-        --arg node_ssh_pub_key "$CONTROLLER_SSH_PUB_KEY" \
+        --arg node_ssh_pub_key "$NODE_SSH_PUB_KEY" \
         --argjson node_ssh_pub_keys "$NODE_SSH_KEYS_JSON" \
+        --arg nix_cluster_ssh_pub_key "$NIX_CLUSTER_SSH_PUB_KEY" \
+        --argjson nix_cluster_ssh_pub_keys "$NIX_CLUSTER_SSH_KEYS_JSON" \
         --arg installer_auth_mode "$INSTALLER_AUTH_MODE" \
         --arg installer_ssh_pub_key "$INSTALLER_SSH_PUB_KEY" \
         --argjson ssh_password_auth "$SSH_PASSWORD_AUTH" \
@@ -1560,6 +1607,8 @@ while read -r node; do
          .node_admin_password_hash = $admin_password_hash |
          .node_ssh_pub_key = $node_ssh_pub_key |
          .node_ssh_pub_keys = $node_ssh_pub_keys |
+         .nix_cluster_ssh_pub_key = $nix_cluster_ssh_pub_key |
+         .nix_cluster_ssh_pub_keys = $nix_cluster_ssh_pub_keys |
          .ssh_password_auth = $ssh_password_auth |
          .installer_auth_mode = $installer_auth_mode |
          .installer_ssh_pub_key = $installer_ssh_pub_key |
@@ -1578,8 +1627,10 @@ while read -r node; do
         --arg node_group "$NODE_GROUP" \
         --arg admin "$NODE_ADMIN" \
         --arg admin_password_hash "$NODE_ADMIN_PASSWORD_HASH" \
-        --arg node_ssh_pub_key "$CONTROLLER_SSH_PUB_KEY" \
+        --arg node_ssh_pub_key "$NODE_SSH_PUB_KEY" \
         --argjson node_ssh_pub_keys "$NODE_SSH_KEYS_JSON" \
+        --arg nix_cluster_ssh_pub_key "$NIX_CLUSTER_SSH_PUB_KEY" \
+        --argjson nix_cluster_ssh_pub_keys "$NIX_CLUSTER_SSH_KEYS_JSON" \
         --arg installer_auth_mode "$INSTALLER_AUTH_MODE" \
         --arg installer_ssh_pub_key "$INSTALLER_SSH_PUB_KEY" \
         --argjson ssh_password_auth "$SSH_PASSWORD_AUTH" \
@@ -1587,7 +1638,7 @@ while read -r node; do
         --arg keepalived_role "$KEEPALIVED_ROLE" \
         --arg fleet_private_key "$(sudo cat "$SOPS_KEY")" \
         --arg webhook_secret "$WEBHOOK_SECRET" \
-        '{bootstrap_mode: false, is_controller: ($node_role == "controller"), preserve_existing_node_files: true, git_user: $git_user, git_token: $git_token, repo_url: $repo_url, repo_host_ip: $repo_host_ip, node_group: $node_group, node_admin: $admin, node_admin_pass: "", node_admin_password_hash: $admin_password_hash, node_ssh_pub_key: $node_ssh_pub_key, node_ssh_pub_keys: $node_ssh_pub_keys, ssh_password_auth: $ssh_password_auth, installer_auth_mode: $installer_auth_mode, installer_ssh_pub_key: $installer_ssh_pub_key, node_role: $node_role, keepalived_role: $keepalived_role, fleet_private_key: $fleet_private_key, trigger_choice: "2", webhook_secret: $webhook_secret}' > "$CONFIG_JSON"
+        '{bootstrap_mode: false, is_controller: ($node_role == "controller"), preserve_existing_node_files: true, git_user: $git_user, git_token: $git_token, repo_url: $repo_url, repo_host_ip: $repo_host_ip, node_group: $node_group, node_admin: $admin, node_admin_pass: "", node_admin_password_hash: $admin_password_hash, node_ssh_pub_key: $node_ssh_pub_key, node_ssh_pub_keys: $node_ssh_pub_keys, nix_cluster_ssh_pub_key: $nix_cluster_ssh_pub_key, nix_cluster_ssh_pub_keys: $nix_cluster_ssh_pub_keys, ssh_password_auth: $ssh_password_auth, installer_auth_mode: $installer_auth_mode, installer_ssh_pub_key: $installer_ssh_pub_key, node_role: $node_role, keepalived_role: $keepalived_role, fleet_private_key: $fleet_private_key, trigger_choice: "2", webhook_secret: $webhook_secret}' > "$CONFIG_JSON"
     fi
 
     if copy_to_remote "$CONFIG_JSON" "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" /tmp/nix-cluster-config.json auto; then

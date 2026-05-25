@@ -75,6 +75,11 @@
             --add-flags "-m nix_cluster.ha monitor" \
             --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.systemd pkgs.coreutils pkgs.bash ]}
 
+          makeWrapper ${pythonEnv}/bin/python3 $out/bin/nix-cluster-reconciler \
+            --prefix PYTHONPATH : "$out/lib" \
+            --add-flags "-m nix_cluster.ha reconciler" \
+            --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.systemd pkgs.coreutils pkgs.bash ]}
+
           ln -s nix-cluster-daemon $out/bin/nops-daemon
           ln -s nix-cluster-webhook $out/bin/nops-webhook
           ln -s nix-cluster-observe $out/bin/nops-observe
@@ -84,6 +89,7 @@
           ln -s nix-cluster-controller-heartbeat $out/bin/nops-controller-heartbeat
           ln -s nix-cluster-reporter $out/bin/nops-reporter
           ln -s nix-cluster-monitor $out/bin/nops-monitor
+          ln -s nix-cluster-reconciler $out/bin/nops-reconciler
         '';
       };
 
@@ -283,6 +289,18 @@
         scheduler = {
           enable = cfg.ha.scheduler.enable;
           interval_seconds = cfg.ha.scheduler.intervalSeconds;
+            controller_mode = cfg.ha.scheduler.controllerMode;
+            fixed_controller_host = cfg.ha.scheduler.fixedControllerHost;
+            leader_key = cfg.ha.scheduler.leaderKey;
+            placement_prefix = cfg.ha.scheduler.placementPrefix;
+            lease_ttl_seconds = cfg.ha.scheduler.leaseTtlSeconds;
+            default_strategy = cfg.ha.scheduler.defaultStrategy;
+          managed_units = cfg.ha.scheduler.managedUnits;
+          reconciler_enable = cfg.ha.scheduler.reconcilerEnable;
+          reconciler_interval_seconds = cfg.ha.scheduler.reconcilerIntervalSeconds;
+          reconciler_dry_run = cfg.ha.scheduler.reconcilerDryRun;
+          resource_prefix = cfg.ha.scheduler.resourcePrefix;
+          resource_interval_seconds = cfg.ha.scheduler.resourceIntervalSeconds;
         };
       };
       modules = {
@@ -351,6 +369,11 @@
           type = lib.types.path;
           default = "${serviceHome}/";
         };
+        serviceAccount.authorizedKeys = lib.mkOption {
+          type = lib.types.listOf lib.types.str;
+          default = [];
+          description = "SSH public keys authorized for the nix-cluster service account.";
+        };
         paths = {
           logDir = lib.mkOption {
             type = lib.types.str;
@@ -401,13 +424,12 @@
               "groups/"
               "apps/"
               "modules/"
-              "deployments.json"
               "secrets/"
               "scripts/"
               "flake.nix"
               "flake.lock"
             ];
-            description = "Repo paths that should trigger a rebuild on this node when changed upstream.";
+            description = "Repo paths that should trigger a rebuild on this node when changed upstream. Controller-only inventory files such as deployments.json are consumed by the controller hook and do not need a local rebuild.";
           };
           workerWaitSeconds = lib.mkOption {
             type = lib.types.int;
@@ -586,6 +608,66 @@
               type = lib.types.int;
               default = 5;
               description = "Seconds between controller runtime-store aggregation passes.";
+            };
+            controllerMode = lib.mkOption {
+              type = lib.types.enum [ "fixed" "elected" ];
+              default = "fixed";
+              description = "How scheduler leadership is chosen. `fixed` uses fixedControllerHost when set; `elected` uses the runtime store to acquire a short-lived scheduler leadership record among controller-capable nodes.";
+            };
+            fixedControllerHost = lib.mkOption {
+              type = lib.types.str;
+              default = "";
+              description = "Hostname that should publish desired placement when controllerMode is `fixed`. Leave empty for single-controller deployments; set this explicitly before enabling multiple fixed-mode controllers.";
+            };
+            leaderKey = lib.mkOption {
+              type = lib.types.str;
+              default = "/nix-cluster/scheduler/leader";
+              description = "Runtime store key used for scheduler leadership state.";
+            };
+            placementPrefix = lib.mkOption {
+              type = lib.types.str;
+              default = "/nix-cluster/scheduler/placement";
+              description = "Runtime store prefix where the scheduler publishes desired service ownership records.";
+            };
+            leaseTtlSeconds = lib.mkOption {
+              type = lib.types.int;
+              default = 15;
+              description = "Lease TTL used for elected scheduler leadership records.";
+            };
+            defaultStrategy = lib.mkOption {
+              type = lib.types.enum [ "prefer-current-healthy" "first-healthy" ];
+              default = "prefer-current-healthy";
+              description = "Default service placement strategy used while app-specific placement policies are being introduced.";
+            };
+            managedUnits = lib.mkOption {
+              type = lib.types.listOf lib.types.str;
+              default = [];
+              description = "Systemd units that the worker-side scheduler reconciler may start or stop based on desired placement records.";
+            };
+            reconcilerEnable = lib.mkOption {
+              type = lib.types.bool;
+              default = false;
+              description = "Enable the local scheduler reconciler that consumes desired placement records and actuates scheduler-managed units through systemd.";
+            };
+            reconcilerIntervalSeconds = lib.mkOption {
+              type = lib.types.int;
+              default = 5;
+              description = "Seconds between worker-side scheduler reconciliation passes.";
+            };
+            reconcilerDryRun = lib.mkOption {
+              type = lib.types.bool;
+              default = false;
+              description = "When true, log scheduler reconciliation actions without starting or stopping units.";
+            };
+            resourcePrefix = lib.mkOption {
+              type = lib.types.str;
+              default = "/nix-cluster/scheduler/resources";
+              description = "Runtime store prefix where nodes publish scheduler resource and capacity records.";
+            };
+            resourceIntervalSeconds = lib.mkOption {
+              type = lib.types.int;
+              default = 15;
+              description = "Seconds between local resource and capacity snapshots published for scheduler decisions.";
             };
           };
         };
@@ -870,6 +952,10 @@
             assertion = lib.hasPrefix "/etc/" cfg.paths.runtimeConfigPath;
             message = "services.nix-cluster.paths.runtimeConfigPath must live under /etc so it can be generated declaratively.";
           }
+          {
+            assertion = (!cfg.ha.scheduler.enable) || cfg.ha.scheduler.controllerMode != "elected" || cfg.ha.scheduler.leaseTtlSeconds > cfg.ha.scheduler.intervalSeconds;
+            message = "services.nix-cluster.ha.scheduler.leaseTtlSeconds must be greater than intervalSeconds when elected scheduler leadership is enabled.";
+          }
         ];
         networking.firewall.allowedTCPPorts =
           lib.optionals cfg.webhook.enable [ cfg.webhook.port ]
@@ -883,6 +969,7 @@
           home = serviceHome;
           createHome = true;
           shell = pkgs.bash;
+          openssh.authorizedKeys.keys = cfg.serviceAccount.authorizedKeys;
         };
         users.groups.${serviceGroup} = {};
         environment.systemPackages = [ 
@@ -1067,6 +1154,10 @@
 
              if [ "${builtins.toString (cfg.isController && cfg.ha.enable && cfg.ha.scheduler.enable && cfg.ha.runtimeStore.type == "etcd" && cfg.ha.runtimeStore.endpoint != "")}" = "1" ]; then
                ${self.packages.${system}.default}/bin/nix-cluster-monitor &
+             fi
+
+             if [ "${builtins.toString (cfg.ha.enable && cfg.ha.scheduler.enable && cfg.ha.scheduler.reconcilerEnable && cfg.ha.runtimeStore.type == "etcd" && cfg.ha.runtimeStore.endpoint != "")}" = "1" ]; then
+               ${self.packages.${system}.default}/bin/nix-cluster-reconciler &
              fi
              
              wait -n

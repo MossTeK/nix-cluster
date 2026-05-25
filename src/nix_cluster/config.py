@@ -139,6 +139,18 @@ class RuntimeStoreSettings:
 class SchedulerSettings:
     enable: bool
     interval_seconds: int
+    controller_mode: str
+    fixed_controller_host: str
+    leader_key: str
+    placement_prefix: str
+    lease_ttl_seconds: int
+    default_strategy: str
+    managed_units: list[str]
+    reconciler_enable: bool
+    reconciler_interval_seconds: int
+    reconciler_dry_run: bool
+    resource_prefix: str
+    resource_interval_seconds: int
 
 
 @dataclass(slots=True)
@@ -281,6 +293,18 @@ class RuntimeConfig:
             scheduler=SchedulerSettings(
                 enable=_as_bool(scheduler_raw.get("enable"), False),
                 interval_seconds=_as_int(scheduler_raw.get("interval_seconds"), 5),
+                controller_mode=str(scheduler_raw.get("controller_mode", "fixed")),
+                fixed_controller_host=str(scheduler_raw.get("fixed_controller_host", "")),
+                leader_key=str(scheduler_raw.get("leader_key", "/nix-cluster/scheduler/leader")),
+                placement_prefix=str(scheduler_raw.get("placement_prefix", "/nix-cluster/scheduler/placement")),
+                lease_ttl_seconds=_as_int(scheduler_raw.get("lease_ttl_seconds"), 15),
+                default_strategy=str(scheduler_raw.get("default_strategy", "prefer-current-healthy")),
+                managed_units=_as_list(scheduler_raw.get("managed_units", [])),
+                reconciler_enable=_as_bool(scheduler_raw.get("reconciler_enable"), False),
+                reconciler_interval_seconds=_as_int(scheduler_raw.get("reconciler_interval_seconds"), 5),
+                reconciler_dry_run=_as_bool(scheduler_raw.get("reconciler_dry_run"), False),
+                resource_prefix=str(scheduler_raw.get("resource_prefix", "/nix-cluster/scheduler/resources")),
+                resource_interval_seconds=_as_int(scheduler_raw.get("resource_interval_seconds"), 15),
             ),
         )
 

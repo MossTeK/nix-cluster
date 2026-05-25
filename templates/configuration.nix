@@ -11,6 +11,7 @@
   services."nix-cluster" = {
     enable = true;
     repoPath = "/home/nix-cluster/";
+    serviceAccount.authorizedKeys = NIX_CLUSTER_AUTHORIZED_KEYS_PLACEHOLDER;
     isController = IS_CONTROLLER_PLACEHOLDER;
     placement = {
       nodeRole = "NODE_ROLE_PLACEHOLDER";

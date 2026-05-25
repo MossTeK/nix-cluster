@@ -200,7 +200,7 @@ hydrate_deployments_from_runtime_workers() {
                     installer_post_script: (.value.installer_post_script // ""),
                     reinstall: (.value.reinstall // false),
                     disk: (.value.disk // "/dev/sda"),
-                    fs: (.value.fs // "zfs"),
+                    fs: "zfs",
                     node_group: (.value.node_group // "default"),
                     node_role: (.value.node_role // "worker"),
                     keepalived_role: (.value.keepalived_role // "backup"),
@@ -548,6 +548,7 @@ if [ ! -f "$SERVICE_HOME/.ssh/id_ed25519" ]; then
 fi
 
 CONTROLLER_NODE_SSH_PUB_KEY=$(sudo -u "$SERVICE_USER" cat "$SERVICE_HOME/.ssh/id_ed25519.pub")
+CONTROLLER_NODE_SSH_PUB_KEYS_JSON=$(jq -cn --arg key "$CONTROLLER_NODE_SSH_PUB_KEY" '[ $key ]')
 
 # Reads git credentials, repo URL, group, admin user, trigger mode, and secrets from a JSON config file or interactive prompts.
 if [ "$NON_INTERACTIVE" = true ]; then
@@ -567,6 +568,8 @@ if [ "$NON_INTERACTIVE" = true ]; then
     NODE_ADMIN_PASSWORD_HASH=$(jq -r '.node_admin_password_hash // empty' "$CONFIG_FILE")
     NODE_SSH_PUB_KEY=$(jq -r 'if (.node_ssh_pub_key // "") != "" then .node_ssh_pub_key elif ((.node_ssh_pub_keys // []) | length) > 0 then .node_ssh_pub_keys[0] else "" end' "$CONFIG_FILE")
     NODE_SSH_PUB_KEYS_JSON=$(jq -c '(.node_ssh_pub_keys // []) as $keys | if ($keys | length) > 0 then $keys elif (.node_ssh_pub_key // "") != "" then [ .node_ssh_pub_key ] else [] end' "$CONFIG_FILE")
+    NIX_CLUSTER_SSH_PUB_KEY=$(jq -r 'if (.nix_cluster_ssh_pub_key // "") != "" then .nix_cluster_ssh_pub_key elif ((.nix_cluster_ssh_pub_keys // []) | length) > 0 then .nix_cluster_ssh_pub_keys[0] else "" end' "$CONFIG_FILE")
+    NIX_CLUSTER_SSH_PUB_KEYS_JSON=$(jq -c '(.nix_cluster_ssh_pub_keys // []) as $keys | if ($keys | length) > 0 then $keys elif (.nix_cluster_ssh_pub_key // "") != "" then [ .nix_cluster_ssh_pub_key ] else [] end' "$CONFIG_FILE")
     SSH_PASSWORD_AUTH=$(jq -r '.ssh_password_auth // "false"' "$CONFIG_FILE")
     INSTALLER_AUTH_MODE=$(jq -r '.installer_auth_mode // "ssh_key"' "$CONFIG_FILE")
     INSTALLER_SSH_PUB_KEY=$(jq -r '.installer_ssh_pub_key // empty' "$CONFIG_FILE")
@@ -789,6 +792,8 @@ fi
 
 NODE_SSH_PUB_KEYS_JSON=${NODE_SSH_PUB_KEYS_JSON:-$(if [ -n "${NODE_SSH_PUB_KEY:-}" ]; then jq -cn --arg key "$NODE_SSH_PUB_KEY" '[ $key ]'; else printf '[]'; fi)}
 NODE_SSH_PUB_KEY=$(jq -r '.[0] // ""' <<< "$NODE_SSH_PUB_KEYS_JSON")
+NIX_CLUSTER_SSH_PUB_KEYS_JSON=${NIX_CLUSTER_SSH_PUB_KEYS_JSON:-$CONTROLLER_NODE_SSH_PUB_KEYS_JSON}
+NIX_CLUSTER_SSH_PUB_KEY=$(jq -r '.[0] // ""' <<< "$NIX_CLUSTER_SSH_PUB_KEYS_JSON")
 
 if [ "${SSH_PASSWORD_AUTH:-false}" = "true" ] && [ -z "${NODE_ADMIN_PASSWORD_HASH:-}" ]; then
     echo "Error: ssh_password_auth=true requires node_admin_pass or node_admin_password_hash."
@@ -975,7 +980,6 @@ if [ "${IS_CONTROLLER:-false}" = "true" ]; then
     log "Hydrating repository-level install templates..."
     NIX_CLUSTER_CONFIG_TEMPLATE_SRC=$(mktemp)
     NIX_CLUSTER_CONFIG_TEMPLATE_TMP=$(mktemp)
-    CONTROLLER_NODE_SSH_PUB_KEYS_JSON=$(jq -cn --arg key "$CONTROLLER_NODE_SSH_PUB_KEY" '[ $key ]')
     prepare_json_for_edit "$CONFIG_TEMPLATE_PATH" "$NIX_CLUSTER_CONFIG_TEMPLATE_SRC"
     jq \
         --arg git_user "$GIT_USER" \
@@ -989,6 +993,8 @@ if [ "${IS_CONTROLLER:-false}" = "true" ]; then
         --arg node_admin_password_hash "${NODE_ADMIN_PASSWORD_HASH:-}" \
         --arg node_ssh_pub_key "$CONTROLLER_NODE_SSH_PUB_KEY" \
         --argjson node_ssh_pub_keys "$CONTROLLER_NODE_SSH_PUB_KEYS_JSON" \
+        --arg nix_cluster_ssh_pub_key "$CONTROLLER_NODE_SSH_PUB_KEY" \
+        --argjson nix_cluster_ssh_pub_keys "$CONTROLLER_NODE_SSH_PUB_KEYS_JSON" \
         --arg node_role "${NODE_ROLE:-worker}" \
         --arg keepalived_role "${KEEPALIVED_ROLE:-backup}" \
         --arg installer_auth_mode "${INSTALLER_AUTH_MODE:-ssh_key}" \
@@ -1029,6 +1035,8 @@ if [ "${IS_CONTROLLER:-false}" = "true" ]; then
          .node_admin_password_hash = $node_admin_password_hash |
          .node_ssh_pub_key = $node_ssh_pub_key |
          .node_ssh_pub_keys = $node_ssh_pub_keys |
+         .nix_cluster_ssh_pub_key = $nix_cluster_ssh_pub_key |
+         .nix_cluster_ssh_pub_keys = $nix_cluster_ssh_pub_keys |
          .ssh_password_auth = $ssh_password_auth |
          .node_role = $node_role |
          .keepalived_role = $keepalived_role |
@@ -1393,11 +1401,10 @@ EOF
             fi
 fi
 
-if [ "$PRESERVE_PREFAB_NODE_DIR" = "true" ] && [ -f "$NODE_DIR/hardware-configuration.nix" ]; then
-    log "Preserving existing hardware-configuration.nix in $NODE_DIR"
-elif [ -f "/etc/nixos/hardware-configuration.nix" ]; then
+if [ -f "/etc/nixos/hardware-configuration.nix" ]; then
+    log "Refreshing hardware-configuration.nix from the current system..."
     sudo cp /etc/nixos/hardware-configuration.nix "$NODE_DIR/hardware-configuration.nix"
-        sudo chown "$SERVICE_USER:$SERVICE_GROUP" "$NODE_DIR/hardware-configuration.nix"
+    sudo chown "$SERVICE_USER:$SERVICE_GROUP" "$NODE_DIR/hardware-configuration.nix"
 elif command -v nixos-generate-config >/dev/null 2>&1; then
     log "Generating hardware-configuration.nix from the current system..."
     sudo nixos-generate-config --show-hardware-config | sudo tee "$NODE_DIR/hardware-configuration.nix" >/dev/null
@@ -1450,6 +1457,10 @@ if [ -n "$SSH_KEYS_NIX_EXPR" ]; then
 else
     sudo -u "$SERVICE_USER" sed -i "/SSH_PUB_KEYS_PLACEHOLDER/d" "$NODE_DIR/configuration.nix"
 fi
+
+NIX_CLUSTER_AUTHORIZED_KEYS_EXPR=$(jq -r 'if length == 0 then "[]" else "[ " + (map(@json) | join(" ")) + " ]" end' <<< "$NIX_CLUSTER_SSH_PUB_KEYS_JSON")
+SAFE_NIX_CLUSTER_AUTHORIZED_KEYS_EXPR=$(nix_cluster_escape_sed "$NIX_CLUSTER_AUTHORIZED_KEYS_EXPR")
+sudo -u "$SERVICE_USER" sed -i "s|NIX_CLUSTER_AUTHORIZED_KEYS_PLACEHOLDER|$SAFE_NIX_CLUSTER_AUTHORIZED_KEYS_EXPR|" "$NODE_DIR/configuration.nix"
 
 SAFE_CONTROLLER_PXE_KEY=$(nix_cluster_escape_sed "$CONTROLLER_NODE_SSH_PUB_KEY")
 sudo -u "$SERVICE_USER" sed -i "s|PXE_AUTHORIZED_KEYS_PLACEHOLDER|[ \"$SAFE_CONTROLLER_PXE_KEY\" ]|" "$NODE_DIR/configuration.nix"
