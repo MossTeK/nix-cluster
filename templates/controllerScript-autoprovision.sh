@@ -993,6 +993,12 @@ wait_for_installed_node_login() {
   return 0
 }
 
+node_has_cluster_service() {
+  local host="$1"
+
+  run_remote "nix-cluster" "$host" "" ssh_key "systemctl is-active --quiet nix-cluster.service || systemctl is-active --quiet nops.service" >/dev/null 2>&1
+}
+
 verify_worker_enrollment() {
   local max_attempts="${1:-12}"
   local attempt=1
@@ -1500,14 +1506,20 @@ while read -r node; do
 
   # State 1: Already active (answers as nix-cluster)
   if can_login_with_key nix-cluster "$INSTALLER_IP"; then
-    publish_node_inventory "controller-probe" "active"
-    if [ "$REINSTALL" = "true" ]; then
-      echo "[nix-cluster] $HOSTNAME already active, but reinstall=true so a reprovision will be attempted."
-      publish_join_state "reinstall-requested" "node active but reinstall=true"
+    if node_has_cluster_service "$INSTALLER_IP"; then
+      publish_node_inventory "controller-probe" "active"
+      if [ "$REINSTALL" = "true" ]; then
+        echo "[nix-cluster] $HOSTNAME already active, but reinstall=true so a reprovision will be attempted."
+        publish_join_state "reinstall-requested" "node active but reinstall=true"
+      else
+      echo "[nix-cluster] $HOSTNAME already active, skipping."
+      publish_join_state "active" "node reachable with controller key"
+      continue
+      fi
     else
-    echo "[nix-cluster] $HOSTNAME already active, skipping."
-    publish_join_state "active" "node reachable with controller key"
-    continue
+      echo "[nix-cluster] $HOSTNAME answers as nix-cluster, but nix-cluster.service is not present yet. Continuing enrollment checks."
+      publish_node_inventory "controller-probe" "service-account-only"
+      publish_join_state "service-account-reachable" "nix-cluster ssh reachable but cluster service not present yet"
     fi
   fi
 
