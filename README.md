@@ -222,3 +222,5 @@ For the staged manual and PXE-assisted flows, these roles are intentionally sepa
 - service automation account: `nix-cluster`
 
 This separation keeps live bootstrap access simple while still allowing a stable local admin identity after install.
+
+Operationally, `service-account-reachable` is not a completed enrollment state. It only means the bootstrap service account exists and answers over SSH. For non-reinstall workers, the controller should continue by preferring its passwordless admin-user SSH path before retrying bootstrap or installer probes, otherwise wrong-key attempts can trigger connection resets and hide a valid base-OS login.
