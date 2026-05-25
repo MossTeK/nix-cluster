@@ -691,7 +691,11 @@ can_login() {
       can_login_with_password "$user" "$host" "$password"
       ;;
     *)
-      can_login_with_key "$user" "$host" || can_login_with_admin_key "$user" "$host" || can_login_with_password "$user" "$host" "$password"
+      if should_try_admin_key "$user"; then
+        can_login_with_admin_key "$user" "$host" || can_login_with_key "$user" "$host" || can_login_with_password "$user" "$host" "$password"
+      else
+        can_login_with_key "$user" "$host" || can_login_with_admin_key "$user" "$host" || can_login_with_password "$user" "$host" "$password"
+      fi
       ;;
   esac
 }
@@ -743,11 +747,19 @@ emit_login_probe() {
       fi
       ;;
     *)
-      if ssh_with_key "$user@$host" hostname >"$probe_log" 2>&1; then
+      if should_try_admin_key "$user" && ssh_with_admin_key "$user@$host" hostname >"$probe_log" 2>&1; then
         rc=0
       else
-        rc=$?
-        if should_try_admin_key "$user" && ssh_with_admin_key "$user@$host" hostname >>"$probe_log" 2>&1; then
+        if should_try_admin_key "$user"; then
+          rc=$?
+          if ssh_with_key "$user@$host" hostname >>"$probe_log" 2>&1; then
+            rc=0
+          elif [ -n "$password" ] && ssh_with_password "$password" "$user@$host" hostname >>"$probe_log" 2>&1; then
+            rc=0
+          else
+            rc=$?
+          fi
+        elif ssh_with_key "$user@$host" hostname >"$probe_log" 2>&1; then
           rc=0
         elif [ -n "$password" ] && ssh_with_password "$password" "$user@$host" hostname >>"$probe_log" 2>&1; then
           rc=0
@@ -791,7 +803,12 @@ run_remote() {
     return $?
   fi
 
-  if can_login_with_admin_key "$user" "$host"; then
+  if should_try_admin_key "$user"; then
+    if can_login_with_admin_key "$user" "$host"; then
+      ssh_with_admin_key "$user@$host" "$@"
+      return $?
+    fi
+  elif can_login_with_admin_key "$user" "$host"; then
     ssh_with_admin_key "$user@$host" "$@"
     return $?
   fi
@@ -850,7 +867,12 @@ copy_to_remote() {
     return $?
   fi
 
-  if can_login_with_admin_key "$user" "$host"; then
+  if should_try_admin_key "$user"; then
+    if can_login_with_admin_key "$user" "$host"; then
+      scp -i "$MOSS_LOCAL_SSH_KEY" -o BatchMode=yes "${SSH_BASE_OPTS[@]}" "$source_file" "$user@$host:$target_path"
+      return $?
+    fi
+  elif can_login_with_admin_key "$user" "$host"; then
     scp -i "$MOSS_LOCAL_SSH_KEY" -o BatchMode=yes "${SSH_BASE_OPTS[@]}" "$source_file" "$user@$host:$target_path"
     return $?
   fi
