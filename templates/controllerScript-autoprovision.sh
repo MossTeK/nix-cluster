@@ -8,7 +8,7 @@ SSH_PUBLIC_KEYS_FILE="ssh-public-keys.json"
 SECRETS_FILE="secrets/secrets.yaml"
 SSH_SECRETS_FILE="secrets/ssh-keys.yaml"
 NIX_CLUSTER_SSH_KEY="/home/nix-cluster/.ssh/id_ed25519"
-MOSS_LOCAL_SSH_KEY="/home/moss/.ssh/id_ed25519_homelab"
+MOSS_LOCAL_SSH_KEY="/home/nix-cluster/.ssh/id_ed25519_homelab"
 SOPS_KEY="/var/lib/sops-nix/key.txt"
 RUNTIME_CONFIG="/etc/nix-cluster-runtime-config.json"
 
@@ -613,6 +613,13 @@ ssh_with_key() {
   ssh -n -i "$NIX_CLUSTER_SSH_KEY" -o BatchMode=yes "${SSH_BASE_OPTS[@]}" "$remote" "$@"
 }
 
+ssh_with_admin_key() {
+  local remote="$1"
+  shift
+
+  ssh -n -i "$MOSS_LOCAL_SSH_KEY" -o BatchMode=yes "${SSH_BASE_OPTS[@]}" "$remote" "$@"
+}
+
 ssh_with_password() {
   local password="$1"
   local remote="$2"
@@ -644,6 +651,20 @@ can_login_with_key() {
   ssh_with_key "$user@$host" exit >/dev/null 2>&1
 }
 
+should_try_admin_key() {
+  local user="$1"
+
+  [ "$user" != "nixos" ] && [ "$user" != "nix-cluster" ] && [ -f "$MOSS_LOCAL_SSH_KEY" ]
+}
+
+can_login_with_admin_key() {
+  local user="$1"
+  local host="$2"
+
+  should_try_admin_key "$user" || return 1
+  ssh_with_admin_key "$user@$host" exit >/dev/null 2>&1
+}
+
 can_login_with_password() {
   local user="$1"
   local host="$2"
@@ -670,7 +691,7 @@ can_login() {
       can_login_with_password "$user" "$host" "$password"
       ;;
     *)
-      can_login_with_key "$user" "$host" || can_login_with_password "$user" "$host" "$password"
+      can_login_with_key "$user" "$host" || can_login_with_admin_key "$user" "$host" || can_login_with_password "$user" "$host" "$password"
       ;;
   esac
 }
@@ -726,7 +747,9 @@ emit_login_probe() {
         rc=0
       else
         rc=$?
-        if [ -n "$password" ] && ssh_with_password "$password" "$user@$host" hostname >>"$probe_log" 2>&1; then
+        if should_try_admin_key "$user" && ssh_with_admin_key "$user@$host" hostname >>"$probe_log" 2>&1; then
+          rc=0
+        elif [ -n "$password" ] && ssh_with_password "$password" "$user@$host" hostname >>"$probe_log" 2>&1; then
           rc=0
         else
           rc=$?
@@ -765,6 +788,11 @@ run_remote() {
 
   if can_login_with_key "$user" "$host"; then
     ssh_with_key "$user@$host" "$@"
+    return $?
+  fi
+
+  if can_login_with_admin_key "$user" "$host"; then
+    ssh_with_admin_key "$user@$host" "$@"
     return $?
   fi
 
@@ -819,6 +847,11 @@ copy_to_remote() {
 
   if can_login_with_key "$user" "$host"; then
     scp -i "$NIX_CLUSTER_SSH_KEY" -o BatchMode=yes "${SSH_BASE_OPTS[@]}" "$source_file" "$user@$host:$target_path"
+    return $?
+  fi
+
+  if can_login_with_admin_key "$user" "$host"; then
+    scp -i "$MOSS_LOCAL_SSH_KEY" -o BatchMode=yes "${SSH_BASE_OPTS[@]}" "$source_file" "$user@$host:$target_path"
     return $?
   fi
 
