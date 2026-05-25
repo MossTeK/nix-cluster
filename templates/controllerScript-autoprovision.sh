@@ -1444,7 +1444,13 @@ while read -r node; do
   publish_node_inventory "$DEPLOYMENTS_SOURCE" "desired"
   publish_join_state "desired" "inventory record loaded from $DEPLOYMENTS_SOURCE"
 
-  if ! can_login_with_key nix-cluster "$INSTALLER_IP" \
+  if [ "$REINSTALL" != "true" ]; then
+    if ! can_login_retry "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" auto 3 \
+      && ! can_login_with_key nix-cluster "$INSTALLER_IP" \
+      && ! can_login "$INSTALLER_USER" "$INSTALLER_IP" "$INSTALLER_PASSWORD" "$INSTALLER_AUTH_MODE"; then
+      refresh_node_ip_if_needed "preflight node discovery" || true
+    fi
+  elif ! can_login_with_key nix-cluster "$INSTALLER_IP" \
     && ! can_login "$INSTALLER_USER" "$INSTALLER_IP" "$INSTALLER_PASSWORD" "$INSTALLER_AUTH_MODE" \
     && ! can_login_retry "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" auto 3; then
     refresh_node_ip_if_needed "preflight node discovery" || true
