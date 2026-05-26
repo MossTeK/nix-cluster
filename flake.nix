@@ -61,6 +61,10 @@
             --add-flags "$out/lib/scripts/fleet-watch.sh" \
             --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.jq pkgs.coreutils pkgs.bash ]}
 
+          makeWrapper ${pkgs.bash}/bin/bash $out/bin/nix-cluster-secret-ensure \
+            --add-flags "$out/lib/scripts/secret-ensure.sh" \
+            --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.git pkgs.sops pkgs.age pkgs.openssl pkgs.jq pkgs.coreutils pkgs.bash ]}
+
           makeWrapper ${pkgs.bash}/bin/bash $out/bin/nix-cluster-controller-heartbeat \
             --add-flags "$out/lib/scripts/controller-heartbeat.sh" \
             --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.iputils pkgs.inetutils pkgs.systemd pkgs.jq pkgs.coreutils pkgs.bash ]}
@@ -86,6 +90,7 @@
           ln -s nix-cluster-node $out/bin/nops-node
           ln -s nix-cluster-fleet-status $out/bin/nops-fleet-status
           ln -s nix-cluster-fleet-watch $out/bin/nops-fleet-watch
+          ln -s nix-cluster-secret-ensure $out/bin/nops-secret-ensure
           ln -s nix-cluster-controller-heartbeat $out/bin/nops-controller-heartbeat
           ln -s nix-cluster-reporter $out/bin/nops-reporter
           ln -s nix-cluster-monitor $out/bin/nops-monitor
@@ -154,6 +159,10 @@
         ++ cfg.observability.extraTrackedUnits
       );
       appCfg = cfg.apps;
+      secretGenerationRequests = lib.mapAttrs (_: request: {
+        generator = request.generator;
+        length = request.length;
+      }) cfg.secretGeneration.requests;
       workerInventory = lib.mapAttrs (name: worker: {
         hostname = name;
         node_directory = worker.nodeDirectory;
@@ -258,6 +267,11 @@
           enable = cfg.observability.loki.enable;
           url = cfg.observability.loki.url;
         };
+      };
+      secret_generation = {
+        enable = cfg.secretGeneration.enable;
+        sops_file = cfg.secretGeneration.sopsFile;
+        requests = secretGenerationRequests;
       };
       ha = {
         enable = cfg.ha.enable;
@@ -505,6 +519,36 @@
             type = lib.types.str;
             default = "";
             description = "Loki push endpoint, for example http://loki:3100/loki/api/v1/push.";
+          };
+        };
+        secretGeneration = {
+          enable = lib.mkOption {
+            type = lib.types.bool;
+            default = true;
+            description = "Allow nix-cluster to reconcile app-declared generated secrets into the fleet SOPS file before rebuilds.";
+          };
+          sopsFile = lib.mkOption {
+            type = lib.types.str;
+            default = "secrets/secrets.yaml";
+            description = "Fleet-relative SOPS file where generated app secrets are stored.";
+          };
+          requests = lib.mkOption {
+            type = lib.types.attrsOf (lib.types.submodule ({ ... }: {
+              options = {
+                generator = lib.mkOption {
+                  type = lib.types.enum [ "base64" "hex" "alnum" ];
+                  default = "base64";
+                  description = "Generator used when nix-cluster creates the secret value.";
+                };
+                length = lib.mkOption {
+                  type = lib.types.int;
+                  default = 48;
+                  description = "Generated secret length.";
+                };
+              };
+            }));
+            default = {};
+            description = "App-declared generated secrets keyed by the SOPS secret name.";
           };
         };
         ha = {

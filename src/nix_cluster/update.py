@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import socket
 import subprocess
@@ -96,6 +97,87 @@ class UpdateManager:
     def _reset(self, repo_dir: str, stage: str) -> None:
         self._run_command(["git", "reset", "--hard", self.branch_ref], cwd=repo_dir, stage=stage)
 
+    def _fleet_hostnames(self, repo_dir: str) -> list[str]:
+        nodes_dir = Path(repo_dir) / "nodes"
+        if nodes_dir.is_dir():
+            hostnames = sorted(child.name for child in nodes_dir.iterdir() if child.is_dir())
+            if hostnames:
+                return hostnames
+
+        runtime_hostname = self.runtime_config.hostname or self.hostname
+        return [runtime_hostname]
+
+    def _read_secret_generation_config(self, repo_dir: str, target_host: str) -> dict[str, object]:
+        output = self._run_command(
+            [
+                "nix",
+                "eval",
+                "--json",
+                f'.#nixosConfigurations."{target_host}".config.services."nix-cluster".secretGeneration',
+            ],
+            cwd=repo_dir,
+            stage=f"SECRET-EVAL-{target_host}",
+        )
+        return json.loads(output) if output else {}
+
+    def _collect_secret_requests(self, repo_dir: str) -> dict[str, dict[str, dict[str, object]]]:
+        requests_by_file: dict[str, dict[str, dict[str, object]]] = {}
+
+        for target_host in self._fleet_hostnames(repo_dir):
+            secret_config = self._read_secret_generation_config(repo_dir, target_host)
+            if not secret_config or not secret_config.get("enable", True):
+                continue
+
+            sops_file = str(secret_config.get("sopsFile", "secrets/secrets.yaml"))
+            host_requests = secret_config.get("requests", {})
+            if not isinstance(host_requests, dict):
+                continue
+
+            file_requests = requests_by_file.setdefault(sops_file, {})
+            for secret_name, raw_spec in host_requests.items():
+                if not isinstance(raw_spec, dict):
+                    continue
+
+                request_spec = {
+                    "generator": str(raw_spec.get("generator", "base64")),
+                    "length": int(raw_spec.get("length", 48)),
+                }
+                existing_spec = file_requests.get(secret_name)
+                if existing_spec is not None and existing_spec != request_spec:
+                    raise RuntimeError(
+                        f"conflicting secret generation settings for {secret_name} in {sops_file}: {existing_spec} vs {request_spec}"
+                    )
+                file_requests[secret_name] = request_spec
+
+        return requests_by_file
+
+    def _sync_declared_secrets(self, repo_dir: str) -> bool:
+        requests_by_file = self._collect_secret_requests(repo_dir)
+        if not requests_by_file:
+            return False
+
+        repo_head_before = self._run_command(["git", "rev-parse", "HEAD"], cwd=repo_dir, stage="SECRET-HEAD-BEFORE")
+
+        for sops_file, requests in sorted(requests_by_file.items()):
+            if not requests:
+                continue
+
+            command = [
+                "nix-cluster-secret-ensure",
+                "--json",
+                "--git-sync",
+                "--quiet",
+                "--sops-file",
+                sops_file,
+            ]
+            command.extend(
+                f"{name}={spec['generator']}:{spec['length']}" for name, spec in sorted(requests.items())
+            )
+            self._run_command(command, cwd=repo_dir, stage=f"SECRET-SYNC-{sops_file}")
+
+        repo_head_after = self._run_command(["git", "rev-parse", "HEAD"], cwd=repo_dir, stage="SECRET-HEAD-AFTER")
+        return repo_head_before != repo_head_after
+
     def perform_update(self, trigger_id: str) -> str:
         if not UPDATE_LOCK.acquire(blocking=False):
             logger.info("NIX-CLUSTER UPDATE ALREADY RUNNING. SKIPPING TRIGGER: %s", trigger_id)
@@ -110,6 +192,7 @@ class UpdateManager:
             self._fetch(repo_dir, "GIT-FETCH")
             changed_files = self._get_changed_files(repo_dir)
             needs_rebuild = self._should_rebuild(changed_files)
+            secrets_changed = False
 
             if is_controller and controller_script:
                 logger.info("NODE IS CONTROLLER. SYNCING REPO BEFORE CONTROLLER SCRIPT...")
@@ -121,9 +204,15 @@ class UpdateManager:
                 except subprocess.CalledProcessError as error:
                     logger.warning("CONTROLLER-HOOK FAILED (non-fatal, continuing with rebuild): %s", error)
                 self._fetch(repo_dir, "GIT-FETCH-POST")
+
+            if is_controller:
+                self._reset(repo_dir, "GIT-RESET-SECRET-SYNC")
+                secrets_changed = self._sync_declared_secrets(repo_dir)
+                if secrets_changed:
+                    self._fetch(repo_dir, "GIT-FETCH-SECRET-POST")
                 changed_files = self._get_changed_files(repo_dir)
-                needs_rebuild = self._should_rebuild(changed_files)
-            elif not is_controller:
+                needs_rebuild = needs_rebuild or secrets_changed or self._should_rebuild(changed_files)
+            else:
                 logger.info(
                     "NODE IS WORKER. PAUSING %ss FOR CONTROLLER TO PROVISION SECRETS...",
                     self.runtime_config.update.worker_wait_seconds,
