@@ -958,6 +958,24 @@ if [ ! -f "flake.nix" ]; then
     fi
 fi
 
+if [ ! -f "$TARGET_DIR/lib/registry-modules.nix" ]; then
+    sudo -u "$SERVICE_USER" mkdir -p "$TARGET_DIR/lib"
+    sudo -u "$SERVICE_USER" cp --no-preserve=mode "$TEMPLATES_DIR/lib/registry-modules.nix" "$TARGET_DIR/lib/registry-modules.nix"
+    sudo -u "$SERVICE_USER" chmod u+w "$TARGET_DIR/lib/registry-modules.nix"
+fi
+
+if [ ! -f "$TARGET_DIR/registry/private/flake.nix" ]; then
+    sudo -u "$SERVICE_USER" mkdir -p "$TARGET_DIR/registry/private"
+    sudo -u "$SERVICE_USER" cp --no-preserve=mode "$TEMPLATES_DIR/registry/private/flake.nix" "$TARGET_DIR/registry/private/flake.nix"
+    sudo -u "$SERVICE_USER" chmod u+w "$TARGET_DIR/registry/private/flake.nix"
+fi
+
+if [ "$IS_BOOTSTRAP" = "true" ] && [ "${REGISTRY_MODE:-bundled}" = "registry" ]; then
+    sudo -u "$SERVICE_USER" sed -i 's|PRIVATE_APPS_PLACEHOLDER|      forgejo = ../../apps/forgejo/forgejo.nix;|' "$TARGET_DIR/registry/private/flake.nix"
+else
+    sudo -u "$SERVICE_USER" sed -i '/PRIVATE_APPS_PLACEHOLDER/d' "$TARGET_DIR/registry/private/flake.nix"
+fi
+
 if [ ! -f "$TARGET_DIR/deployments.json" ]; then
     log "Initializing deployments.json template..."
     sudo -u "$SERVICE_USER" cp --no-preserve=mode "$TEMPLATES_DIR/deployments.json" "$TARGET_DIR/deployments.json"
@@ -1164,14 +1182,14 @@ if [ ! -d "$GROUP_DIR" ]; then
     else
                 if [ "${REGISTRY_MODE:-bundled}" = "registry" ]; then
             cat <<'EOF' | sudo -u "$SERVICE_USER" tee "$GROUP_DIR/imports.nix" > /dev/null
-{ config, pkgs, inputs, ... }:
+{ registryModules, ... }:
 
 {
   imports = [
-        inputs.appRegistry.nixosApps.official.caddy
-        inputs.appRegistry.nixosApps.official.cloudflared
-        inputs.appRegistry.nixosApps.official.postgresBackup
-        inputs.appRegistry.nixosApps.official.keepalived
+        registryModules.official.caddy
+        registryModules.official.cloudflared
+        registryModules.official.postgresBackup
+        registryModules.official.keepalived
   ];
 }
 EOF
@@ -1344,16 +1362,24 @@ elif [ -n "$CUSTOM_NODE_IMPORTS" ]; then
     log "Using custom node imports.nix from $CUSTOM_NODE_IMPORTS"
     sudo -u "$SERVICE_USER" cp --no-preserve=mode "$CUSTOM_NODE_IMPORTS" "$IMPORTS_FILE"
 else
-    echo "{ config, pkgs, inputs, ... }: { imports = [" > "$IMPORTS_FILE"
+    if [ "${REGISTRY_MODE:-bundled}" = "registry" ]; then
+        echo "{ registryModules, ... }: { imports = [" > "$IMPORTS_FILE"
+    else
+        echo "{ config, pkgs, inputs, ... }: { imports = [" > "$IMPORTS_FILE"
+    fi
     echo "  ../../groups/$NODE_GROUP/configuration.nix" >> "$IMPORTS_FILE"
     echo "  ../../groups/$NODE_GROUP/imports.nix" >> "$IMPORTS_FILE"
     if [ "${REGISTRY_MODE:-bundled}" = "registry" ]; then
-        echo "  inputs.appRegistry.nixosApps.official.pxe" >> "$IMPORTS_FILE"
+        echo "  registryModules.official.pxe" >> "$IMPORTS_FILE"
     else
         echo "  ../../apps/pxe/pxe.nix" >> "$IMPORTS_FILE"
     fi
     if [ "$IS_BOOTSTRAP" = "true" ]; then
-        echo "  ../../apps/forgejo/forgejo.nix" >> "$IMPORTS_FILE"
+        if [ "${REGISTRY_MODE:-bundled}" = "registry" ]; then
+            echo "  registryModules.private.forgejo" >> "$IMPORTS_FILE"
+        else
+            echo "  ../../apps/forgejo/forgejo.nix" >> "$IMPORTS_FILE"
+        fi
     fi
     echo "];}" >> "$IMPORTS_FILE"
 fi
@@ -1653,7 +1679,7 @@ fi
 
 log "Adding node to Fleet flake.nix..."
 if ! grep -q "nixosConfigurations.$HOSTNAME" "$TARGET_DIR/flake.nix"; then
-    sudo -u "$SERVICE_USER" sed -i "/# NODES_MARKER/a \    nixosConfigurations.$HOSTNAME = nixpkgs.lib.nixosSystem { system = \"x86_64-linux\"; specialArgs = { inherit inputs; }; modules = [ ./nodes/$HOSTNAME/configuration.nix nixCluster.nixosModules.default ]; };" "$TARGET_DIR/flake.nix"
+    sudo -u "$SERVICE_USER" sed -i "/# NODES_MARKER/a \    nixosConfigurations.$HOSTNAME = nixpkgs.lib.nixosSystem { system = \"x86_64-linux\"; specialArgs = { inherit inputs registryModules; }; modules = [ ./nodes/$HOSTNAME/configuration.nix nixCluster.nixosModules.default ]; };" "$TARGET_DIR/flake.nix"
 else
     log "Node $HOSTNAME already exists in flake.nix. Skipping insertion."
 fi
