@@ -7,6 +7,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,30 @@ ACTIVE_STATES = {"active", "activating", "reloading"}
 REPEATED_WARNING_INTERVAL_SECONDS = 60.0
 MIN_AVAILABLE_MEMORY_BYTES = 512 * 1024 * 1024
 MIN_STATE_FREE_BYTES = 2 * 1024 * 1024 * 1024
+CLUSTER_STATE_KEY = "/nix-cluster/cluster-state"
+NODE_DETAIL_PREFIX = "/nix-cluster/node-details"
+MANAGED_UNITS_KEY = "/nix-cluster/scheduler/managed-units"
+IGNORED_DISK_FSTYPES = {
+    "autofs",
+    "binfmt_misc",
+    "bpf",
+    "cgroup",
+    "cgroup2",
+    "configfs",
+    "debugfs",
+    "devpts",
+    "devtmpfs",
+    "fusectl",
+    "hugetlbfs",
+    "mqueue",
+    "proc",
+    "pstore",
+    "securityfs",
+    "squashfs",
+    "sysfs",
+    "tmpfs",
+    "tracefs",
+}
 
 
 def _safe_int(raw: Any, default: int = 0) -> int:
@@ -32,6 +57,17 @@ def _safe_float(raw: Any, default: float = 0.0) -> float:
         return float(raw)
     except (TypeError, ValueError):
         return default
+
+
+def _dedupe_preserve_order(values: Iterable[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
 
 
 class ServiceReporter:
@@ -219,7 +255,8 @@ class WorkerReconciler:
         result = self.run_command([
             "systemctl", "show", unit,
             "--property=Id", "--property=LoadState", "--property=ActiveState", "--property=SubState",
-            "--property=UnitFileState", "--property=Result",
+            "--property=UnitFileState", "--property=Result", "--property=ExecMainPID",
+            "--property=ExecMainStatus", "--property=ActiveEnterTimestamp",
         ])
         if result.returncode != 0:
             return {
@@ -230,6 +267,9 @@ class WorkerReconciler:
                 "sub_state": "dead",
                 "unit_file_state": "unknown",
                 "result": "unknown",
+                "exec_main_pid": "0",
+                "exec_main_status": "0",
+                "active_enter_timestamp": "",
                 "healthy": False,
                 "observed_at": now,
             }
@@ -249,6 +289,9 @@ class WorkerReconciler:
             "sub_state": values.get("SubState", "unknown"),
             "unit_file_state": values.get("UnitFileState", "unknown"),
             "result": values.get("Result", "unknown"),
+            "exec_main_pid": values.get("ExecMainPID", "0"),
+            "exec_main_status": values.get("ExecMainStatus", "0"),
+            "active_enter_timestamp": values.get("ActiveEnterTimestamp", ""),
             "healthy": active_state in ACTIVE_STATES and load_state == "loaded",
             "observed_at": now,
         }
@@ -265,6 +308,48 @@ class WorkerReconciler:
             self.logger.warning("controller_status_read_failed path=%s error=%s", status_path, error)
             return True
         return bool(payload.get("reachable", True))
+
+    def collect_uptime_seconds(self) -> float:
+        try:
+            with open("/proc/uptime", "r", encoding="utf-8") as handle:
+                return _safe_float(handle.read().split()[0])
+        except (OSError, IndexError):
+            return 0.0
+
+    def collect_disk_snapshots(self) -> list[dict[str, Any]]:
+        disks: list[dict[str, Any]] = []
+        seen_mounts: set[str] = set()
+        try:
+            mount_lines = Path("/proc/mounts").read_text(encoding="utf-8").splitlines()
+        except OSError:
+            mount_lines = []
+
+        for line in mount_lines:
+            parts = line.split()
+            if len(parts) < 3:
+                continue
+            filesystem, mount, fstype = parts[:3]
+            if fstype in IGNORED_DISK_FSTYPES or mount in seen_mounts:
+                continue
+            seen_mounts.add(mount)
+            try:
+                stats = os.statvfs(mount)
+            except OSError:
+                continue
+            size = stats.f_frsize * stats.f_blocks
+            available = stats.f_frsize * stats.f_bavail
+            free = stats.f_frsize * stats.f_bfree
+            used = max(size - free, 0)
+            disks.append({
+                "filesystem": filesystem.replace("\\040", " "),
+                "type": fstype,
+                "mount": mount.replace("\\040", " "),
+                "size": size,
+                "used": used,
+                "available": available,
+                "used_percent": round((used / size) * 100, 1) if size else 0.0,
+            })
+        return sorted(disks, key=lambda item: str(item.get("mount", "")))
 
     def collect_resource_snapshot(self, now: int) -> dict[str, Any]:
         memory_total_bytes = 0
@@ -312,6 +397,64 @@ class WorkerReconciler:
             "schedulable": schedulable,
             "minimum_memory_available_bytes": MIN_AVAILABLE_MEMORY_BYTES,
             "minimum_state_dir_free_bytes": MIN_STATE_FREE_BYTES,
+        }
+
+    def build_node_detail(
+        self,
+        resource_snapshot: dict[str, Any],
+        units: dict[str, dict[str, Any]],
+        now: int,
+    ) -> dict[str, Any]:
+        memory_total = _safe_int(resource_snapshot.get("memory_total_bytes"))
+        memory_available = _safe_int(resource_snapshot.get("memory_available_bytes"))
+        memory_used = max(memory_total - memory_available, 0)
+        load_per_cpu = _safe_float(resource_snapshot.get("load_1_per_cpu"))
+        services = []
+        for unit, payload in sorted(units.items()):
+            status = payload.get("status_after") if isinstance(payload.get("status_after"), dict) else {}
+            services.append({
+                "name": unit,
+                "load_state": status.get("load_state", "unknown"),
+                "active_state": status.get("active_state", "unknown"),
+                "sub_state": status.get("sub_state", "unknown"),
+                "unit_file_state": status.get("unit_file_state", "unknown"),
+                "result": status.get("result", "unknown"),
+                "healthy": bool(status.get("healthy")),
+                "main_pid": _safe_int(status.get("exec_main_pid")),
+                "desired_owner": payload.get("desired_owner"),
+                "desired_local": bool(payload.get("desired_local")),
+                "active_local": bool(payload.get("active_local")),
+                "has_placement": bool(payload.get("has_placement")),
+                "last_action": payload.get("last_action"),
+                "last_action_reason": payload.get("last_action_reason"),
+                "last_action_success": bool(payload.get("last_action_success")),
+            })
+
+        return {
+            "hostname": self.hostname,
+            "observed_at": now,
+            "uptime_seconds": self.collect_uptime_seconds(),
+            "cpu": {
+                "count": _safe_int(resource_snapshot.get("cpu_count"), 1),
+                "load_1": _safe_float(resource_snapshot.get("load_1")),
+                "load_5": _safe_float(resource_snapshot.get("load_5")),
+                "load_15": _safe_float(resource_snapshot.get("load_15")),
+                "load_1_per_cpu": load_per_cpu,
+                "used_percent": round(max(0.0, min(100.0, load_per_cpu * 100)), 1),
+            },
+            "memory": {
+                "total": memory_total,
+                "used": memory_used,
+                "available": memory_available,
+                "used_percent": round((memory_used / memory_total) * 100, 1) if memory_total else 0.0,
+                "swap_total": 0,
+                "swap_used": 0,
+            },
+            "disks": self.collect_disk_snapshots(),
+            "services": services,
+            "processes": [],
+            "schedulable": bool(resource_snapshot.get("schedulable")),
+            "controller_reachable": bool(resource_snapshot.get("controller_reachable", True)),
         }
 
     def reconcile_unit(
@@ -467,6 +610,7 @@ class WorkerReconciler:
         managed_units = sorted(set(self.config.ha.scheduler.managed_units))
         placement_prefix = self.config.ha.scheduler.placement_prefix.rstrip("/")
         resource_prefix = self.config.ha.scheduler.resource_prefix.rstrip("/")
+        node_detail_prefix = NODE_DETAIL_PREFIX.rstrip("/")
         reconcile_state_path = Path(self.config.directories.state) / "ha" / "scheduler-reconciler.json"
         resource_state_path = Path(self.config.directories.state) / "ha" / "scheduler-resources.json"
         metrics_path = Path(self.config.directories.metrics) / "scheduler-reconciler.prom"
@@ -536,8 +680,11 @@ class WorkerReconciler:
                     "resource": last_resource_snapshot,
                     "managed_units": units,
                 }
+                node_detail = self.build_node_detail(last_resource_snapshot, units, now)
                 atomic_write_json(reconcile_state_path, reconcile_state)
                 atomic_write_text(metrics_path, self.build_metric_lines(last_resource_snapshot, units, now))
+                if node_detail_prefix:
+                    etcd.put_json(f"{node_detail_prefix}/{self.hostname}", node_detail)
             except RuntimeStoreRateLimited as error:
                 retry_after = error.retry_after if error.retry_after is not None else max(5.0, float(interval))
                 backoff_until = time.monotonic() + retry_after
@@ -745,13 +892,14 @@ class ClusterMonitor:
         resource_records: dict[str, dict[str, Any]],
         *,
         reports: dict[str, dict[str, Any]] | None = None,
+        current_owner: str | None = None,
         now: int,
         stale_after: int,
     ) -> str | None:
         if not candidate_nodes:
             return None
         strategy = self.config.ha.scheduler.default_strategy
-        prior = self.previous_targets.get(service)
+        prior = current_owner or self.previous_targets.get(service)
         ranked_nodes = self.rank_nodes_by_resources(candidate_nodes, resource_records, reports=reports, now=now, stale_after=stale_after)
         schedulable_nodes = [
             host for host in ranked_nodes
@@ -763,7 +911,15 @@ class ClusterMonitor:
                 return prior
 
         if schedulable_nodes:
+            if prior and prior not in healthy_nodes:
+                next_nodes = [host for host in schedulable_nodes if host != prior]
+                if next_nodes:
+                    return next_nodes[0]
             return schedulable_nodes[0]
+        if prior and prior not in healthy_nodes:
+            next_nodes = [host for host in ranked_nodes if host != prior]
+            if next_nodes:
+                return next_nodes[0]
         return ranked_nodes[0]
 
     def build_cluster_metrics(self, cluster_state: dict[str, Any]) -> str:
@@ -847,11 +1003,12 @@ class ClusterMonitor:
         interval = max(1, self.config.ha.scheduler.interval_seconds)
         resource_prefix = self.config.ha.scheduler.resource_prefix.rstrip("/")
         resource_stale_after = max(stale_after, self.config.ha.scheduler.resource_interval_seconds * 3)
-        managed_units = set(self.config.ha.scheduler.managed_units)
+        managed_units = set(_dedupe_preserve_order(self.config.ha.scheduler.managed_units))
         cluster_state_path = Path(self.config.directories.state) / "ha" / "cluster-state.json"
         metrics_path = Path(self.config.directories.metrics) / "cluster-state.prom"
         etcd = EtcdClient(endpoint)
         placement_prefix = self.config.ha.scheduler.placement_prefix.rstrip("/")
+        node_detail_prefix = NODE_DETAIL_PREFIX.rstrip("/")
         backoff_until = 0.0
 
         self.logger.info("starting controller monitor on %s", self.controller)
@@ -869,6 +1026,18 @@ class ClusterMonitor:
                         host = self.host_from_resource_key(resource_prefix, key)
                         if host:
                             resource_records[host] = payload
+                node_details: dict[str, dict[str, Any]] = {}
+                if node_detail_prefix:
+                    for key, payload in etcd.get_prefix(node_detail_prefix).items():
+                        host = self.host_from_resource_key(node_detail_prefix, key)
+                        if host:
+                            node_details[host] = payload
+                current_placements: dict[str, dict[str, Any]] = {}
+                if placement_prefix:
+                    for key, payload in etcd.get_prefix(placement_prefix).items():
+                        service = key.removeprefix(placement_prefix + "/")
+                        if service:
+                            current_placements[service] = payload
                 services: dict[str, dict[str, Any]] = {}
                 placement_updates: dict[str, dict[str, Any]] = {}
                 for key, payload in records.items():
@@ -890,6 +1059,16 @@ class ClusterMonitor:
                         else:
                             service_entry["unhealthy_nodes"].append(host)
 
+                for service in managed_units:
+                    services.setdefault(service, {
+                        "candidate_nodes": [],
+                        "healthy_nodes": [],
+                        "unhealthy_nodes": [],
+                        "stale_nodes": [],
+                        "recommended_target": None,
+                        "reports": {},
+                    })
+
                 for service, payload in services.items():
                     payload["candidate_nodes"].sort()
                     payload["healthy_nodes"].sort()
@@ -904,16 +1083,19 @@ class ClusterMonitor:
                         now=now,
                         stale_after=resource_stale_after,
                     )
+                    current_placement = current_placements.get(service, {})
+                    current_owner = str(current_placement.get("desired_owner") or "") or None
                     target = self.choose_desired_owner(
                         service,
                         candidate_nodes,
                         healthy_nodes,
                         resource_records,
                         reports=payload["reports"],
+                        current_owner=current_owner,
                         now=now,
                         stale_after=resource_stale_after,
                     )
-                    prior = self.previous_targets.get(service)
+                    prior = current_owner or self.previous_targets.get(service)
                     if prior != target and (prior is not None or target is not None):
                         self.logger.info(
                             "service_target_change service=%s previous=%s current=%s candidate_nodes=%s healthy_nodes=%s",
@@ -924,12 +1106,22 @@ class ClusterMonitor:
                     payload["placement_strategy"] = self.config.ha.scheduler.default_strategy
                     payload["placement_key"] = f"{placement_prefix}/{service}"
                     payload["scheduler_managed"] = service in managed_units
+                    payload["current_owner"] = current_owner
                     payload["desired_owner"] = target if (is_leader and service in managed_units) else None
                     payload["placement_published_at"] = now if (is_leader and service in managed_units) else None
                     self.previous_targets[service] = target
                     if is_leader and service in managed_units:
+                        if not candidate_nodes:
+                            transition_reason = "no_candidate_nodes"
+                        elif current_owner and current_owner != target:
+                            transition_reason = "current_owner_unhealthy_or_less_available"
+                        elif current_owner == target:
+                            transition_reason = "current_owner_retained"
+                        else:
+                            transition_reason = "best_available_candidate"
                         placement_updates[payload["placement_key"]] = {
                             "service": service,
+                            "current_owner": current_owner,
                             "desired_owner": target,
                             "controller": self.controller,
                             "leader": leader_payload.get("hostname", self.controller),
@@ -939,6 +1131,8 @@ class ClusterMonitor:
                             "healthy_nodes": payload["healthy_nodes"],
                             "unhealthy_nodes": payload["unhealthy_nodes"],
                             "stale_nodes": payload["stale_nodes"],
+                            "resource_ranked_nodes": ranked_nodes,
+                            "transition_reason": transition_reason,
                             "updated_at": now,
                         }
                     if not healthy_nodes:
@@ -948,9 +1142,13 @@ class ClusterMonitor:
                                 service, ",".join(payload["unhealthy_nodes"]), ",".join(payload["stale_nodes"]),
                             )
 
-                if is_leader and placement_updates:
-                    etcd.put_json_many(placement_updates)
-
+                managed_registry = {
+                    "observed_at": now,
+                    "controller": self.controller,
+                    "leader": leader_payload.get("hostname", self.controller),
+                    "placement_prefix": placement_prefix,
+                    "units": sorted(managed_units),
+                }
                 cluster_state = {
                     "controller": self.controller,
                     "observed_at": now,
@@ -967,8 +1165,17 @@ class ClusterMonitor:
                         "resource_stale_after_seconds": resource_stale_after,
                     },
                     "resources": resource_records,
+                    "node_details": node_details,
+                    "managed_units": managed_registry,
                     "services": services,
                 }
+                etcd_updates = {
+                    CLUSTER_STATE_KEY: cluster_state,
+                    MANAGED_UNITS_KEY: managed_registry,
+                }
+                if is_leader and placement_updates:
+                    etcd_updates.update(placement_updates)
+                etcd.put_json_many(etcd_updates)
                 atomic_write_json(cluster_state_path, cluster_state)
                 atomic_write_text(metrics_path, self.build_cluster_metrics(cluster_state))
             except RuntimeStoreRateLimited as error:
