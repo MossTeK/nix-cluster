@@ -510,6 +510,13 @@ run_cloudflare_provisioning() {
 
 log "Initializing nix-cluster fleet enrollment for $HOSTNAME..."
 
+SETUP_LOCK_DIR="/run/nix-cluster-setup.lock"
+if ! mkdir "$SETUP_LOCK_DIR" 2>/dev/null; then
+    warn "Another nix-cluster enrollment is already running on this node. Skipping this duplicate invocation."
+    exit 75
+fi
+trap 'rmdir "$SETUP_LOCK_DIR" 2>/dev/null || true; exit 0' EXIT
+
 # Wipes the nix-cluster user, home directory, and age key to allow a clean re-enrollment.
 if [ "$CLEAN" = true ]; then
     log "--clean flag detected. Wiping previous nix-cluster state..."
@@ -1838,11 +1845,28 @@ fi
 # created BY the first nixos-rebuild — not before it.  Pre-create a temporary swap
 # so the rebuild itself doesn't OOM.  Cleaned up after the rebuild completes.
 BOOTSTRAP_SWAP_FILE="/var/lib/nix-cluster-bootstrap-swap"
+BOOTSTRAP_ZRAM_DEVICE=""
 BOOTSTRAP_SWAP_CREATED=0
 if [ "$AVAILABLE_GB" -lt 16 ]; then
     CURRENT_SWAP_KB=$(grep -s SwapTotal /proc/meminfo | awk '{print $2}')
     if [ "${CURRENT_SWAP_KB:-0}" -lt 1024 ]; then
         log "No swap found on low-memory system. Pre-creating 4GB bootstrap swap to protect initial rebuild..."
+        if command -v zramctl >/dev/null 2>&1 && { modprobe zram 2>/dev/null || true; }; then
+            BOOTSTRAP_ZRAM_DEVICE=$(zramctl --find --size 4G 2>/dev/null || true)
+            if [ -n "$BOOTSTRAP_ZRAM_DEVICE" ] && mkswap "$BOOTSTRAP_ZRAM_DEVICE" >/dev/null 2>&1 && swapon "$BOOTSTRAP_ZRAM_DEVICE"; then
+                log "Bootstrap zram swap activated (4GB) at $BOOTSTRAP_ZRAM_DEVICE"
+                BOOTSTRAP_SWAP_CREATED=1
+            else
+                if [ -n "$BOOTSTRAP_ZRAM_DEVICE" ]; then
+                    zramctl --reset "$BOOTSTRAP_ZRAM_DEVICE" 2>/dev/null || true
+                    BOOTSTRAP_ZRAM_DEVICE=""
+                fi
+                warn "Failed to activate bootstrap zram swap — trying a swapfile fallback."
+            fi
+        fi
+    fi
+    CURRENT_SWAP_KB=$(grep -s SwapTotal /proc/meminfo | awk '{print $2}')
+    if [ "${CURRENT_SWAP_KB:-0}" -lt 1024 ]; then
         rm -f "$BOOTSTRAP_SWAP_FILE"
         # Use dd instead of fallocate.  On ZFS and some copy-on-write filesystems
         # fallocate can produce a sparse file with holes, and swapon refuses those
@@ -1897,6 +1921,20 @@ cleanup_bootstrap_git_credentials() {
     fi
 }
 
+cleanup_bootstrap_swap() {
+    if [ "${BOOTSTRAP_SWAP_CREATED:-0}" -eq 1 ]; then
+        if [ -n "${BOOTSTRAP_ZRAM_DEVICE:-}" ]; then
+            swapoff "$BOOTSTRAP_ZRAM_DEVICE" 2>/dev/null || true
+            zramctl --reset "$BOOTSTRAP_ZRAM_DEVICE" 2>/dev/null || true
+            log "Bootstrap zram swap cleaned up."
+        elif [ -f "$BOOTSTRAP_SWAP_FILE" ]; then
+            swapoff "$BOOTSTRAP_SWAP_FILE" 2>/dev/null || true
+            rm -f "$BOOTSTRAP_SWAP_FILE"
+            log "Bootstrap swap cleaned up."
+        fi
+    fi
+}
+
 setup_bootstrap_git_credentials
 REBUILD_ENV=(
     env
@@ -1909,19 +1947,16 @@ if [ -n "${BOOTSTRAP_GIT_CONFIG:-}" ]; then
 fi
 if ! sudo "${REBUILD_ENV[@]}" nixos-rebuild switch --flake "$TARGET_DIR#$HOSTNAME" --impure; then
     cleanup_bootstrap_git_credentials
+    cleanup_bootstrap_swap
     log_rebuild_failure_details
     warn "Initial rebuild failed. Check secrets authorization or syntax errors and run activation manually."
     exit 1
 fi
 cleanup_bootstrap_git_credentials
 
-# Remove the temporary bootstrap swap now that the rebuild has activated the
-# permanent swapDevices entry from hardware-configuration.nix.
-if [ "$BOOTSTRAP_SWAP_CREATED" -eq 1 ]; then
-    swapoff "$BOOTSTRAP_SWAP_FILE" 2>/dev/null || true
-    rm -f "$BOOTSTRAP_SWAP_FILE"
-    log "Bootstrap swap cleaned up."
-fi
+# Remove temporary bootstrap swap now that the rebuild has activated the
+# permanent memory/swap configuration.
+cleanup_bootstrap_swap
 
 # Bootstrap Handoff: API integration with Forgejo
 if [ "$IS_BOOTSTRAP" = "true" ]; then
