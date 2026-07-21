@@ -1817,8 +1817,11 @@ if [ "$AVAILABLE_GB" -lt 16 ]; then
     CURRENT_SWAP_KB=$(grep -s SwapTotal /proc/meminfo | awk '{print $2}')
     if [ "${CURRENT_SWAP_KB:-0}" -lt 1024 ]; then
         log "No swap found on low-memory system. Pre-creating 4GB bootstrap swap to protect initial rebuild..."
-        if fallocate -l 4G "$BOOTSTRAP_SWAP_FILE" 2>/dev/null \
-           || dd if=/dev/zero of="$BOOTSTRAP_SWAP_FILE" bs=1M count=4096 status=none 2>/dev/null; then
+        rm -f "$BOOTSTRAP_SWAP_FILE"
+        # Use dd instead of fallocate.  On ZFS and some copy-on-write filesystems
+        # fallocate can produce a sparse file with holes, and swapon refuses those
+        # exactly when the bootstrap rebuild needs memory headroom most.
+        if dd if=/dev/zero of="$BOOTSTRAP_SWAP_FILE" bs=1M count=4096 status=none 2>/dev/null; then
             chmod 600 "$BOOTSTRAP_SWAP_FILE"
             if mkswap "$BOOTSTRAP_SWAP_FILE" >/dev/null 2>&1 && swapon "$BOOTSTRAP_SWAP_FILE"; then
                 log "Bootstrap swap activated (4GB) at $BOOTSTRAP_SWAP_FILE"
@@ -1833,11 +1836,58 @@ if [ "$AVAILABLE_GB" -lt 16 ]; then
     fi
 fi
 
-if ! sudo NIXPKGS_ALLOW_UNFREE=1 nixos-rebuild switch --flake "$TARGET_DIR#$HOSTNAME" --impure; then
+BOOTSTRAP_GIT_DIR="/run/nix-cluster-bootstrap"
+BOOTSTRAP_GIT_CONFIG=""
+setup_bootstrap_git_credentials() {
+    [ -n "${GIT_USER:-}" ] && [ -n "${GIT_PASS:-}" ] || return 0
+    sudo install -d -m 0700 "$BOOTSTRAP_GIT_DIR"
+    printf '%s' "$GIT_USER" | sudo tee "$BOOTSTRAP_GIT_DIR/git-username" >/dev/null
+    printf '%s' "$GIT_PASS" | sudo tee "$BOOTSTRAP_GIT_DIR/git-password" >/dev/null
+    sudo chmod 0600 "$BOOTSTRAP_GIT_DIR/git-username" "$BOOTSTRAP_GIT_DIR/git-password"
+    sudo tee "$BOOTSTRAP_GIT_DIR/git-credential-helper" >/dev/null <<'EOF'
+#!/bin/sh
+case "$1" in
+  get|"")
+    printf 'username=%s\n' "$(cat /run/nix-cluster-bootstrap/git-username)"
+    printf 'password=%s\n' "$(cat /run/nix-cluster-bootstrap/git-password)"
+    ;;
+esac
+EOF
+    sudo chmod 0700 "$BOOTSTRAP_GIT_DIR/git-credential-helper"
+    sudo tee "$BOOTSTRAP_GIT_DIR/gitconfig" >/dev/null <<EOF
+[credential]
+	helper = $BOOTSTRAP_GIT_DIR/git-credential-helper
+[safe]
+	directory = $TARGET_DIR
+EOF
+    sudo chmod 0600 "$BOOTSTRAP_GIT_DIR/gitconfig"
+    BOOTSTRAP_GIT_CONFIG="$BOOTSTRAP_GIT_DIR/gitconfig"
+    log "Temporary bootstrap Git credential helper prepared for first rebuild."
+}
+
+cleanup_bootstrap_git_credentials() {
+    if [ -n "${BOOTSTRAP_GIT_DIR:-}" ] && [ -d "$BOOTSTRAP_GIT_DIR" ]; then
+        sudo rm -rf "$BOOTSTRAP_GIT_DIR"
+    fi
+}
+
+setup_bootstrap_git_credentials
+REBUILD_ENV=(
+    env
+    NIXPKGS_ALLOW_UNFREE=1
+    NIX_BUILD_CORES="${NIX_BUILD_CORES:-}"
+    NIX_BUILD_MAX_JOBS="${NIX_BUILD_MAX_JOBS:-}"
+)
+if [ -n "${BOOTSTRAP_GIT_CONFIG:-}" ]; then
+    REBUILD_ENV+=(GIT_CONFIG_GLOBAL="$BOOTSTRAP_GIT_CONFIG")
+fi
+if ! sudo "${REBUILD_ENV[@]}" nixos-rebuild switch --flake "$TARGET_DIR#$HOSTNAME" --impure; then
+    cleanup_bootstrap_git_credentials
     log_rebuild_failure_details
     warn "Initial rebuild failed. Check secrets authorization or syntax errors and run activation manually."
     exit 1
 fi
+cleanup_bootstrap_git_credentials
 
 # Remove the temporary bootstrap swap now that the rebuild has activated the
 # permanent swapDevices entry from hardware-configuration.nix.

@@ -1147,6 +1147,59 @@ publish_join_state() {
   publish_join_record "$HOSTNAME" "$join_payload"
 }
 
+join_backoff_dir() {
+  printf '%s\n' "/var/lib/nix-cluster/join-backoff"
+}
+
+join_backoff_file() {
+  printf '%s/%s.env\n' "$(join_backoff_dir)" "$(sanitize_path_component "$HOSTNAME")"
+}
+
+clear_join_failure() {
+  rm -f "$(join_backoff_file)" 2>/dev/null || true
+}
+
+record_join_failure() {
+  local reason="$1"
+  local file attempt delay next_epoch
+
+  mkdir -p "$(join_backoff_dir)"
+  file=$(join_backoff_file)
+  attempt=0
+  if [ -r "$file" ]; then
+    # shellcheck disable=SC1090
+    . "$file" || true
+  fi
+  attempt=$(( ${attempt:-0} + 1 ))
+  delay=$(( 300 * (2 ** (attempt - 1)) ))
+  if [ "$delay" -gt 3600 ]; then
+    delay=3600
+  fi
+  next_epoch=$(( $(date +%s) + delay ))
+  {
+    printf 'attempt=%s\n' "$attempt"
+    printf 'next_epoch=%s\n' "$next_epoch"
+    printf 'reason=%q\n' "$reason"
+  } > "$file"
+  publish_join_state "enroll-backoff" "attempt=$attempt retry_after=${delay}s reason=$reason"
+}
+
+should_defer_join() {
+  local file now remaining
+
+  file=$(join_backoff_file)
+  [ -r "$file" ] || return 1
+  # shellcheck disable=SC1090
+  . "$file" || return 1
+  now=$(date +%s)
+  if [ "${next_epoch:-0}" -gt "$now" ]; then
+    remaining=$(( next_epoch - now ))
+    publish_join_state "enroll-backoff" "retry_after=${remaining}s reason=${reason:-previous enrollment failure}"
+    return 0
+  fi
+  return 1
+}
+
 run_custom_install_phase() {
   local phase_name="$1"
   local script_body="$2"
@@ -1465,6 +1518,11 @@ while read -r node; do
     if run_remote_sudo_command "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" auto "systemctl is-active --quiet nix-cluster.service || systemctl is-active --quiet nops.service"; then
       echo "[nix-cluster] $HOSTNAME detected as Base OS and already enrolled, skipping."
       publish_join_state "enrolled" "nix-cluster service already present"
+      clear_join_failure
+      continue
+    fi
+
+    if should_defer_join; then
       continue
     fi
 
@@ -1541,24 +1599,28 @@ while read -r node; do
 
     if copy_to_remote "$CONFIG_JSON" "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" /tmp/nix-cluster-config.json auto; then
       publish_join_state "install-triggered" "remote nix-cluster install command started"
-      if run_remote_sudo_command "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" auto "sed -i '/git.smallguytech.org/d' /etc/hosts 2>/dev/null || true; nix --extra-experimental-features 'nix-command flakes' shell nixpkgs#git -c nix --extra-experimental-features 'nix-command flakes' run git+NIX_CLUSTER_INSTALL_REPO_URL_PLACEHOLDER#install -- --config /tmp/nix-cluster-config.json"; then
+      if run_remote_sudo_command "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" auto "if [ -z '${REPO_HOST_IP_FOR_WORKERS}' ]; then sed -i '/git.smallguytech.org/d' /etc/hosts 2>/dev/null || true; fi; nix --extra-experimental-features 'nix-command flakes' shell nixpkgs#git -c nix --extra-experimental-features 'nix-command flakes' run --refresh git+NIX_CLUSTER_INSTALL_REPO_URL_PLACEHOLDER#install -- --config /tmp/nix-cluster-config.json"; then
         publish_join_state "post-install-verify" "verifying runtime config and nix-cluster service"
         if verify_worker_enrollment 18; then
           echo "[nix-cluster] === NODE JOINED SUCCESSFULLY: $HOSTNAME ==="
           emit_install_journal "NODE_JOINED_SUCCESS host=$HOSTNAME ip=$INSTALLER_IP"
           publish_join_state "join-complete" "worker enrollment completed successfully"
+          clear_join_failure
         else
           echo "[nix-cluster] $HOSTNAME enrollment finished but verification failed."
           capture_failure_artifacts "post-enrollment verification failed"
           publish_join_state "enroll-incomplete" "post-enrollment verification failed; logs in $CURRENT_NODE_LOG_DIR"
+          record_join_failure "post-enrollment verification failed"
         fi
       else
         echo "[nix-cluster] $HOSTNAME enrollment command failed."
         publish_join_state "enroll-failed" "remote nix-cluster install command failed"
+        record_join_failure "remote nix-cluster install command failed"
       fi
     else
       echo "[nix-cluster] Failed to copy worker config to $HOSTNAME. Skipping enrollment."
       publish_join_state "enroll-failed" "failed to copy installer config to target"
+      record_join_failure "failed to copy installer config to target"
     fi
 
     rm -f "$CONFIG_JSON"
@@ -1575,6 +1637,7 @@ while read -r node; do
       else
       echo "[nix-cluster] $HOSTNAME already active, skipping."
       publish_join_state "active" "node reachable with controller key"
+      clear_join_failure
       continue
       fi
     else
@@ -1612,6 +1675,7 @@ while read -r node; do
     if [ "$REINSTALL" != "true" ] && run_remote_sudo_command "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" auto "systemctl is-active --quiet nix-cluster.service || systemctl is-active --quiet nops.service"; then
       echo "[nix-cluster] $HOSTNAME detected as Base OS and already enrolled, skipping."
       publish_join_state "enrolled" "nix-cluster service already present"
+      clear_join_failure
       continue
     fi
 
@@ -1645,6 +1709,9 @@ while read -r node; do
 
     echo "[nix-cluster] $HOSTNAME detected as Base OS, enrolling..."
     publish_join_state "enrolling" "copying runtime config and running installer"
+    if should_defer_join; then
+      continue
+    fi
 
     CONFIG_JSON=$(mktemp)
     if [ -n "$NIX_CLUSTER_CONFIG_TEMPLATE_INPUT" ]; then
@@ -1716,24 +1783,28 @@ while read -r node; do
 
     if copy_to_remote "$CONFIG_JSON" "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" /tmp/nix-cluster-config.json auto; then
       publish_join_state "install-triggered" "remote nix-cluster install command started"
-      if run_remote_sudo_command "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" auto "sed -i '/git.smallguytech.org/d' /etc/hosts 2>/dev/null || true; nix --extra-experimental-features 'nix-command flakes' shell nixpkgs#git -c nix --extra-experimental-features 'nix-command flakes' run git+NIX_CLUSTER_INSTALL_REPO_URL_PLACEHOLDER#install -- --config /tmp/nix-cluster-config.json"; then
+      if run_remote_sudo_command "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" auto "if [ -z '${REPO_HOST_IP_FOR_WORKERS}' ]; then sed -i '/git.smallguytech.org/d' /etc/hosts 2>/dev/null || true; fi; nix --extra-experimental-features 'nix-command flakes' shell nixpkgs#git -c nix --extra-experimental-features 'nix-command flakes' run --refresh git+NIX_CLUSTER_INSTALL_REPO_URL_PLACEHOLDER#install -- --config /tmp/nix-cluster-config.json"; then
         publish_join_state "post-install-verify" "verifying runtime config and nix-cluster service"
         if verify_worker_enrollment 18; then
           echo "[nix-cluster] === NODE JOINED SUCCESSFULLY: $HOSTNAME ==="
           emit_install_journal "NODE_JOINED_SUCCESS host=$HOSTNAME ip=$INSTALLER_IP"
           publish_join_state "join-complete" "worker enrollment completed successfully"
+          clear_join_failure
         else
           echo "[nix-cluster] $HOSTNAME enrollment finished but verification failed."
           capture_failure_artifacts "post-enrollment verification failed"
           publish_join_state "enroll-incomplete" "post-enrollment verification failed; logs in $CURRENT_NODE_LOG_DIR"
+          record_join_failure "post-enrollment verification failed"
         fi
       else
         echo "[nix-cluster] $HOSTNAME enrollment command failed."
         publish_join_state "enroll-failed" "remote nix-cluster install command failed"
+        record_join_failure "remote nix-cluster install command failed"
       fi
     else
       echo "[nix-cluster] Failed to copy worker config to $HOSTNAME. Skipping enrollment."
       publish_join_state "enroll-failed" "failed to copy installer config to target"
+      record_join_failure "failed to copy installer config to target"
     fi
 
     rm -f "$CONFIG_JSON"

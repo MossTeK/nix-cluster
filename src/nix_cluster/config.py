@@ -270,7 +270,7 @@ class RuntimeConfig:
                 mode=str(reporting_raw.get("mode", "only")),
                 services=_as_list(reporting_raw.get("services", [])),
                 include_tracked_units=_as_bool(reporting_raw.get("include_tracked_units"), True),
-                interval_seconds=_as_int(reporting_raw.get("interval_seconds"), 5),
+                interval_seconds=_as_int(reporting_raw.get("interval_seconds"), 15),
             ),
             runtime_store=RuntimeStoreSettings(
                 type=str(runtime_store_raw.get("type", "none")),
@@ -278,7 +278,7 @@ class RuntimeConfig:
                 key_prefix=str(runtime_store_raw.get("key_prefix", "/nix-cluster/health")),
                 inventory_prefix=str(runtime_store_raw.get("inventory_prefix", "/nix-cluster/inventory")),
                 join_prefix=str(runtime_store_raw.get("join_prefix", "/nix-cluster/join")),
-                stale_after_seconds=_as_int(runtime_store_raw.get("stale_after_seconds"), 15),
+                stale_after_seconds=_as_int(runtime_store_raw.get("stale_after_seconds"), 45),
                 local_server=LocalRuntimeStoreSettings(
                     enable=_as_bool(local_server_raw.get("enable"), False),
                     name=str(local_server_raw.get("name", "")),
@@ -292,19 +292,19 @@ class RuntimeConfig:
             ),
             scheduler=SchedulerSettings(
                 enable=_as_bool(scheduler_raw.get("enable"), False),
-                interval_seconds=_as_int(scheduler_raw.get("interval_seconds"), 5),
+                interval_seconds=_as_int(scheduler_raw.get("interval_seconds"), 15),
                 controller_mode=str(scheduler_raw.get("controller_mode", "fixed")),
                 fixed_controller_host=str(scheduler_raw.get("fixed_controller_host", "")),
                 leader_key=str(scheduler_raw.get("leader_key", "/nix-cluster/scheduler/leader")),
                 placement_prefix=str(scheduler_raw.get("placement_prefix", "/nix-cluster/scheduler/placement")),
-                lease_ttl_seconds=_as_int(scheduler_raw.get("lease_ttl_seconds"), 15),
+                lease_ttl_seconds=_as_int(scheduler_raw.get("lease_ttl_seconds"), 45),
                 default_strategy=str(scheduler_raw.get("default_strategy", "prefer-current-healthy")),
                 managed_units=_as_list(scheduler_raw.get("managed_units", [])),
                 reconciler_enable=_as_bool(scheduler_raw.get("reconciler_enable"), False),
-                reconciler_interval_seconds=_as_int(scheduler_raw.get("reconciler_interval_seconds"), 5),
+                reconciler_interval_seconds=_as_int(scheduler_raw.get("reconciler_interval_seconds"), 15),
                 reconciler_dry_run=_as_bool(scheduler_raw.get("reconciler_dry_run"), False),
                 resource_prefix=str(scheduler_raw.get("resource_prefix", "/nix-cluster/scheduler/resources")),
-                resource_interval_seconds=_as_int(scheduler_raw.get("resource_interval_seconds"), 15),
+                resource_interval_seconds=_as_int(scheduler_raw.get("resource_interval_seconds"), 30),
             ),
         )
 
