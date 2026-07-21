@@ -605,6 +605,13 @@ CONTROLLER_HOSTNAME=$(hostname -s)
 CONTROLLER_PRIMARY_IP=$(detect_primary_ip)
 REPO_HOST_IP_FOR_WORKERS=""
 echo "[nix-cluster] repo_host_ip source=public_dns value=unset"
+REPO_URL_FOR_WORKERS="$REPO_URL"
+NIX_CLUSTER_INSTALL_REPO_URL_FOR_WORKERS="NIX_CLUSTER_INSTALL_REPO_URL_PLACEHOLDER"
+if [ -n "$REPO_HOST_IP_FOR_WORKERS" ]; then
+  REPO_URL_FOR_WORKERS=$(printf '%s' "$REPO_URL_FOR_WORKERS" | sed 's|^https://|http://|')
+  NIX_CLUSTER_INSTALL_REPO_URL_FOR_WORKERS=$(printf '%s' "$NIX_CLUSTER_INSTALL_REPO_URL_FOR_WORKERS" | sed 's|^https://|http://|')
+  echo "[nix-cluster] worker Git bootstrap uses internal HTTP while host is pinned to the controller LAN"
+fi
 
 ssh_with_key() {
   local remote="$1"
@@ -1534,7 +1541,7 @@ while read -r node; do
       jq \
         --arg git_user "$GIT_USER" \
         --arg git_token "$GIT_PASS" \
-        --arg repo_url "$REPO_URL" \
+        --arg repo_url "$REPO_URL_FOR_WORKERS" \
         --arg repo_host_ip "$REPO_HOST_IP_FOR_WORKERS" \
         --arg node_group "$NODE_GROUP" \
         --arg admin "$NODE_ADMIN" \
@@ -1578,7 +1585,7 @@ while read -r node; do
       jq -n \
         --arg git_user "$GIT_USER" \
         --arg git_token "$GIT_PASS" \
-        --arg repo_url "$REPO_URL" \
+        --arg repo_url "$REPO_URL_FOR_WORKERS" \
         --arg repo_host_ip "$REPO_HOST_IP_FOR_WORKERS" \
         --arg node_group "$NODE_GROUP" \
         --arg admin "$NODE_ADMIN" \
@@ -1599,7 +1606,7 @@ while read -r node; do
 
     if copy_to_remote "$CONFIG_JSON" "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" /tmp/nix-cluster-config.json auto; then
       publish_join_state "install-triggered" "remote nix-cluster install command started"
-      if run_remote_sudo_command "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" auto "if [ -z '${REPO_HOST_IP_FOR_WORKERS}' ]; then sed -i '/git.smallguytech.org/d' /etc/hosts 2>/dev/null || true; fi; nix --extra-experimental-features 'nix-command flakes' shell nixpkgs#git -c nix --extra-experimental-features 'nix-command flakes' run --refresh git+NIX_CLUSTER_INSTALL_REPO_URL_PLACEHOLDER#install -- --config /tmp/nix-cluster-config.json"; then
+      if run_remote_sudo_command "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" auto "if [ -z '${REPO_HOST_IP_FOR_WORKERS}' ]; then sed -i '/git.smallguytech.org/d' /etc/hosts 2>/dev/null || true; fi; nix --extra-experimental-features 'nix-command flakes' shell nixpkgs#git -c nix --extra-experimental-features 'nix-command flakes' run --refresh git+${NIX_CLUSTER_INSTALL_REPO_URL_FOR_WORKERS}#install -- --config /tmp/nix-cluster-config.json"; then
         publish_join_state "post-install-verify" "verifying runtime config and nix-cluster service"
         if verify_worker_enrollment 18; then
           echo "[nix-cluster] === NODE JOINED SUCCESSFULLY: $HOSTNAME ==="
@@ -1718,7 +1725,7 @@ while read -r node; do
       jq \
         --arg git_user "$GIT_USER" \
         --arg git_token "$GIT_PASS" \
-        --arg repo_url "$REPO_URL" \
+        --arg repo_url "$REPO_URL_FOR_WORKERS" \
         --arg repo_host_ip "$REPO_HOST_IP_FOR_WORKERS" \
         --arg node_group "$NODE_GROUP" \
         --arg admin "$NODE_ADMIN" \
@@ -1762,7 +1769,7 @@ while read -r node; do
       jq -n \
         --arg git_user "$GIT_USER" \
         --arg git_token "$GIT_PASS" \
-        --arg repo_url "$REPO_URL" \
+        --arg repo_url "$REPO_URL_FOR_WORKERS" \
         --arg repo_host_ip "$REPO_HOST_IP_FOR_WORKERS" \
         --arg node_group "$NODE_GROUP" \
         --arg admin "$NODE_ADMIN" \
@@ -1783,7 +1790,7 @@ while read -r node; do
 
     if copy_to_remote "$CONFIG_JSON" "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" /tmp/nix-cluster-config.json auto; then
       publish_join_state "install-triggered" "remote nix-cluster install command started"
-      if run_remote_sudo_command "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" auto "if [ -z '${REPO_HOST_IP_FOR_WORKERS}' ]; then sed -i '/git.smallguytech.org/d' /etc/hosts 2>/dev/null || true; fi; nix --extra-experimental-features 'nix-command flakes' shell nixpkgs#git -c nix --extra-experimental-features 'nix-command flakes' run --refresh git+NIX_CLUSTER_INSTALL_REPO_URL_PLACEHOLDER#install -- --config /tmp/nix-cluster-config.json"; then
+      if run_remote_sudo_command "$NODE_ADMIN" "$INSTALLER_IP" "$NODE_ADMIN_PASS" auto "if [ -z '${REPO_HOST_IP_FOR_WORKERS}' ]; then sed -i '/git.smallguytech.org/d' /etc/hosts 2>/dev/null || true; fi; nix --extra-experimental-features 'nix-command flakes' shell nixpkgs#git -c nix --extra-experimental-features 'nix-command flakes' run --refresh git+${NIX_CLUSTER_INSTALL_REPO_URL_FOR_WORKERS}#install -- --config /tmp/nix-cluster-config.json"; then
         publish_join_state "post-install-verify" "verifying runtime config and nix-cluster service"
         if verify_worker_enrollment 18; then
           echo "[nix-cluster] === NODE JOINED SUCCESSFULLY: $HOSTNAME ==="
