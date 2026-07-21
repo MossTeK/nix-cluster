@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import socket
@@ -13,7 +14,7 @@ from typing import Any
 
 from .config import RuntimeConfig
 from .core import atomic_write_json, atomic_write_text, configure_logging
-from .runtime import EtcdClient, RuntimeStoreRateLimited
+from .runtime import EtcdClient, RuntimeStoreRateLimited, RuntimeStoreWriteBlocked
 
 ACTIVE_STATES = {"active", "activating", "reloading"}
 REPEATED_WARNING_INTERVAL_SECONDS = 60.0
@@ -70,12 +71,28 @@ def _dedupe_preserve_order(values: Iterable[str]) -> list[str]:
     return result
 
 
+def _runtime_store_warning_details(error: RuntimeStoreRateLimited, default_retry_after: float) -> tuple[str, float]:
+    retry_after = error.retry_after if error.retry_after is not None else default_retry_after
+    if isinstance(error, RuntimeStoreWriteBlocked):
+        return "runtime_store_write_blocked", retry_after
+    return "runtime_store_rate_limited", retry_after
+
+
+def _payload_digest(payload: dict[str, Any]) -> str:
+    stable_payload = dict(payload)
+    stable_payload.pop("observed_at", None)
+    encoded = json.dumps(stable_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 class ServiceReporter:
     def __init__(self, config_path: str | None = None):
         self.config = RuntimeConfig.from_path(config_path)
         self.logger = configure_logging("nix-cluster-reporter")
         self.hostname = socket.gethostname()
         self.previous_states: dict[str, bool] = {}
+        self.previous_payload_hashes: dict[str, str] = {}
+        self.previous_etcd_write_at: dict[str, float] = {}
         self.last_runtime_store_warning: tuple[str, str] | None = None
         self.last_runtime_store_warning_at = 0.0
 
@@ -181,7 +198,8 @@ class ServiceReporter:
         runtime_store = self.config.ha.runtime_store
         etcd = EtcdClient(runtime_store.endpoint) if runtime_store.type == "etcd" and runtime_store.endpoint else None
         key_prefix = runtime_store.key_prefix.rstrip("/")
-        interval = max(1, self.config.ha.reporting.interval_seconds)
+        interval = max(15, self.config.ha.reporting.interval_seconds)
+        heartbeat_refresh_interval = max(float(interval), float(max(1, runtime_store.stale_after_seconds)) / 2.0)
         backoff_until = 0.0
 
         self.logger.info("starting service reporter on %s", self.hostname)
@@ -202,18 +220,27 @@ class ServiceReporter:
                         )
                     self.previous_states[unit] = current
                     if etcd:
-                        etcd_updates[f"{key_prefix}/{self.hostname}/{unit}"] = payload
+                        key = f"{key_prefix}/{self.hostname}/{unit}"
+                        digest = _payload_digest(payload)
+                        last_write_at = self.previous_etcd_write_at.get(key, 0.0)
+                        if digest != self.previous_payload_hashes.get(key) or (time.monotonic() - last_write_at) >= heartbeat_refresh_interval:
+                            etcd_updates[key] = payload
+                            self.previous_payload_hashes[key] = digest
 
                 atomic_write_json(snapshot_path, {"host": self.hostname, "observed_at": int(time.time()), "services": services})
                 atomic_write_text(metrics_path, self.build_metric_lines(services))
                 if etcd and time.monotonic() >= backoff_until:
                     etcd.put_json_many(etcd_updates)
+                    write_time = time.monotonic()
+                    for key in etcd_updates:
+                        self.previous_etcd_write_at[key] = write_time
             except RuntimeStoreRateLimited as error:
-                retry_after = error.retry_after if error.retry_after is not None else max(5.0, float(interval))
+                event, retry_after = _runtime_store_warning_details(error, max(5.0, float(interval)))
                 backoff_until = time.monotonic() + retry_after
                 self.log_runtime_store_warning(
                     runtime_store.endpoint,
-                    "runtime_store_rate_limited endpoint=%s retry_after=%.1fs",
+                    "%s endpoint=%s retry_after=%.1fs",
+                    event,
                     runtime_store.endpoint,
                     retry_after,
                 )
@@ -605,8 +632,8 @@ class WorkerReconciler:
 
         endpoint = self.config.ha.runtime_store.endpoint
         etcd = EtcdClient(endpoint)
-        interval = max(1, self.config.ha.scheduler.reconciler_interval_seconds)
-        resource_interval = max(1, self.config.ha.scheduler.resource_interval_seconds)
+        interval = max(15, self.config.ha.scheduler.reconciler_interval_seconds)
+        resource_interval = max(15, self.config.ha.scheduler.resource_interval_seconds)
         managed_units = sorted(set(self.config.ha.scheduler.managed_units))
         placement_prefix = self.config.ha.scheduler.placement_prefix.rstrip("/")
         resource_prefix = self.config.ha.scheduler.resource_prefix.rstrip("/")
@@ -614,23 +641,31 @@ class WorkerReconciler:
         reconcile_state_path = Path(self.config.directories.state) / "ha" / "scheduler-reconciler.json"
         resource_state_path = Path(self.config.directories.state) / "ha" / "scheduler-resources.json"
         metrics_path = Path(self.config.directories.metrics) / "scheduler-reconciler.prom"
-        backoff_until = 0.0
+        write_backoff_until = 0.0
         next_resource_publish_at = 0.0
         last_resource_snapshot: dict[str, Any] | None = None
 
         self.logger.info("starting scheduler reconciler on %s", self.hostname)
         while True:
             try:
-                if time.monotonic() < backoff_until:
-                    time.sleep(interval)
-                    continue
-
                 now = int(time.time())
                 if last_resource_snapshot is None or time.monotonic() >= next_resource_publish_at:
                     last_resource_snapshot = self.collect_resource_snapshot(now)
                     atomic_write_json(resource_state_path, last_resource_snapshot)
-                    if resource_prefix:
-                        etcd.put_json(f"{resource_prefix}/{self.hostname}", last_resource_snapshot)
+                    if resource_prefix and time.monotonic() >= write_backoff_until:
+                        try:
+                            etcd.put_json(f"{resource_prefix}/{self.hostname}", last_resource_snapshot)
+                        except RuntimeStoreRateLimited as error:
+                            event, retry_after = _runtime_store_warning_details(error, max(5.0, float(interval)))
+                            write_backoff_until = time.monotonic() + retry_after
+                            self.log_runtime_store_warning(
+                                endpoint,
+                                "%s endpoint=%s path=%s retry_after=%.1fs",
+                                event,
+                                endpoint,
+                                f"{resource_prefix}/{self.hostname}",
+                                retry_after,
+                            )
                     next_resource_publish_at = time.monotonic() + resource_interval
 
                 placement_records = etcd.get_prefix(placement_prefix) if placement_prefix else {}
@@ -683,14 +718,27 @@ class WorkerReconciler:
                 node_detail = self.build_node_detail(last_resource_snapshot, units, now)
                 atomic_write_json(reconcile_state_path, reconcile_state)
                 atomic_write_text(metrics_path, self.build_metric_lines(last_resource_snapshot, units, now))
-                if node_detail_prefix:
-                    etcd.put_json(f"{node_detail_prefix}/{self.hostname}", node_detail)
+                if node_detail_prefix and time.monotonic() >= write_backoff_until:
+                    try:
+                        etcd.put_json(f"{node_detail_prefix}/{self.hostname}", node_detail)
+                    except RuntimeStoreRateLimited as error:
+                        event, retry_after = _runtime_store_warning_details(error, max(5.0, float(interval)))
+                        write_backoff_until = time.monotonic() + retry_after
+                        self.log_runtime_store_warning(
+                            endpoint,
+                            "%s endpoint=%s path=%s retry_after=%.1fs",
+                            event,
+                            endpoint,
+                            f"{node_detail_prefix}/{self.hostname}",
+                            retry_after,
+                        )
             except RuntimeStoreRateLimited as error:
-                retry_after = error.retry_after if error.retry_after is not None else max(5.0, float(interval))
-                backoff_until = time.monotonic() + retry_after
+                event, retry_after = _runtime_store_warning_details(error, max(5.0, float(interval)))
+                write_backoff_until = time.monotonic() + retry_after
                 self.log_runtime_store_warning(
                     endpoint,
-                    "runtime_store_rate_limited endpoint=%s retry_after=%.1fs",
+                    "%s endpoint=%s retry_after=%.1fs",
+                    event,
                     endpoint,
                     retry_after,
                 )
@@ -796,7 +844,21 @@ class ClusterMonitor:
             }
             is_leader = fixed_leader == self.controller
             if is_leader:
-                etcd.put_json(leader_key, leader_payload)
+                try:
+                    etcd.put_json(leader_key, leader_payload)
+                except RuntimeStoreRateLimited as error:
+                    event, retry_after = _runtime_store_warning_details(
+                        error,
+                        max(5.0, float(self.config.ha.scheduler.interval_seconds)),
+                    )
+                    self.log_runtime_store_warning(
+                        self.config.ha.runtime_store.endpoint,
+                        "%s endpoint=%s path=%s retry_after=%.1fs",
+                        event,
+                        self.config.ha.runtime_store.endpoint,
+                        leader_key,
+                        retry_after,
+                    )
             self.current_leader_lease_id = 0
             self.note_leadership_state(is_leader, leader_payload)
             return is_leader, leader_payload
@@ -1000,7 +1062,7 @@ class ClusterMonitor:
         endpoint = self.config.ha.runtime_store.endpoint
         prefix = self.config.ha.runtime_store.key_prefix
         stale_after = max(1, self.config.ha.runtime_store.stale_after_seconds)
-        interval = max(1, self.config.ha.scheduler.interval_seconds)
+        interval = max(15, self.config.ha.scheduler.interval_seconds)
         resource_prefix = self.config.ha.scheduler.resource_prefix.rstrip("/")
         resource_stale_after = max(stale_after, self.config.ha.scheduler.resource_interval_seconds * 3)
         managed_units = set(_dedupe_preserve_order(self.config.ha.scheduler.managed_units))
@@ -1009,14 +1071,11 @@ class ClusterMonitor:
         etcd = EtcdClient(endpoint)
         placement_prefix = self.config.ha.scheduler.placement_prefix.rstrip("/")
         node_detail_prefix = NODE_DETAIL_PREFIX.rstrip("/")
-        backoff_until = 0.0
+        write_backoff_until = 0.0
 
         self.logger.info("starting controller monitor on %s", self.controller)
         while True:
             try:
-                if time.monotonic() < backoff_until:
-                    time.sleep(interval)
-                    continue
                 now = int(time.time())
                 is_leader, leader_payload = self.ensure_scheduler_leadership(etcd, now)
                 records = etcd.get_prefix(prefix)
@@ -1175,15 +1234,28 @@ class ClusterMonitor:
                 }
                 if is_leader and placement_updates:
                     etcd_updates.update(placement_updates)
-                etcd.put_json_many(etcd_updates)
                 atomic_write_json(cluster_state_path, cluster_state)
                 atomic_write_text(metrics_path, self.build_cluster_metrics(cluster_state))
+                if time.monotonic() >= write_backoff_until:
+                    try:
+                        etcd.put_json_many(etcd_updates)
+                    except RuntimeStoreRateLimited as error:
+                        event, retry_after = _runtime_store_warning_details(error, max(5.0, float(interval)))
+                        write_backoff_until = time.monotonic() + retry_after
+                        self.log_runtime_store_warning(
+                            endpoint,
+                            "%s endpoint=%s retry_after=%.1fs",
+                            event,
+                            endpoint,
+                            retry_after,
+                        )
             except RuntimeStoreRateLimited as error:
-                retry_after = error.retry_after if error.retry_after is not None else max(5.0, float(interval))
-                backoff_until = time.monotonic() + retry_after
+                event, retry_after = _runtime_store_warning_details(error, max(5.0, float(interval)))
+                write_backoff_until = time.monotonic() + retry_after
                 self.log_runtime_store_warning(
                     endpoint,
-                    "runtime_store_rate_limited endpoint=%s retry_after=%.1fs",
+                    "%s endpoint=%s retry_after=%.1fs",
+                    event,
                     endpoint,
                     retry_after,
                 )

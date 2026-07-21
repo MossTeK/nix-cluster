@@ -1,10 +1,25 @@
 import unittest
 from types import SimpleNamespace
 
-from nix_cluster.ha import ClusterMonitor, WorkerReconciler
+from nix_cluster.ha import ClusterMonitor, WorkerReconciler, _payload_digest
 
 
 class SchedulerTests(unittest.TestCase):
+    def test_payload_digest_ignores_observed_at_for_write_suppression(self):
+        first = {
+            "host": "node4",
+            "unit": "demo.service",
+            "load_state": "loaded",
+            "active_state": "active",
+            "sub_state": "running",
+            "healthy": True,
+            "observed_at": 100,
+        }
+        second = dict(first)
+        second["observed_at"] = 115
+
+        self.assertEqual(_payload_digest(first), _payload_digest(second))
+
     def test_unhealthy_current_owner_moves_to_next_schedulable_node(self):
         monitor = ClusterMonitor.__new__(ClusterMonitor)
         monitor.previous_targets = {}

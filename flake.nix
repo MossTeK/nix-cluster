@@ -572,7 +572,7 @@
             };
             intervalSeconds = lib.mkOption {
               type = lib.types.int;
-              default = 5;
+              default = 15;
               description = "Seconds between health snapshots emitted by the reporter.";
             };
           };
@@ -644,13 +644,60 @@
                 default = "new";
                 description = "Initial cluster state used when starting the local etcd runtime store.";
               };
+              quotaBackendBytes = lib.mkOption {
+                type = lib.types.int;
+                default = 8589934592;
+                description = "Maximum etcd backend database size before NOSPACE alarms block writes.";
+              };
+              autoCompactionMode = lib.mkOption {
+                type = lib.types.enum [ "periodic" "revision" ];
+                default = "periodic";
+                description = "etcd auto-compaction mode for the local runtime store.";
+              };
+              autoCompactionRetention = lib.mkOption {
+                type = lib.types.str;
+                default = "1h";
+                description = "Retention window/revision passed to etcd auto-compaction.";
+              };
+              maintenance = {
+                enable = lib.mkOption {
+                  type = lib.types.bool;
+                  default = true;
+                  description = "Periodically compact, defrag, and disarm cleared NOSPACE alarms for the local etcd runtime store.";
+                };
+                intervalSeconds = lib.mkOption {
+                  type = lib.types.int;
+                  default = 3600;
+                  description = "Seconds between local etcd runtime-store maintenance passes.";
+                };
+                retainRevisions = lib.mkOption {
+                  type = lib.types.int;
+                  default = 1000;
+                  description = "Recent revisions to keep when the maintenance job compacts etcd.";
+                };
+                commandTimeoutSeconds = lib.mkOption {
+                  type = lib.types.int;
+                  default = 120;
+                  description = "Timeout for each etcdctl maintenance command.";
+                };
+                defrag = lib.mkOption {
+                  type = lib.types.bool;
+                  default = true;
+                  description = "Run etcd defrag after maintenance compaction.";
+                };
+                disarmAlarms = lib.mkOption {
+                  type = lib.types.bool;
+                  default = true;
+                  description = "Attempt to disarm etcd alarms after compaction/defrag frees space.";
+                };
+              };
             };
           };
           scheduler = {
             enable = lib.mkEnableOption "controller-side health aggregation and failover planning";
             intervalSeconds = lib.mkOption {
               type = lib.types.int;
-              default = 5;
+              default = 15;
               description = "Seconds between controller runtime-store aggregation passes.";
             };
             controllerMode = lib.mkOption {
@@ -695,7 +742,7 @@
             };
             reconcilerIntervalSeconds = lib.mkOption {
               type = lib.types.int;
-              default = 5;
+              default = 15;
               description = "Seconds between worker-side scheduler reconciliation passes.";
             };
             reconcilerDryRun = lib.mkOption {
@@ -1128,8 +1175,48 @@
               --listen-peer-urls=${lib.escapeShellArg (lib.concatStringsSep "," storeCfg.listenPeerUrls)} \
               --initial-advertise-peer-urls=${lib.escapeShellArg (lib.concatStringsSep "," storeCfg.initialAdvertisePeerUrls)} \
               --initial-cluster=${lib.escapeShellArg storeInitialCluster} \
-              --initial-cluster-state=${lib.escapeShellArg storeCfg.initialClusterState}
+              --initial-cluster-state=${lib.escapeShellArg storeCfg.initialClusterState} \
+              --quota-backend-bytes=${toString storeCfg.quotaBackendBytes} \
+              --auto-compaction-mode=${lib.escapeShellArg storeCfg.autoCompactionMode} \
+              --auto-compaction-retention=${lib.escapeShellArg storeCfg.autoCompactionRetention}
           '';
+        };
+
+        systemd.services."nix-cluster-runtime-store-maintenance" = lib.mkIf (cfg.ha.runtimeStore.localServer.enable && storeCfg.maintenance.enable) {
+          description = "nix-cluster runtime state store maintenance";
+          after = [ "nix-cluster-runtime-store.service" ];
+          requires = [ "nix-cluster-runtime-store.service" ];
+          serviceConfig = {
+            Type = "oneshot";
+            User = serviceUser;
+            Group = serviceGroup;
+          };
+          script = ''
+            set -u
+            endpoint="http://127.0.0.1:2379"
+            timeout="${toString storeCfg.maintenance.commandTimeoutSeconds}s"
+            rev="$(${pkgs.etcd}/bin/etcdctl --endpoints="$endpoint" --command-timeout="$timeout" endpoint status -w json | ${pkgs.jq}/bin/jq -r '.[0].Status.header.revision // .[0].Status.Header.revision // 0')"
+            if [ "$rev" -gt ${toString storeCfg.maintenance.retainRevisions} ]; then
+              compact_rev=$((rev - ${toString storeCfg.maintenance.retainRevisions}))
+              ${pkgs.etcd}/bin/etcdctl --endpoints="$endpoint" --command-timeout="$timeout" compact "$compact_rev" || true
+            fi
+            ${lib.optionalString storeCfg.maintenance.defrag ''
+              ${pkgs.etcd}/bin/etcdctl --endpoints="$endpoint" --command-timeout="$timeout" defrag || true
+            ''}
+            ${lib.optionalString storeCfg.maintenance.disarmAlarms ''
+              ${pkgs.etcd}/bin/etcdctl --endpoints="$endpoint" --command-timeout="$timeout" alarm disarm || true
+            ''}
+            ${pkgs.etcd}/bin/etcdctl --endpoints="$endpoint" --command-timeout="$timeout" endpoint status -w table || true
+          '';
+        };
+
+        systemd.timers."nix-cluster-runtime-store-maintenance" = lib.mkIf (cfg.ha.runtimeStore.localServer.enable && storeCfg.maintenance.enable) {
+          wantedBy = [ "timers.target" ];
+          timerConfig = {
+            OnBootSec = "10min";
+            OnUnitActiveSec = "${toString storeCfg.maintenance.intervalSeconds}s";
+            Unit = "nix-cluster-runtime-store-maintenance.service";
+          };
         };
         
         # Runs the nix-cluster listener(s) as the nix-cluster user. Spawns the Matrix daemon and/or webhook server based on enabled options.

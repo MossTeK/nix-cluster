@@ -39,6 +39,10 @@ class RuntimeStoreRateLimited(urllib.error.URLError):
         self.retry_after = retry_after
 
 
+class RuntimeStoreWriteBlocked(RuntimeStoreRateLimited):
+    """Raised when etcd accepts reads but rejects writes, commonly ALARM NOSPACE."""
+
+
 def _retry_after_seconds(error: urllib.error.HTTPError) -> float | None:
     retry_after = error.headers.get("Retry-After")
     if retry_after is None:
@@ -96,7 +100,14 @@ class EtcdClient:
                 body = response.read().decode("utf-8")
         except urllib.error.HTTPError as error:
             if error.code == 429:
-                raise RuntimeStoreRateLimited(self.endpoint, retry_after=_retry_after_seconds(error)) from error
+                try:
+                    body = error.read().decode("utf-8", errors="replace")
+                except Exception:
+                    body = ""
+                message = body.strip() or str(error)
+                if "database space exceeded" in message.lower() or "nospace" in message.lower():
+                    raise RuntimeStoreWriteBlocked(self.endpoint, retry_after=_retry_after_seconds(error), message=message) from error
+                raise RuntimeStoreRateLimited(self.endpoint, retry_after=_retry_after_seconds(error), message=message) from error
             raise
 
         if not body:
@@ -137,6 +148,33 @@ class EtcdClient:
             },
             timeout=4,
         )
+
+    def health(self) -> dict[str, Any]:
+        request = urllib.request.Request(f"{self.endpoint}/health", method="GET")
+        try:
+            with urllib.request.urlopen(request, timeout=3) as response:
+                body = response.read().decode("utf-8")
+        except urllib.error.HTTPError as error:
+            body = error.read().decode("utf-8", errors="replace")
+            if body:
+                return json.loads(body)
+            raise
+        return json.loads(body) if body else {}
+
+    def alarm_list(self) -> dict[str, Any]:
+        return self._request_json("/v3/maintenance/alarm", {"action": "GET"}, timeout=4)
+
+    def alarm_disarm(self) -> dict[str, Any]:
+        return self._request_json("/v3/maintenance/alarm", {"action": "DEACTIVATE"}, timeout=10)
+
+    def endpoint_status(self) -> dict[str, Any]:
+        return self._request_json("/v3/maintenance/status", {}, timeout=10)
+
+    def compact(self, revision: int) -> dict[str, Any]:
+        return self._request_json("/v3/kv/compaction", {"revision": int(revision), "physical": False}, timeout=30)
+
+    def defragment(self) -> dict[str, Any]:
+        return self._request_json("/v3/maintenance/defragment", {}, timeout=120)
 
     def get_key(self, key: str) -> dict[str, Any] | None:
         payload = self._request_json(
