@@ -605,13 +605,6 @@ CONTROLLER_HOSTNAME=$(hostname -s)
 CONTROLLER_PRIMARY_IP=$(detect_primary_ip)
 REPO_HOST_IP_FOR_WORKERS=""
 echo "[nix-cluster] repo_host_ip source=public_dns value=unset"
-REPO_URL_FOR_WORKERS="$REPO_URL"
-NIX_CLUSTER_INSTALL_REPO_URL_FOR_WORKERS="NIX_CLUSTER_INSTALL_REPO_URL_PLACEHOLDER"
-if [ -n "$REPO_HOST_IP_FOR_WORKERS" ]; then
-  REPO_URL_FOR_WORKERS=$(printf '%s' "$REPO_URL_FOR_WORKERS" | sed 's|^https://|http://|')
-  NIX_CLUSTER_INSTALL_REPO_URL_FOR_WORKERS=$(printf '%s' "$NIX_CLUSTER_INSTALL_REPO_URL_FOR_WORKERS" | sed 's|^https://|http://|')
-  echo "[nix-cluster] worker Git bootstrap uses internal HTTP while host is pinned to the controller LAN"
-fi
 
 ssh_with_key() {
   local remote="$1"
@@ -1451,6 +1444,13 @@ GIT_USER=$(sudo env SOPS_AGE_KEY_FILE=$SOPS_KEY sops -d --extract '["git_usernam
 GIT_PASS=$(sudo env SOPS_AGE_KEY_FILE=$SOPS_KEY sops -d --extract '["git_password"]' secrets/secrets.yaml)
 WEBHOOK_SECRET=$(sudo env SOPS_AGE_KEY_FILE=$SOPS_KEY sops -d --extract '["webhook_secret"]' secrets/secrets.yaml)
 REPO_URL=$(git remote get-url origin | sed -E 's|^https?://[^/@]+:[^/@]+@|https://|')
+REPO_URL_FOR_WORKERS="$REPO_URL"
+NIX_CLUSTER_INSTALL_REPO_URL_FOR_WORKERS="NIX_CLUSTER_INSTALL_REPO_URL_PLACEHOLDER"
+if [ -n "$REPO_HOST_IP_FOR_WORKERS" ]; then
+  REPO_URL_FOR_WORKERS=$(printf '%s' "$REPO_URL_FOR_WORKERS" | sed 's|^https://|http://|')
+  NIX_CLUSTER_INSTALL_REPO_URL_FOR_WORKERS=$(printf '%s' "$NIX_CLUSTER_INSTALL_REPO_URL_FOR_WORKERS" | sed 's|^https://|http://|')
+  echo "[nix-cluster] worker Git bootstrap uses internal HTTP while host is pinned to the controller LAN"
+fi
 CONTROLLER_SSH_PUB_KEY=$(tr -d '\n' < "${NIX_CLUSTER_SSH_KEY}.pub")
 CONTROLLER_SSH_PUB_KEY_ESCAPED=$(printf "%q" "$CONTROLLER_SSH_PUB_KEY")
 ensure_shared_ssh_public_keys_file
