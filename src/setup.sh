@@ -884,13 +884,27 @@ if [ "$IS_BOOTSTRAP" = "true" ]; then
     sudo -u "$SERVICE_USER" git init
     sudo -u "$SERVICE_USER" git checkout -b main
     ENCODED_TOKEN=$(jq -nr --arg v "$GIT_TOKEN" '$v | @uri')
-    CLEAN_REPO_URL=$(echo "$REPO_URL" | sed 's|^https\?://||')
-    sudo -u "$SERVICE_USER" git remote add origin "http://$GIT_USER:$ENCODED_TOKEN@$CLEAN_REPO_URL"
+    if [[ "$REPO_URL" == http://* ]]; then
+        AUTH_REPO_URL="http://$GIT_USER:$ENCODED_TOKEN@${REPO_URL#http://}"
+    elif [[ "$REPO_URL" == https://* ]]; then
+        AUTH_REPO_URL="https://$GIT_USER:$ENCODED_TOKEN@${REPO_URL#https://}"
+    else
+        echo "Error: repo_url must start with http:// or https://"
+        exit 1
+    fi
+    sudo -u "$SERVICE_USER" git remote add origin "$AUTH_REPO_URL"
 else
     log "Worker Mode: Cloning Fleet Repository into $TARGET_DIR..."
     ENCODED_TOKEN=$(jq -nr --arg v "$GIT_TOKEN" '$v | @uri')
-    CLEAN_REPO_URL=$(echo "$REPO_URL" | sed 's|^https\?://||')
-    sudo env GIT_CONFIG_NOSYSTEM=1 git clone "https://$GIT_USER:$ENCODED_TOKEN@$CLEAN_REPO_URL" "$TARGET_DIR"
+    if [[ "$REPO_URL" == http://* ]]; then
+        AUTH_REPO_URL="http://$GIT_USER:$ENCODED_TOKEN@${REPO_URL#http://}"
+    elif [[ "$REPO_URL" == https://* ]]; then
+        AUTH_REPO_URL="https://$GIT_USER:$ENCODED_TOKEN@${REPO_URL#https://}"
+    else
+        echo "Error: repo_url must start with http:// or https://"
+        exit 1
+    fi
+    sudo env GIT_CONFIG_NOSYSTEM=1 git clone "$AUTH_REPO_URL" "$TARGET_DIR"
     sudo chown -R "$SERVICE_USER:$SERVICE_GROUP" "$TARGET_DIR"
     cd "$TARGET_DIR"
 fi
@@ -1839,10 +1853,10 @@ fi
 BOOTSTRAP_GIT_DIR="/run/nix-cluster-bootstrap"
 BOOTSTRAP_GIT_CONFIG=""
 setup_bootstrap_git_credentials() {
-    [ -n "${GIT_USER:-}" ] && [ -n "${GIT_PASS:-}" ] || return 0
+    [ -n "${GIT_USER:-}" ] && [ -n "${GIT_TOKEN:-}" ] || return 0
     sudo install -d -m 0700 "$BOOTSTRAP_GIT_DIR"
     printf '%s' "$GIT_USER" | sudo tee "$BOOTSTRAP_GIT_DIR/git-username" >/dev/null
-    printf '%s' "$GIT_PASS" | sudo tee "$BOOTSTRAP_GIT_DIR/git-password" >/dev/null
+    printf '%s' "$GIT_TOKEN" | sudo tee "$BOOTSTRAP_GIT_DIR/git-password" >/dev/null
     sudo chmod 0600 "$BOOTSTRAP_GIT_DIR/git-username" "$BOOTSTRAP_GIT_DIR/git-password"
     sudo tee "$BOOTSTRAP_GIT_DIR/git-credential-helper" >/dev/null <<'EOF'
 #!/bin/sh
