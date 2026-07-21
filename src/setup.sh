@@ -832,7 +832,9 @@ fi
 if [ -n "${REPO_HOST_IP:-}" ] && [ -n "${REPO_HOST:-}" ]; then
     log "Pinning ${REPO_HOST} to ${REPO_HOST_IP} in /etc/hosts for this install..."
     set_hosts_entry "$REPO_HOST" "$REPO_HOST_IP"
-    PERSIST_REPO_HOST_ENTRY="true"
+    if [ "${IS_BOOTSTRAP:-false}" = "true" ]; then
+        PERSIST_REPO_HOST_ENTRY="true"
+    fi
 elif [ -n "${REPO_HOST:-}" ]; then
     remove_hosts_entry "$REPO_HOST"
     warn_if_repo_host_resolves_publicly "$REPO_HOST"
@@ -1809,6 +1811,16 @@ fi
 # Triggers the initial nixos-rebuild to activate the enrolled configuration.
 # NOTE: --upgrade removed to avoid nixpkgs flake updates during enrollment (locked in flake.lock)
 log "Executing initial system rebuild..."
+
+# Worker enrollments may temporarily pin the Git host to the controller's LAN IP
+# so the initial private fleet clone can avoid hairpinning through public DNS.
+# Drop that pin before nixos-rebuild: the fleet can reference other HTTPS flake
+# inputs on the same Git host, and pinning those to an HTTP-only internal vhost
+# makes Nix try port 443 on the controller and fail.
+if [ "${IS_BOOTSTRAP:-false}" != "true" ] && [ -n "${REPO_HOST_IP:-}" ] && [ -n "${REPO_HOST:-}" ]; then
+    log "Removing temporary ${REPO_HOST} hosts pin before rebuild so HTTPS flake inputs resolve normally..."
+    remove_hosts_entry "$REPO_HOST"
+fi
 
 # Adjust build parallelism for low-memory systems to prevent OOM during evaluation.
 # Systems with <16GB RAM should limit parallel builds to reduce memory pressure.
