@@ -1,10 +1,13 @@
 import unittest
 from types import SimpleNamespace
 
-from nix_cluster.ha import ClusterMonitor, WorkerReconciler, _payload_digest
+from nix_cluster.ha import HEALTHY_ACTIVE_STATES, ClusterMonitor, WorkerReconciler, _payload_digest
 
 
 class SchedulerTests(unittest.TestCase):
+    def test_activating_units_are_not_considered_healthy(self):
+        self.assertNotIn("activating", HEALTHY_ACTIVE_STATES)
+
     def test_payload_digest_ignores_observed_at_for_write_suppression(self):
         first = {
             "host": "node4",

@@ -17,6 +17,7 @@ from .core import atomic_write_json, atomic_write_text, configure_logging
 from .runtime import EtcdClient, RuntimeStoreRateLimited, RuntimeStoreWriteBlocked
 
 ACTIVE_STATES = {"active", "activating", "reloading"}
+HEALTHY_ACTIVE_STATES = {"active", "reloading"}
 REPEATED_WARNING_INTERVAL_SECONDS = 60.0
 MIN_AVAILABLE_MEMORY_BYTES = 512 * 1024 * 1024
 MIN_STATE_FREE_BYTES = 2 * 1024 * 1024 * 1024
@@ -148,7 +149,7 @@ class ServiceReporter:
             "exec_main_pid": values.get("ExecMainPID", "0"),
             "exec_main_status": values.get("ExecMainStatus", "0"),
             "active_enter_timestamp": values.get("ActiveEnterTimestamp", ""),
-            "healthy": active_state in ACTIVE_STATES and values.get("LoadState", "") == "loaded",
+            "healthy": active_state in HEALTHY_ACTIVE_STATES and values.get("LoadState", "") == "loaded",
             "observed_at": int(time.time()),
         }
 
@@ -319,7 +320,7 @@ class WorkerReconciler:
             "exec_main_pid": values.get("ExecMainPID", "0"),
             "exec_main_status": values.get("ExecMainStatus", "0"),
             "active_enter_timestamp": values.get("ActiveEnterTimestamp", ""),
-            "healthy": active_state in ACTIVE_STATES and load_state == "loaded",
+            "healthy": active_state in HEALTHY_ACTIVE_STATES and load_state == "loaded",
             "observed_at": now,
         }
 
