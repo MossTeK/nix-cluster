@@ -36,14 +36,14 @@
           makeWrapper ${pythonEnv}/bin/python3 $out/bin/nix-cluster-daemon \
             --prefix PYTHONPATH : "$out/lib" \
             --add-flags "-m nix_cluster.listener" \
-            --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.git pkgs.inetutils pkgs.nixos-rebuild pkgs.systemd pkgs.bash pkgs.sops pkgs.age pkgs.jq pkgs.openssh pkgs.sshpass pkgs.mkpasswd ]}
+            --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.git pkgs.inetutils pkgs.nixos-rebuild pkgs.systemd pkgs.procps pkgs.bash pkgs.sops pkgs.age pkgs.jq pkgs.openssh pkgs.sshpass pkgs.mkpasswd ]}
 
           # Wraps the Webhook server with required binaries for fleet operations.
           # Injects git, nixos-rebuild, and secret management tools into the execution environment.
           makeWrapper ${pythonEnv}/bin/python3 $out/bin/nix-cluster-webhook \
             --prefix PYTHONPATH : "$out/lib" \
             --add-flags "-m nix_cluster.webhook" \
-            --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.git pkgs.inetutils pkgs.nixos-rebuild pkgs.systemd pkgs.bash pkgs.sops pkgs.age pkgs.jq pkgs.openssh pkgs.sshpass pkgs.mkpasswd ]}
+            --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.git pkgs.inetutils pkgs.nixos-rebuild pkgs.systemd pkgs.procps pkgs.bash pkgs.sops pkgs.age pkgs.jq pkgs.openssh pkgs.sshpass pkgs.mkpasswd ]}
 
           makeWrapper ${pkgs.bash}/bin/bash $out/bin/nix-cluster-observe \
             --add-flags "$out/lib/scripts/observe.sh" \
@@ -467,7 +467,7 @@
         afterPush = lib.mkOption {
           type = lib.types.listOf lib.types.str;
           default = [
-            "/run/wrappers/bin/sudo /run/current-system/sw/bin/systemd-run --working-directory=${config.services."nix-cluster".repoPath} --service-type=oneshot --setenv=PATH=/run/current-system/sw/bin:/run/wrappers/bin -- /run/current-system/sw/bin/nixos-rebuild switch --flake ${config.services."nix-cluster".repoPath}#${config.networking.hostName} --impure"
+            "/run/wrappers/bin/sudo /run/current-system/sw/bin/systemd-run --wait --collect --pipe --working-directory=${config.services."nix-cluster".repoPath} --service-type=oneshot --setenv=PATH=/run/current-system/sw/bin:/run/wrappers/bin -- /run/current-system/sw/bin/nixos-rebuild switch --flake ${config.services."nix-cluster".repoPath}#${config.networking.hostName} --impure"
           ];
           description = "Array of shell commands to execute after a push is received.";
         };
@@ -1261,7 +1261,7 @@
           wantedBy = [ "multi-user.target" ];
           after = [ "network-online.target" ];
           wants = [ "network-online.target" ];
-          path = [ pkgs.git pkgs.curl pkgs.nixos-rebuild pkgs.inetutils pkgs.systemd pkgs.bash pkgs.openssl pkgs.sops pkgs.age pkgs.openssh pkgs.jq pkgs.sshpass pkgs.mkpasswd ]
+          path = [ pkgs.git pkgs.curl pkgs.nixos-rebuild pkgs.inetutils pkgs.systemd pkgs.procps pkgs.bash pkgs.openssl pkgs.sops pkgs.age pkgs.openssh pkgs.jq pkgs.sshpass pkgs.mkpasswd ]
             ++ lib.optionals cfg.isController [ pkgs.terraform ];
           serviceConfig = {
             User = serviceUser;

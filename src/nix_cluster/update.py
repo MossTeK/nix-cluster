@@ -97,6 +97,18 @@ class UpdateManager:
     def _reset(self, repo_dir: str, stage: str) -> None:
         self._run_command(["git", "reset", "--hard", self.branch_ref], cwd=repo_dir, stage=stage)
 
+    def _switch_in_progress(self, repo_dir: str) -> bool:
+        checks = [
+            ["systemctl", "is-active", "--quiet", "nixos-rebuild-switch-to-configuration.service"],
+            ["pgrep", "-f", "switch-to-configuration switch"],
+        ]
+        for command in checks:
+            result = self.runner.run(command, cwd=repo_dir, check=False, capture_output=True)
+            if result.returncode == 0:
+                logger.warning("REBUILD BLOCKED: existing switch-to-configuration is still running")
+                return True
+        return False
+
     def _fleet_hostnames(self, repo_dir: str) -> list[str]:
         nodes_dir = Path(repo_dir) / "nodes"
         if nodes_dir.is_dir():
@@ -226,6 +238,9 @@ class UpdateManager:
                 self._reset(repo_dir, "GIT-RESET")
                 logger.info("NO RELEVANT CHANGES FOUND. RESETTING REPO.")
                 return "SKIPPED"
+
+            if self._switch_in_progress(repo_dir):
+                return "SKIPPED: switch-to-configuration already running"
 
             self._reset(repo_dir, "GIT-RESET")
             output_log = [
