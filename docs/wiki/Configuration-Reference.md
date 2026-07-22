@@ -198,6 +198,26 @@ Commit-message marker used to suppress webhook-triggered reconcile loops.
 
 ---
 
+## Local recovery options
+
+### `services."nix-cluster".localRecovery.enable`
+
+Enables local critical-unit recovery on every node where `nix-cluster.service` runs. Defaults to `true`.
+
+### `services."nix-cluster".localRecovery.criticalUnits`
+
+Systemd services that nix-cluster should keep active locally without waiting for controller placement or etcd health. Defaults to `[ "NetworkManager.service" ]`.
+
+### `services."nix-cluster".localRecovery.intervalSeconds`
+
+Seconds between local critical-unit checks. Values below 15 are clamped to 15 seconds.
+
+### `services."nix-cluster".localRecovery.dryRun`
+
+Logs recovery actions without starting units.
+
+---
+
 ## Observability options
 
 ### `services."nix-cluster".observability.extraTrackedUnits`

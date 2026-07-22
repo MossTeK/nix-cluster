@@ -104,6 +104,14 @@ class ObservabilitySettings:
 
 
 @dataclass(slots=True)
+class LocalRecoverySettings:
+    enable: bool
+    critical_units: list[str]
+    interval_seconds: int
+    dry_run: bool
+
+
+@dataclass(slots=True)
 class ReportingSettings:
     enable: bool
     mode: str
@@ -189,6 +197,7 @@ class RuntimeConfig:
     controller: ControllerSettings
     placement: PlacementSettings
     observability: ObservabilitySettings
+    local_recovery: LocalRecoverySettings
     ha: HASettings
     matrix: MatrixSettings
     webhook: WebhookSettings
@@ -210,6 +219,7 @@ class RuntimeConfig:
         observability_raw = raw.get("observability", {})
         prometheus_raw = observability_raw.get("prometheus", {})
         loki_raw = observability_raw.get("loki", {})
+        local_recovery_raw = raw.get("local_recovery", {})
         ha_raw = raw.get("ha", {})
         reporting_raw = ha_raw.get("reporting", {})
         runtime_store_raw = ha_raw.get("runtime_store", {})
@@ -261,6 +271,13 @@ class RuntimeConfig:
                 enable=_as_bool(loki_raw.get("enable"), False),
                 url=str(loki_raw.get("url", "")),
             ),
+        )
+
+        local_recovery = LocalRecoverySettings(
+            enable=_as_bool(local_recovery_raw.get("enable"), True),
+            critical_units=_as_list(local_recovery_raw.get("critical_units", ["NetworkManager.service"])),
+            interval_seconds=_as_int(local_recovery_raw.get("interval_seconds"), 15),
+            dry_run=_as_bool(local_recovery_raw.get("dry_run"), False),
         )
 
         ha = HASettings(
@@ -333,6 +350,7 @@ class RuntimeConfig:
             controller=controller,
             placement=placement,
             observability=observability,
+            local_recovery=local_recovery,
             ha=ha,
             matrix=matrix,
             webhook=webhook,

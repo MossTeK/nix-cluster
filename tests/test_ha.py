@@ -1,7 +1,7 @@
 import unittest
 from types import SimpleNamespace
 
-from nix_cluster.ha import HEALTHY_ACTIVE_STATES, ClusterMonitor, WorkerReconciler, _payload_digest
+from nix_cluster.ha import HEALTHY_ACTIVE_STATES, ClusterMonitor, LocalRecoveryMonitor, WorkerReconciler, _payload_digest
 
 
 class SchedulerTests(unittest.TestCase):
@@ -111,6 +111,62 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(detail["cpu"]["used_percent"], 12.5)
         self.assertEqual(detail["memory"]["used"], 400)
         self.assertEqual(detail["services"][0]["main_pid"], 123)
+
+    def test_local_recovery_starts_failed_loaded_unit(self):
+        monitor = LocalRecoveryMonitor.__new__(LocalRecoveryMonitor)
+        monitor.hostname = "node1"
+        monitor.config = SimpleNamespace(local_recovery=SimpleNamespace(dry_run=False))
+        monitor.logger = SimpleNamespace(
+            warning=lambda *args, **kwargs: None,
+            info=lambda *args, **kwargs: None,
+            error=lambda *args, **kwargs: None,
+        )
+        commands = []
+
+        def fake_run(command):
+            commands.append(command)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        monitor.run_command = fake_run
+        recovered = monitor.recover_unit(
+            "NetworkManager.service",
+            {
+                "load_state": "loaded",
+                "active_state": "inactive",
+                "sub_state": "dead",
+                "result": "success",
+            },
+        )
+
+        self.assertTrue(recovered)
+        self.assertEqual(commands, [
+            ["sudo", "systemctl", "reset-failed", "NetworkManager.service"],
+            ["sudo", "systemctl", "start", "NetworkManager.service"],
+        ])
+
+    def test_local_recovery_does_not_start_missing_unit(self):
+        monitor = LocalRecoveryMonitor.__new__(LocalRecoveryMonitor)
+        monitor.hostname = "node1"
+        monitor.config = SimpleNamespace(local_recovery=SimpleNamespace(dry_run=False))
+        monitor.logger = SimpleNamespace(
+            warning=lambda *args, **kwargs: None,
+            info=lambda *args, **kwargs: None,
+            error=lambda *args, **kwargs: None,
+        )
+        commands = []
+        monitor.run_command = lambda command: commands.append(command)
+
+        recovered = monitor.recover_unit(
+            "missing.service",
+            {
+                "load_state": "not-found",
+                "active_state": "inactive",
+                "sub_state": "dead",
+            },
+        )
+
+        self.assertFalse(recovered)
+        self.assertEqual(commands, [])
 
 
 if __name__ == "__main__":

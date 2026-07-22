@@ -84,6 +84,11 @@
             --add-flags "-m nix_cluster.ha reconciler" \
             --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.systemd pkgs.coreutils pkgs.bash ]}
 
+          makeWrapper ${pythonEnv}/bin/python3 $out/bin/nix-cluster-recovery \
+            --prefix PYTHONPATH : "$out/lib" \
+            --add-flags "-m nix_cluster.ha recovery" \
+            --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.systemd pkgs.coreutils pkgs.bash ]}
+
           ln -s nix-cluster-daemon $out/bin/nops-daemon
           ln -s nix-cluster-webhook $out/bin/nops-webhook
           ln -s nix-cluster-observe $out/bin/nops-observe
@@ -95,6 +100,7 @@
           ln -s nix-cluster-reporter $out/bin/nops-reporter
           ln -s nix-cluster-monitor $out/bin/nops-monitor
           ln -s nix-cluster-reconciler $out/bin/nops-reconciler
+          ln -s nix-cluster-recovery $out/bin/nops-recovery
         '';
       };
 
@@ -152,6 +158,7 @@
       storeInitialCluster = if storeCfg.initialCluster != [] then lib.concatStringsSep "," storeCfg.initialCluster else "${storeCfg.name}=${storeAdvertisePeerUrl}";
       trackedUnits = lib.unique (
         [ "nix-cluster.service" ]
+        ++ lib.optionals cfg.localRecovery.enable cfg.localRecovery.criticalUnits
         ++ lib.optionals cfg.ha.runtimeStore.localServer.enable [ "nix-cluster-runtime-store.service" ]
         ++ lib.optionals cfg.observability.prometheus.enable [ "prometheus-node-exporter.service" ]
         ++ lib.optionals (cfg.observability.loki.enable && cfg.observability.loki.url != "") [ "promtail.service" ]
@@ -224,6 +231,12 @@
         node_role = cfg.placement.nodeRole;
         ha_role = cfg.placement.haRole;
         keepalived_role = cfg.placement.keepalivedRole;
+      };
+      local_recovery = {
+        enable = cfg.localRecovery.enable;
+        critical_units = cfg.localRecovery.criticalUnits;
+        interval_seconds = cfg.localRecovery.intervalSeconds;
+        dry_run = cfg.localRecovery.dryRun;
       };
       workers = workerInventory;
       apps = {
@@ -493,6 +506,28 @@
             type = lib.types.enum [ "master" "backup" "disabled" ];
             default = "disabled";
             description = "Derived Keepalived placement role for apps that need ingress/VIP awareness.";
+          };
+        };
+        localRecovery = {
+          enable = lib.mkOption {
+            type = lib.types.bool;
+            default = true;
+            description = "Enable local critical-unit recovery inside nix-cluster.service on every node where nix-cluster runs.";
+          };
+          criticalUnits = lib.mkOption {
+            type = lib.types.listOf lib.types.str;
+            default = [ "NetworkManager.service" ];
+            description = "Local systemd units that nix-cluster should keep active on this node, independent of scheduler placement or etcd health.";
+          };
+          intervalSeconds = lib.mkOption {
+            type = lib.types.int;
+            default = 15;
+            description = "Seconds between local critical-unit recovery checks.";
+          };
+          dryRun = lib.mkOption {
+            type = lib.types.bool;
+            default = false;
+            description = "Log local critical-unit recovery actions without starting units.";
           };
         };
         observability.extraTrackedUnits = lib.mkOption {
@@ -1289,6 +1324,10 @@
 
              if [ "${builtins.toString (cfg.ha.enable && cfg.ha.scheduler.enable && cfg.ha.scheduler.reconcilerEnable && cfg.ha.runtimeStore.type == "etcd" && cfg.ha.runtimeStore.endpoint != "")}" = "1" ]; then
                ${self.packages.${system}.default}/bin/nix-cluster-reconciler &
+             fi
+
+             if [ "${builtins.toString cfg.localRecovery.enable}" = "1" ]; then
+               ${self.packages.${system}.default}/bin/nix-cluster-recovery &
              fi
              
              wait -n

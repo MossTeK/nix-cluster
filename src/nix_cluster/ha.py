@@ -257,6 +257,118 @@ class ServiceReporter:
             time.sleep(interval)
 
 
+class LocalRecoveryMonitor:
+    def __init__(self, config_path: str | None = None):
+        self.config = RuntimeConfig.from_path(config_path)
+        self.logger = configure_logging("nix-cluster-recovery")
+        self.hostname = socket.gethostname()
+        self.previous_states: dict[str, bool] = {}
+
+    def run_command(self, command: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(command, capture_output=True, text=True, check=False)
+
+    def collect_unit_status(self, unit: str) -> dict[str, Any]:
+        result = self.run_command([
+            "systemctl", "show", unit,
+            "--property=Id", "--property=LoadState", "--property=ActiveState", "--property=SubState",
+            "--property=Result",
+        ])
+        values: dict[str, str] = {}
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                if "=" in line:
+                    key, value = line.split("=", 1)
+                    values[key] = value
+
+        load_state = values.get("LoadState", "not-found" if result.returncode != 0 else "unknown")
+        active_state = values.get("ActiveState", "unknown")
+        return {
+            "unit": values.get("Id", unit) or unit,
+            "load_state": load_state,
+            "active_state": active_state,
+            "sub_state": values.get("SubState", "unknown"),
+            "result": values.get("Result", "unknown"),
+            "healthy": load_state == "loaded" and active_state in HEALTHY_ACTIVE_STATES,
+        }
+
+    def recover_unit(self, unit: str, status: dict[str, Any]) -> bool:
+        if status.get("load_state") != "loaded":
+            self.logger.warning(
+                "critical_unit_missing host=%s unit=%s load_state=%s",
+                self.hostname,
+                unit,
+                status.get("load_state"),
+            )
+            return False
+
+        if self.config.local_recovery.dry_run:
+            self.logger.warning(
+                "critical_unit_recovery_dry_run host=%s unit=%s active_state=%s sub_state=%s",
+                self.hostname,
+                unit,
+                status.get("active_state"),
+                status.get("sub_state"),
+            )
+            return True
+
+        self.logger.warning(
+            "critical_unit_recovery_attempt host=%s unit=%s active_state=%s sub_state=%s result=%s",
+            self.hostname,
+            unit,
+            status.get("active_state"),
+            status.get("sub_state"),
+            status.get("result"),
+        )
+        self.run_command(["sudo", "systemctl", "reset-failed", unit])
+        result = self.run_command(["sudo", "systemctl", "start", unit])
+        if result.returncode == 0:
+            self.logger.info("critical_unit_recovery_success host=%s unit=%s", self.hostname, unit)
+            return True
+
+        self.logger.error(
+            "critical_unit_recovery_failed host=%s unit=%s error=%s",
+            self.hostname,
+            unit,
+            result.stderr.strip() or result.stdout.strip() or f"exit_{result.returncode}",
+        )
+        return False
+
+    def run(self) -> None:
+        recovery_cfg = self.config.local_recovery
+        if not recovery_cfg.enable:
+            self.logger.info("local recovery monitor disabled")
+            return
+
+        interval = max(15, recovery_cfg.interval_seconds)
+        units = _dedupe_preserve_order(recovery_cfg.critical_units)
+        if not units:
+            self.logger.info("local recovery monitor has no critical units")
+            return
+
+        self.logger.info("starting local recovery monitor on %s units=%s", self.hostname, ",".join(units))
+        while True:
+            try:
+                for unit in units:
+                    status = self.collect_unit_status(unit)
+                    healthy = bool(status.get("healthy"))
+                    if self.previous_states.get(unit) != healthy:
+                        self.logger.info(
+                            "critical_unit_state host=%s unit=%s healthy=%s active_state=%s sub_state=%s load_state=%s",
+                            self.hostname,
+                            unit,
+                            str(healthy).lower(),
+                            status.get("active_state"),
+                            status.get("sub_state"),
+                            status.get("load_state"),
+                        )
+                    self.previous_states[unit] = healthy
+                    if not healthy:
+                        self.recover_unit(unit, status)
+            except Exception as error:
+                self.logger.exception("recovery_loop_failed: %s", error)
+            time.sleep(interval)
+
+
 class WorkerReconciler:
     def __init__(self, config_path: str | None = None):
         self.config = RuntimeConfig.from_path(config_path)
@@ -1284,6 +1396,10 @@ def reconciler_main() -> None:
     WorkerReconciler().run()
 
 
+def recovery_main() -> None:
+    LocalRecoveryMonitor().run()
+
+
 if __name__ == "__main__":
     mode = sys.argv[1] if len(sys.argv) > 1 else "reporter"
     if mode == "reporter":
@@ -1292,5 +1408,7 @@ if __name__ == "__main__":
         monitor_main()
     elif mode == "reconciler":
         reconciler_main()
+    elif mode == "recovery":
+        recovery_main()
     else:
         raise SystemExit(f"unknown mode: {mode}")
