@@ -1156,7 +1156,7 @@
         services.nfs.server = lib.mkIf (sharedHomes.enable && isSharedHomeNode) {
           enable = true;
           exports = ''
-            / ${sharedHomes.exportNetwork}(ro,sync,no_subtree_check,fsid=0,crossmnt)
+            / ${sharedHomes.exportNetwork}(rw,sync,no_subtree_check,fsid=0,crossmnt,root_squash)
             ${sharedHomes.mountPath} ${sharedHomes.exportNetwork}(${lib.concatStringsSep "," sharedHomes.exportOptions})
             ${sharedStorage.exportPath} ${sharedHomes.exportNetwork}(rw,sync,no_subtree_check,no_root_squash,fsid=1,crossmnt)
           '';
