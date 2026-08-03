@@ -1156,6 +1156,7 @@
         services.nfs.server = lib.mkIf (sharedHomes.enable && isSharedHomeNode) {
           enable = true;
           exports = ''
+            / ${sharedHomes.exportNetwork}(ro,sync,no_subtree_check,fsid=0,crossmnt)
             ${sharedHomes.mountPath} ${sharedHomes.exportNetwork}(${lib.concatStringsSep "," sharedHomes.exportOptions})
             ${sharedStorage.exportPath} ${sharedHomes.exportNetwork}(rw,sync,no_subtree_check,no_root_squash,fsid=1,crossmnt)
           '';
@@ -1163,7 +1164,7 @@
         fileSystems = lib.mkMerge [
           (lib.mkIf sharedHomeClient {
             ${sharedHomes.mountPath} = lib.mkForce {
-              device = "${sharedHomes.homeAddress}:/";
+              device = "${sharedHomes.homeAddress}:${sharedHomes.mountPath}";
               fsType = "nfs4";
               options = sharedHomes.clientOptions;
             };
