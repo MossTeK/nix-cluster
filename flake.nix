@@ -1170,10 +1170,9 @@
             };
           })
           (lib.mkIf sharedStorageClient {
-            ${sharedStorage.appRoot} = lib.mkForce {
-              # The export is the NFSv4 namespace root for the application
-              # tree.  Mounting the unexported child path directly fails with
-              # ENOENT even though the directory exists on the controller.
+            ${sharedStorage.exportPath} = lib.mkForce {
+              # Mount the exported tree at its real path so appRoot remains
+              # the expected ${sharedStorage.exportPath}/apps subtree.
               device = "${sharedHomes.homeAddress}:${sharedStorage.exportPath}";
               fsType = "nfs4";
               options = sharedStorage.clientOptions;
