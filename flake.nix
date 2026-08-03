@@ -145,6 +145,8 @@
     nixosModules.default = { config, lib, pkgs, ... }: 
     let 
       cfg = config.services."nix-cluster";
+      sharedHomes = cfg.identity.sharedHomes;
+      sharedStorage = cfg.storage;
       serviceUser = "nix-cluster";
       serviceGroup = serviceUser;
       serviceHome = "/home/${serviceUser}";
@@ -156,6 +158,9 @@
       storeCfg = cfg.ha.runtimeStore.localServer;
       storeAdvertisePeerUrl = if storeCfg.initialAdvertisePeerUrls != [] then builtins.elemAt storeCfg.initialAdvertisePeerUrls 0 else "http://${config.networking.hostName}:2380";
       storeInitialCluster = if storeCfg.initialCluster != [] then lib.concatStringsSep "," storeCfg.initialCluster else "${storeCfg.name}=${storeAdvertisePeerUrl}";
+      isSharedHomeNode = config.networking.hostName == sharedHomes.homeNode;
+      sharedHomeClient = sharedHomes.enable && !isSharedHomeNode && !(builtins.elem config.networking.hostName sharedHomes.skipClientNodes);
+      sharedStorageClient = sharedStorage.enable && !isSharedHomeNode;
       trackedUnits = lib.unique (
         [ "nix-cluster.service" ]
         ++ lib.optionals cfg.localRecovery.enable cfg.localRecovery.criticalUnits
@@ -400,6 +405,62 @@
           type = lib.types.listOf lib.types.str;
           default = [];
           description = "SSH public keys authorized for the nix-cluster service account.";
+        };
+        identity.sharedHomes = {
+          enable = lib.mkEnableOption "controller-backed shared Unix home directories";
+          homeNode = lib.mkOption {
+            type = lib.types.str;
+            default = "node1";
+            description = "Node that owns and exports the shared home tree.";
+          };
+          homeAddress = lib.mkOption {
+            type = lib.types.str;
+            default = "192.168.2.201";
+            description = "Address of the node exporting the shared home tree.";
+          };
+          mountPath = lib.mkOption {
+            type = lib.types.path;
+            default = "/home";
+            description = "Mount path for shared user homes.";
+          };
+          exportNetwork = lib.mkOption {
+            type = lib.types.str;
+            default = "192.168.2.0/24";
+            description = "Network allowed to mount shared homes and app storage.";
+          };
+          exportOptions = lib.mkOption {
+            type = lib.types.listOf lib.types.str;
+            default = [ "rw" "sync" "no_subtree_check" "no_root_squash" "fsid=0" "crossmnt" ];
+            description = "NFS export options for the shared home tree.";
+          };
+          clientOptions = lib.mkOption {
+            type = lib.types.listOf lib.types.str;
+            default = [ "rw" "hard" "timeo=600" "retrans=2" "_netdev" "x-systemd.automount" "x-systemd.requires=network-online.target" "x-systemd.after=network-online.target" ];
+            description = "NFS client options for shared homes.";
+          };
+          skipClientNodes = lib.mkOption {
+            type = lib.types.listOf lib.types.str;
+            default = [];
+            description = "Nodes explicitly exempted from the shared-home mount.";
+          };
+        };
+        storage = {
+          enable = lib.mkEnableOption "controller-backed shared application storage";
+          appRoot = lib.mkOption {
+            type = lib.types.path;
+            default = "/srv/nix-cluster/apps";
+            description = "Shared persistent storage root for nix-cluster applications.";
+          };
+          exportPath = lib.mkOption {
+            type = lib.types.path;
+            default = "/srv/nix-cluster";
+            description = "Controller path exported to worker nodes for app storage.";
+          };
+          clientOptions = lib.mkOption {
+            type = lib.types.listOf lib.types.str;
+            default = [ "rw" "hard" "timeo=600" "retrans=2" "_netdev" "x-systemd.automount" "x-systemd.requires=network-online.target" "x-systemd.after=network-online.target" ];
+            description = "NFS client options for shared application storage.";
+          };
         };
         paths = {
           logDir = lib.mkOption {
@@ -1079,14 +1140,68 @@
             message = "services.nix-cluster.paths.runtimeConfigPath must live under /etc so it can be generated declaratively.";
           }
           {
+            assertion = !sharedHomes.enable || (sharedHomes.homeNode != "" && sharedHomes.homeAddress != "" && sharedHomes.mountPath == "/home");
+            message = "Shared homes require a homeNode, homeAddress, and mountPath=/home.";
+          }
+          {
+            assertion = !sharedStorage.enable || (sharedHomes.enable && sharedStorage.appRoot != "" && lib.hasPrefix "/srv/nix-cluster/" (toString sharedStorage.appRoot));
+            message = "Shared application storage requires shared homes and an appRoot below /srv/nix-cluster/.";
+          }
+          {
             assertion = (!cfg.ha.scheduler.enable) || cfg.ha.scheduler.controllerMode != "elected" || cfg.ha.scheduler.leaseTtlSeconds > cfg.ha.scheduler.intervalSeconds;
             message = "services.nix-cluster.ha.scheduler.leaseTtlSeconds must be greater than intervalSeconds when elected scheduler leadership is enabled.";
           }
         ];
+        services.timesyncd.enable = true;
+        services.nfs.server = lib.mkIf (sharedHomes.enable && isSharedHomeNode) {
+          enable = true;
+          exports = ''
+            ${sharedHomes.mountPath} ${sharedHomes.exportNetwork}(${lib.concatStringsSep "," sharedHomes.exportOptions})
+            ${sharedStorage.exportPath} ${sharedHomes.exportNetwork}(rw,sync,no_subtree_check,no_root_squash,fsid=1,crossmnt)
+          '';
+        };
+        fileSystems = lib.mkMerge [
+          (lib.mkIf sharedHomeClient {
+            ${sharedHomes.mountPath} = lib.mkForce {
+              device = "${sharedHomes.homeAddress}:/";
+              fsType = "nfs4";
+              options = sharedHomes.clientOptions;
+            };
+          })
+          (lib.mkIf sharedStorageClient {
+            ${sharedStorage.appRoot} = lib.mkForce {
+              device = "${sharedHomes.homeAddress}:${sharedStorage.exportPath}/apps";
+              fsType = "nfs4";
+              options = sharedStorage.clientOptions;
+            };
+          })
+        ];
+        systemd.services.nix-cluster-shared-storage-ready = lib.mkIf (sharedHomes.enable || sharedStorage.enable) {
+          description = "Verify nix-cluster shared storage is mounted and authoritative";
+          wantedBy = [ "multi-user.target" ];
+          after = [ "network-online.target" ];
+          requires = [ ];
+          wants = [ "network-online.target" ];
+          serviceConfig = {
+            Type = "oneshot";
+            RemainAfterExit = true;
+            RequiresMountsFor = [ (toString sharedHomes.mountPath) ] ++ lib.optionals sharedStorage.enable [ (toString sharedStorage.appRoot) ];
+          };
+          script = ''
+            set -eu
+            ${pkgs.util-linux}/bin/mountpoint -q ${lib.escapeShellArg (toString sharedHomes.mountPath)}
+            test -f ${lib.escapeShellArg (toString sharedHomes.mountPath)}/.nix-cluster-shared-root
+            ${lib.optionalString sharedStorage.enable ''
+              ${lib.optionalString sharedStorageClient "${pkgs.util-linux}/bin/mountpoint -q ${lib.escapeShellArg (toString sharedStorage.appRoot)}"}
+              test -f ${lib.escapeShellArg (toString sharedStorage.appRoot)}/.nix-cluster-shared-root
+            ''}
+          '';
+        };
         networking.firewall.allowedTCPPorts =
           lib.optionals cfg.webhook.enable [ cfg.webhook.port ]
           ++ lib.optionals cfg.ha.runtimeStore.localServer.enable [ 2379 2380 ]
-          ++ lib.optionals cfg.observability.prometheus.enable [ cfg.observability.prometheus.port ];
+          ++ lib.optionals cfg.observability.prometheus.enable [ cfg.observability.prometheus.port ]
+          ++ lib.optionals (sharedHomes.enable && isSharedHomeNode) [ 2049 ];
         users.users.${serviceUser} = {
           isNormalUser = true;
           description = "nix-cluster Service Daemon Account";
@@ -1138,6 +1253,11 @@
           "d ${cfg.paths.stateDir}/etcd 0755 ${serviceUser} ${serviceGroup} -"
         ] ++ lib.optionals (cfg.observability.loki.enable && cfg.observability.loki.url != "") [
           "d /var/lib/promtail 0755 promtail promtail -"
+        ] ++ lib.optionals (sharedHomes.enable && isSharedHomeNode) [
+          "d ${sharedStorage.exportPath} 0755 root root -"
+          "d ${sharedStorage.appRoot} 0755 root root -"
+          "f ${sharedHomes.mountPath}/.nix-cluster-shared-root 0644 root root -"
+          "f ${sharedStorage.appRoot}/.nix-cluster-shared-root 0644 root root -"
         ];
 
         services.prometheus.exporters.node = lib.mkIf cfg.observability.prometheus.enable {

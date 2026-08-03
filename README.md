@@ -8,6 +8,21 @@
 
 When a trigger is received, the nodes pull the repository, determine if their specific configurations are affected, and apply the updates automatically via systemd.
 
+## Shared storage contract
+
+The NixOS module supports controller-backed shared storage through
+`services.nix-cluster.identity.sharedHomes` and
+`services.nix-cluster.storage`. A configured home node exports `/home` over
+NFS; workers mount it before user-facing services start. Application modules
+declare persistent paths under `storage.applications.<slug>`, which defaults
+to the shared application root and adds `RequiresMountsFor=` plus the
+`nix-cluster-shared-storage-ready.service` dependency to declared services.
+
+Shared-storage consumers fail closed when the controller export is missing.
+Local storage is an explicit exception for caches or node-pinned services, not
+an implicit fallback. All cluster nodes enable systemd time synchronization so
+HA health timestamps remain comparable.
+
 ## 📚 Documentation
 
 Public project documentation is available in the wiki-style docs under `docs/wiki/`:
