@@ -430,7 +430,7 @@
           };
           exportOptions = lib.mkOption {
             type = lib.types.listOf lib.types.str;
-            default = [ "rw" "sync" "no_subtree_check" "no_root_squash" "fsid=0" "crossmnt" ];
+            default = [ "rw" "sync" "no_subtree_check" "no_root_squash" "crossmnt" ];
             description = "NFS export options for the shared home tree.";
           };
           clientOptions = lib.mkOption {
