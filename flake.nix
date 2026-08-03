@@ -1185,17 +1185,17 @@
           after = [ "network-online.target" ];
           requires = [ ];
           wants = [ "network-online.target" ];
+          unitConfig.RequiresMountsFor = [ (toString sharedHomes.mountPath) ] ++ lib.optionals sharedStorage.enable [ (toString sharedStorage.exportPath) ];
           serviceConfig = {
             Type = "oneshot";
             RemainAfterExit = true;
-            RequiresMountsFor = [ (toString sharedHomes.mountPath) ] ++ lib.optionals sharedStorage.enable [ (toString sharedStorage.appRoot) ];
           };
           script = ''
             set -eu
             ${pkgs.util-linux}/bin/mountpoint -q ${lib.escapeShellArg (toString sharedHomes.mountPath)}
             test -f ${lib.escapeShellArg (toString sharedHomes.mountPath)}/.nix-cluster-shared-root
             ${lib.optionalString sharedStorage.enable ''
-              ${lib.optionalString sharedStorageClient "${pkgs.util-linux}/bin/mountpoint -q ${lib.escapeShellArg (toString sharedStorage.appRoot)}"}
+              ${lib.optionalString sharedStorageClient "${pkgs.util-linux}/bin/mountpoint -q ${lib.escapeShellArg (toString sharedStorage.exportPath)}"}
               test -f ${lib.escapeShellArg (toString sharedStorage.appRoot)}/.nix-cluster-shared-root
             ''}
           '';
