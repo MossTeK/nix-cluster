@@ -12,6 +12,15 @@
     
     pythonDeps = ps: with ps; [ matrix-nio pyyaml aiohttp ];
     pythonEnv = pkgs.python3.withPackages pythonDeps;
+    sharedStorageClientOptions = [
+      "rw"
+      "hard"
+      "timeo=600"
+      "retrans=2"
+      "_netdev"
+      "x-systemd.requires=network-online.target"
+      "x-systemd.after=network-online.target"
+    ];
   in {
     packages.${system} = {
       # Package definition for nix-cluster daemons.
@@ -435,7 +444,7 @@
           };
           clientOptions = lib.mkOption {
             type = lib.types.listOf lib.types.str;
-            default = [ "rw" "hard" "timeo=600" "retrans=2" "_netdev" "x-systemd.automount" "x-systemd.requires=network-online.target" "x-systemd.after=network-online.target" ];
+            default = sharedStorageClientOptions;
             description = "NFS client options for shared homes.";
           };
           skipClientNodes = lib.mkOption {
@@ -458,7 +467,7 @@
           };
           clientOptions = lib.mkOption {
             type = lib.types.listOf lib.types.str;
-            default = [ "rw" "hard" "timeo=600" "retrans=2" "_netdev" "x-systemd.automount" "x-systemd.requires=network-online.target" "x-systemd.after=network-online.target" ];
+            default = sharedStorageClientOptions;
             description = "NFS client options for shared application storage.";
           };
         };
@@ -1390,7 +1399,7 @@
             User = serviceUser;
             Restart = "always";
             RestartSec = "10s";
-            WorkingDirectory = cfg.repoPath;
+            WorkingDirectory = "/";
           };
           
           environment = {
@@ -1496,5 +1505,8 @@
         program = "${self.packages.${system}.install}/bin/nix-cluster-install"; 
       };
     };
+    checks.${system}.shared-storage-client-options = assert !(builtins.elem "x-systemd.automount" sharedStorageClientOptions); pkgs.runCommand "shared-storage-client-options" {} ''
+      touch $out
+    '';
   };
 }
