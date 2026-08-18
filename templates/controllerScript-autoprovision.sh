@@ -1656,9 +1656,16 @@ while read -r node; do
 
   # State 2: Live ISO (answers as the installer user)
   if can_login "$INSTALLER_USER" "$INSTALLER_IP" "$INSTALLER_PASSWORD" "$INSTALLER_AUTH_MODE"; then
-    echo "[nix-cluster] $HOSTNAME detected as Live ISO, provisioning through $INSTALLER_USER@$INSTALLER_IP..."
     publish_node_inventory "controller-probe" "live-installer"
-    publish_join_state "live-installer" "live installer reachable"
+    if [ "$REINSTALL" != "true" ]; then
+      echo "[nix-cluster] $HOSTNAME detected as Live ISO with reinstall=false; treating it as a recovery session and skipping provisioning."
+      publish_join_state "live-recovery" "live installer reachable but reinstall=false; provisioning skipped"
+      clear_join_failure
+      continue
+    fi
+
+    echo "[nix-cluster] $HOSTNAME detected as Live ISO with reinstall=true, provisioning through $INSTALLER_USER@$INSTALLER_IP..."
+    publish_join_state "live-installer" "live installer reachable and reinstall requested"
     seed_installer_authorized_key "$CONTROLLER_SSH_PUB_KEY_ESCAPED" || true
     if ! provision_live_installer; then
       continue
