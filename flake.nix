@@ -263,6 +263,9 @@
           virtual_router_id = appCfg.keepalived.virtualRouterId;
           priority = appCfg.keepalived.priority;
           vip_cidr = appCfg.keepalived.vipCidr;
+          allowed_node_roles = appCfg.keepalived.allowedNodeRoles;
+          allowed_ha_roles = appCfg.keepalived.allowedHaRoles;
+          fail_when_ineligible = appCfg.keepalived.failWhenIneligible;
         };
         cloudflare = {
           enable = appCfg.cloudflare.enable;
@@ -354,6 +357,9 @@
           virtual_router_id = appCfg.keepalived.virtualRouterId;
           priority = appCfg.keepalived.priority;
           vip_cidr = appCfg.keepalived.vipCidr;
+          allowed_node_roles = appCfg.keepalived.allowedNodeRoles;
+          allowed_ha_roles = appCfg.keepalived.allowedHaRoles;
+          fail_when_ineligible = appCfg.keepalived.failWhenIneligible;
         };
         cloudflare = {
           enable = appCfg.cloudflare.enable;
@@ -899,6 +905,21 @@
               default = "";
               description = "CIDR for the Keepalived VIP.";
             };
+            allowedNodeRoles = lib.mkOption {
+              type = lib.types.listOf (lib.types.enum [ "controller" "worker" "service" "backup" "spare" ]);
+              default = [ "controller" "worker" "service" "backup" "spare" ];
+              description = "Node placement roles that may advertise this VIP. Narrow this for app VIPs so ingress-only controllers cannot capture app traffic.";
+            };
+            allowedHaRoles = lib.mkOption {
+              type = lib.types.listOf (lib.types.enum [ "active" "passive" "spare" ]);
+              default = [ "active" "passive" "spare" ];
+              description = "HA roles that may advertise this VIP. App VIPs usually restrict this to active-capable workers.";
+            };
+            failWhenIneligible = lib.mkOption {
+              type = lib.types.bool;
+              default = false;
+              description = "Fail evaluation instead of silently omitting Keepalived when this node's placement role is not allowed to own the VIP.";
+            };
           };
           cloudflare = {
             enable = lib.mkOption {
@@ -1159,6 +1180,16 @@
           {
             assertion = (!cfg.ha.scheduler.enable) || cfg.ha.scheduler.controllerMode != "elected" || cfg.ha.scheduler.leaseTtlSeconds > cfg.ha.scheduler.intervalSeconds;
             message = "services.nix-cluster.ha.scheduler.leaseTtlSeconds must be greater than intervalSeconds when elected scheduler leadership is enabled.";
+          }
+          {
+            assertion =
+              (!cfg.apps.keepalived.enable)
+              || (!cfg.apps.keepalived.failWhenIneligible)
+              || (
+                lib.elem cfg.placement.nodeRole cfg.apps.keepalived.allowedNodeRoles
+                && lib.elem cfg.placement.haRole cfg.apps.keepalived.allowedHaRoles
+              );
+            message = "services.nix-cluster.apps.keepalived is enabled on a node whose placement role is not allowed to own this VIP.";
           }
         ];
         services.timesyncd.enable = true;
