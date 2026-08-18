@@ -273,6 +273,7 @@
           tunnel_name = appCfg.cloudflare.tunnelName;
           tunnel_domain = appCfg.cloudflare.tunnelDomain;
           tunnel_vip = appCfg.cloudflare.vip;
+          ingress_origin = appCfg.cloudflare.ingressOrigin;
           zone_id = appCfg.cloudflare.zoneId;
           account_id = appCfg.cloudflare.accountId;
         };
@@ -367,6 +368,7 @@
           tunnel_name = appCfg.cloudflare.tunnelName;
           tunnel_domain = appCfg.cloudflare.tunnelDomain;
           tunnel_vip = appCfg.cloudflare.vip;
+          ingress_origin = appCfg.cloudflare.ingressOrigin;
           zone_id = appCfg.cloudflare.zoneId;
           account_id = appCfg.cloudflare.accountId;
         };
@@ -946,6 +948,11 @@
               type = lib.types.str;
               default = "";
               description = "Ingress VIP target for Cloudflare.";
+            };
+            ingressOrigin = lib.mkOption {
+              type = lib.types.str;
+              default = "";
+              description = "Origin address cloudflared should send tunnel traffic to. Leave empty to use the VIP for compatibility; set to a connector-local ingress address when the VIP represents app backends.";
             };
             zoneId = lib.mkOption {
               type = lib.types.str;

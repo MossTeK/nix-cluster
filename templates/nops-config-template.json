@@ -34,6 +34,7 @@
   "cloudflare_tunnel_name": "",
   "cloudflare_tunnel_domain": "",
   "cloudflare_tunnel_vip": "",
+  "cloudflare_ingress_origin": "",
   "cloudflare_zone_id": "",
   "cloudflare_account_id": "",
   "apps": {
@@ -52,6 +53,7 @@
       "tunnel_name": "",
       "tunnel_domain": "",
       "tunnel_vip": "",
+      "ingress_origin": "",
       "zone_id": "",
       "account_id": ""
     },

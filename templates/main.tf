@@ -40,6 +40,11 @@ variable "vip_address" {
   default = "VIP_ADDRESS_PLACEHOLDER"
 }
 
+variable "ingress_origin_address" {
+  type    = string
+  default = "INGRESS_ORIGIN_ADDRESS_PLACEHOLDER"
+}
+
 provider "cloudflare" {
   api_token = var.cloudflare_api_token
 }
@@ -56,7 +61,8 @@ resource "cloudflare_tunnel" "fleet_ingress" {
   config_src = "cloudflare"
 }
 
-# Routes tunnel traffic to the fleet's internal VIP address.
+# Routes tunnel traffic to the connector-local ingress origin. App routes
+# behind that ingress may still target a separate service/application VIP.
 resource "cloudflare_tunnel_config" "fleet_ingress_config" {
   account_id = var.cloudflare_account_id
   tunnel_id  = cloudflare_tunnel.fleet_ingress.id
@@ -64,12 +70,12 @@ resource "cloudflare_tunnel_config" "fleet_ingress_config" {
   config {
     ingress_rule {
       hostname = "*.${var.tunnel_domain}"
-      service  = "http://${var.vip_address}:80"
+      service  = "http://${var.ingress_origin_address}:80"
     }
 
     ingress_rule {
       hostname = var.tunnel_domain
-      service  = "http://${var.vip_address}:80"
+      service  = "http://${var.ingress_origin_address}:80"
     }
 
     ingress_rule {

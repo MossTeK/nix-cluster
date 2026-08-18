@@ -47,6 +47,9 @@ normalize_install_override_key() {
     cloudflare_tunnel_vip|modules.cloudflare.tunnel_vip|modules.cloudflare.vip|apps.cloudflare.tunnel_vip|apps.cloudflare.vip)
       printf 'apps.cloudflare.tunnel_vip\n'
       ;;
+    cloudflare_ingress_origin|modules.cloudflare.ingress_origin|modules.cloudflare.ingressOrigin|apps.cloudflare.ingress_origin|apps.cloudflare.ingressOrigin)
+      printf 'apps.cloudflare.ingress_origin\n'
+      ;;
     cloudflare_zone_id|modules.cloudflare.zone_id|modules.cloudflare.zoneId|apps.cloudflare.zone_id|apps.cloudflare.zoneId)
       printf 'apps.cloudflare.zone_id\n'
       ;;
@@ -178,6 +181,7 @@ apply_install_overrides() {
       apps.cloudflare.tunnel_name) CF_TUNNEL_NAME="$value" ;;
       apps.cloudflare.tunnel_domain) CF_TUNNEL_DOMAIN="$value" ;;
       apps.cloudflare.tunnel_vip) CF_TUNNEL_VIP="$value" ;;
+      apps.cloudflare.ingress_origin) CF_INGRESS_ORIGIN="$value" ;;
       apps.cloudflare.zone_id) CF_ZONE_ID="$value" ;;
       apps.cloudflare.account_id) CF_ACCOUNT_ID="$value" ;;
       apps.pxe.enable) PXE_ENABLE="$value" ;;

@@ -601,6 +601,7 @@ if [ "$NON_INTERACTIVE" = true ]; then
     CF_TUNNEL_NAME=$(jq -r '.apps.cloudflare.tunnel_name // .apps.cloudflare.tunnelName // .modules.cloudflare.tunnel_name // .modules.cloudflare.tunnelName // .cloudflare_tunnel_name // ""' "$CONFIG_FILE")
     CF_TUNNEL_DOMAIN=$(jq -r '.apps.cloudflare.tunnel_domain // .apps.cloudflare.tunnelDomain // .modules.cloudflare.tunnel_domain // .modules.cloudflare.tunnelDomain // .cloudflare_tunnel_domain // ""' "$CONFIG_FILE")
     CF_TUNNEL_VIP=$(jq -r '.apps.cloudflare.tunnel_vip // .apps.cloudflare.vip // .modules.cloudflare.tunnel_vip // .modules.cloudflare.vip // .cloudflare_tunnel_vip // ""' "$CONFIG_FILE")
+    CF_INGRESS_ORIGIN=$(jq -r '.apps.cloudflare.ingress_origin // .apps.cloudflare.ingressOrigin // .modules.cloudflare.ingress_origin // .modules.cloudflare.ingressOrigin // .cloudflare_ingress_origin // ""' "$CONFIG_FILE")
     CF_ZONE_ID=$(jq -r '.apps.cloudflare.zone_id // .apps.cloudflare.zoneId // .modules.cloudflare.zone_id // .modules.cloudflare.zoneId // .cloudflare_zone_id // ""' "$CONFIG_FILE")
     CF_ACCOUNT_ID=$(jq -r '.apps.cloudflare.account_id // .apps.cloudflare.accountId // .modules.cloudflare.account_id // .modules.cloudflare.accountId // .cloudflare_account_id // ""' "$CONFIG_FILE")
     PXE_ENABLE=$(jq -r '.apps.pxe.enable // .modules.pxe.enable // .pxe_enable // "false"' "$CONFIG_FILE")
@@ -1050,6 +1051,7 @@ if [ "${IS_CONTROLLER:-false}" = "true" ]; then
         --arg cloudflare_tunnel_name "$CF_TUNNEL_NAME" \
         --arg cloudflare_tunnel_domain "$CF_TUNNEL_DOMAIN" \
         --arg cloudflare_tunnel_vip "$CF_TUNNEL_VIP" \
+        --arg cloudflare_ingress_origin "$CF_INGRESS_ORIGIN" \
         --arg cloudflare_zone_id "$CF_ZONE_ID" \
         --arg cloudflare_account_id "$CF_ACCOUNT_ID" \
         --arg pxe_enable "${PXE_ENABLE:-false}" \
@@ -1097,6 +1099,7 @@ if [ "${IS_CONTROLLER:-false}" = "true" ]; then
          .cloudflare_tunnel_name = $cloudflare_tunnel_name |
          .cloudflare_tunnel_domain = $cloudflare_tunnel_domain |
          .cloudflare_tunnel_vip = $cloudflare_tunnel_vip |
+         .cloudflare_ingress_origin = $cloudflare_ingress_origin |
          .cloudflare_zone_id = $cloudflare_zone_id |
          .cloudflare_account_id = $cloudflare_account_id |
          .pxe_enable = ($pxe_enable == "true") |
@@ -1337,7 +1340,11 @@ if [ "${CF_TUNNEL:-false}" = "true" ]; then
         sudo -u "$SERVICE_USER" sed -i "s|TUNNEL_NAME_PLACEHOLDER|${CF_TUNNEL_NAME}|" "$TF_MODULE_DIR/main.tf"
         sudo -u "$SERVICE_USER" sed -i "s|TUNNEL_DOMAIN_PLACEHOLDER|${CF_TUNNEL_DOMAIN}|" "$TF_MODULE_DIR/main.tf"
         sudo -u "$SERVICE_USER" sed -i "s|VIP_ADDRESS_PLACEHOLDER|${CF_TUNNEL_VIP}|" "$TF_MODULE_DIR/main.tf"
-        log "Created apps/terraform/main.tf (tunnel: $CF_TUNNEL_NAME, domain: $CF_TUNNEL_DOMAIN, vip: $CF_TUNNEL_VIP)"
+        if [ -z "${CF_INGRESS_ORIGIN:-}" ]; then
+            CF_INGRESS_ORIGIN="$CF_TUNNEL_VIP"
+        fi
+        sudo -u "$SERVICE_USER" sed -i "s|INGRESS_ORIGIN_ADDRESS_PLACEHOLDER|${CF_INGRESS_ORIGIN}|" "$TF_MODULE_DIR/main.tf"
+        log "Created apps/terraform/main.tf (tunnel: $CF_TUNNEL_NAME, domain: $CF_TUNNEL_DOMAIN, vip: $CF_TUNNEL_VIP, origin: $CF_INGRESS_ORIGIN)"
     fi
 
 fi
