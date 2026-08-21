@@ -226,6 +226,25 @@
           };
         };
       });
+      recoverySshUserType = lib.types.submodule ({ name, ... }: {
+        options = {
+          uid = lib.mkOption {
+            type = lib.types.nullOr lib.types.int;
+            default = null;
+            description = "Optional fixed numeric UID for the local recovery SSH user.";
+          };
+          authorizedKeys = lib.mkOption {
+            type = lib.types.listOf lib.types.str;
+            default = [];
+            description = "SSH public keys authorized for this local recovery user.";
+          };
+          extraGroups = lib.mkOption {
+            type = lib.types.listOf lib.types.str;
+            default = [ "wheel" ];
+            description = "Extra local groups for this recovery user.";
+          };
+        };
+      });
       legacyRepoPath = if lib.hasPrefix "${serviceHome}/" repoPathString then "${legacyServiceHome}/${lib.removePrefix "${serviceHome}/" repoPathString}" else "";
       storeCfg = cfg.ha.runtimeStore.localServer;
       storeAdvertisePeerUrl = if storeCfg.initialAdvertisePeerUrls != [] then builtins.elemAt storeCfg.initialAdvertisePeerUrls 0 else "http://${config.networking.hostName}:2380";
@@ -538,6 +557,11 @@
           default = null;
           description = "Fixed numeric GID for the nix-cluster service group. Required when shared homes are enabled.";
         };
+        recoverySshUsers = lib.mkOption {
+          type = lib.types.attrsOf recoverySshUserType;
+          default = {};
+          description = "Local emergency SSH users with homes outside shared /home so operators can recover shared-home or NFS failures.";
+        };
         identity.sharedHomes = {
           enable = lib.mkEnableOption "controller-backed shared Unix home directories";
           homeNode = lib.mkOption {
@@ -574,6 +598,11 @@
             type = lib.types.listOf lib.types.str;
             default = [];
             description = "Nodes explicitly exempted from the shared-home mount.";
+          };
+          localAuthorizedKeysOnly = lib.mkOption {
+            type = lib.types.bool;
+            default = true;
+            description = "When shared homes are enabled, keep SSH key lookup in local /etc instead of reading authorized_keys from NFS-backed home directories.";
           };
         };
         storage = {
@@ -1348,6 +1377,10 @@
             message = "Shared homes require fixed services.nix-cluster.serviceAccount.uid and .gid so NFS ownership is stable across nodes.";
           }
           {
+            assertion = lib.all (user: user.authorizedKeys != []) (lib.attrValues cfg.recoverySshUsers);
+            message = "Every services.nix-cluster.recoverySshUsers entry must declare at least one authorized key.";
+          }
+          {
             assertion = !sharedStorage.enable || (sharedHomes.enable && sharedStorage.appRoot != "" && lib.hasPrefix "/srv/nix-cluster/" (toString sharedStorage.appRoot));
             message = "Shared application storage requires shared homes and an appRoot below /srv/nix-cluster/.";
           }
@@ -1419,18 +1452,33 @@
           ++ lib.optionals cfg.ha.runtimeStore.localServer.enable [ 2379 2380 ]
           ++ lib.optionals cfg.observability.prometheus.enable [ cfg.observability.prometheus.port ]
           ++ lib.optionals (sharedHomes.enable && isSharedHomeNode) [ 2049 ];
-        users.users.${serviceUser} = {
+        services.openssh.authorizedKeysFiles = lib.mkIf (sharedHomes.enable && sharedHomes.localAuthorizedKeysOnly) (
+          lib.mkForce [ "/etc/ssh/authorized_keys.d/%u" ]
+        );
+        users.users = {
+          ${serviceUser} = {
+            isNormalUser = true;
+            description = "nix-cluster Service Daemon Account";
+            group = serviceGroup;
+            extraGroups = [ "wheel" "docker" ];
+            home = serviceHome;
+            createHome = true;
+            shell = pkgs.bash;
+            openssh.authorizedKeys.keys = cfg.serviceAccount.authorizedKeys;
+          } // lib.optionalAttrs (cfg.serviceAccount.uid != null) {
+            uid = cfg.serviceAccount.uid;
+          };
+        } // lib.mapAttrs (name: userCfg: {
           isNormalUser = true;
-          description = "nix-cluster Service Daemon Account";
-          group = serviceGroup;
-          extraGroups = [ "wheel" "docker" ];
-          home = serviceHome;
+          description = "nix-cluster local recovery SSH user";
+          extraGroups = userCfg.extraGroups;
+          home = "/var/lib/nix-cluster-recovery/${name}";
           createHome = true;
           shell = pkgs.bash;
-          openssh.authorizedKeys.keys = cfg.serviceAccount.authorizedKeys;
-        } // lib.optionalAttrs (cfg.serviceAccount.uid != null) {
-          uid = cfg.serviceAccount.uid;
-        };
+          openssh.authorizedKeys.keys = userCfg.authorizedKeys;
+        } // lib.optionalAttrs (userCfg.uid != null) {
+          uid = userCfg.uid;
+        }) cfg.recoverySshUsers;
         users.groups.${serviceGroup} = {} // lib.optionalAttrs (cfg.serviceAccount.gid != null) {
           gid = cfg.serviceAccount.gid;
         };

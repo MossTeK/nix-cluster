@@ -22,6 +22,17 @@ class NixOSModuleStaticTests(unittest.TestCase):
         self.assertIn("uid = cfg.serviceAccount.uid;", text)
         self.assertIn("gid = cfg.serviceAccount.gid;", text)
 
+    def test_recovery_ssh_users_have_local_homes(self):
+        flake = Path(__file__).resolve().parents[1] / "flake.nix"
+        text = flake.read_text(encoding="utf-8")
+
+        self.assertIn("recoverySshUsers = lib.mkOption", text)
+        self.assertIn("Every services.nix-cluster.recoverySshUsers entry", text)
+        self.assertIn("localAuthorizedKeysOnly = lib.mkOption", text)
+        self.assertIn('lib.mkForce [ "/etc/ssh/authorized_keys.d/%u" ]', text)
+        self.assertIn('home = "/var/lib/nix-cluster-recovery/${name}";', text)
+        self.assertIn("openssh.authorizedKeys.keys = userCfg.authorizedKeys;", text)
+
 
 if __name__ == "__main__":
     unittest.main()
