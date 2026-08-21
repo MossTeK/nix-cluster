@@ -192,6 +192,9 @@ class IngressRouterSettings:
     stale_after_seconds: int
     output_dir: str
     caddy_config_path: str
+    reload_timeout_seconds: int
+    reload_backoff_seconds: int
+    reload_lock_path: str
     node_addresses: dict[str, str]
     routes: dict[str, IngressRouteSettings]
 
@@ -380,6 +383,9 @@ class RuntimeConfig:
             stale_after_seconds=_as_int(ingress_router_raw.get("stale_after_seconds"), 45),
             output_dir=str(ingress_router_raw.get("output_dir", "/run/nix-cluster/ingress/caddy.d")),
             caddy_config_path=str(ingress_router_raw.get("caddy_config_path", "/etc/caddy/caddy_config")),
+            reload_timeout_seconds=_as_int(ingress_router_raw.get("reload_timeout_seconds"), 20),
+            reload_backoff_seconds=_as_int(ingress_router_raw.get("reload_backoff_seconds"), 30),
+            reload_lock_path=str(ingress_router_raw.get("reload_lock_path", "/run/nix-cluster/ingress/caddy.reload.lock")),
             node_addresses={str(name): str(address) for name, address in dict(ingress_router_raw.get("node_addresses", {})).items()},
             routes=routes,
         )

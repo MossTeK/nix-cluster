@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import logging
 import os
@@ -128,6 +129,7 @@ class IngressRouter:
         self.logger = logging.getLogger("nix-cluster.ingress")
         self.etcd = EtcdClient(config.ha.runtime_store.endpoint)
         self.last_digest = ""
+        self.reload_backoff_until = 0.0
 
     def load_placements(self) -> dict[str, dict[str, Any]]:
         prefix = self.config.ha.scheduler.placement_prefix.rstrip("/")
@@ -161,12 +163,46 @@ class IngressRouter:
         return changed
 
     def reload_caddy(self) -> None:
-        command = ["sudo", "systemctl", "reload", "caddy.service"]
-        result = subprocess.run(command, text=True, capture_output=True, check=False)
-        if result.returncode == 0:
-            self.logger.info("caddy reloaded after ingress route update")
+        now = time.monotonic()
+        if now < self.reload_backoff_until:
+            self.logger.warning("skipping caddy reload while previous failure is in backoff")
             return
-        self.logger.error("failed to reload caddy: %s", (result.stderr or result.stdout).strip())
+
+        timeout = max(1, self.router.reload_timeout_seconds)
+        active = subprocess.run(
+            ["systemctl", "is-active", "--quiet", "caddy.service"],
+            text=True,
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+        if active.returncode != 0:
+            self.logger.warning("skipping caddy reload because caddy.service is not active")
+            return
+
+        lock_path = Path(self.router.reload_lock_path)
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("w", encoding="utf-8") as lock_file:
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                self.logger.warning("skipping caddy reload because another reload is still running")
+                return
+
+            command = ["sudo", "-n", "systemctl", "reload", "caddy.service"]
+            try:
+                result = subprocess.run(command, text=True, capture_output=True, timeout=timeout, check=False)
+            except subprocess.TimeoutExpired:
+                self.reload_backoff_until = time.monotonic() + max(1, self.router.reload_backoff_seconds)
+                self.logger.error("timed out reloading caddy after %ss; backing off", timeout)
+                return
+
+            if result.returncode == 0:
+                self.logger.info("caddy reloaded after ingress route update")
+                return
+
+            self.reload_backoff_until = time.monotonic() + max(1, self.router.reload_backoff_seconds)
+            self.logger.error("failed to reload caddy: %s", (result.stderr or result.stdout).strip())
 
     def reconcile_once(self) -> bool:
         now = int(time.time())

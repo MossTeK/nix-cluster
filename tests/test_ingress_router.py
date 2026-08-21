@@ -1,8 +1,13 @@
 import time
 import unittest
+import subprocess
+import tempfile
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from nix_cluster.config import IngressRouteSettings
-from nix_cluster.ingress import render_route_snippet, target_for_route
+from nix_cluster.ingress import IngressRouter, render_route_snippet, target_for_route
 
 
 def route(**overrides):
@@ -103,6 +108,66 @@ class IngressRouterTests(unittest.TestCase):
         self.assertIn("forward_auth auth.example.com:9000", snippet)
         self.assertIn("to http://192.0.2.22:8090", snippet)
         self.assertNotIn("127.0.0.1:8090", snippet)
+
+    def test_reload_skips_when_caddy_is_inactive(self):
+        router = object.__new__(IngressRouter)
+        router.router = SimpleNamespace(reload_timeout_seconds=20, reload_backoff_seconds=30, reload_lock_path="/tmp/unused.lock")
+        router.logger = SimpleNamespace(info=lambda *a: None, warning=lambda *a: None, error=lambda *a: None)
+        router.reload_backoff_until = 0.0
+
+        with patch("subprocess.run", return_value=subprocess.CompletedProcess([], 3)) as run:
+            router.reload_caddy()
+
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_args.args[0], ["systemctl", "is-active", "--quiet", "caddy.service"])
+
+    def test_reload_timeout_enters_backoff_and_skips_retry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            router = object.__new__(IngressRouter)
+            router.router = SimpleNamespace(
+                reload_timeout_seconds=1,
+                reload_backoff_seconds=30,
+                reload_lock_path=str(Path(directory) / "reload.lock"),
+            )
+            router.logger = SimpleNamespace(info=lambda *a: None, warning=lambda *a: None, error=lambda *a: None)
+            router.reload_backoff_until = 0.0
+
+            calls = [
+                subprocess.CompletedProcess(["systemctl"], 0),
+                subprocess.TimeoutExpired(["sudo", "-n", "systemctl", "reload", "caddy.service"], 1),
+            ]
+
+            def fake_run(*args, **kwargs):
+                result = calls.pop(0)
+                if isinstance(result, Exception):
+                    raise result
+                return result
+
+            with patch("subprocess.run", side_effect=fake_run) as run:
+                router.reload_caddy()
+                self.assertGreater(router.reload_backoff_until, time.monotonic())
+                router.reload_caddy()
+
+            self.assertEqual(run.call_count, 2)
+
+    def test_reload_lock_prevents_pileups(self):
+        with tempfile.TemporaryDirectory() as directory:
+            lock_path = Path(directory) / "reload.lock"
+            lock_path.touch()
+            router = object.__new__(IngressRouter)
+            router.router = SimpleNamespace(reload_timeout_seconds=20, reload_backoff_seconds=30, reload_lock_path=str(lock_path))
+            router.logger = SimpleNamespace(info=lambda *a: None, warning=lambda *a: None, error=lambda *a: None)
+            router.reload_backoff_until = 0.0
+
+            with lock_path.open("w", encoding="utf-8") as lock_file:
+                import fcntl
+
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                with patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0)) as run:
+                    router.reload_caddy()
+
+            self.assertEqual(run.call_count, 1)
+            self.assertEqual(run.call_args.args[0], ["systemctl", "is-active", "--quiet", "caddy.service"])
 
 
 if __name__ == "__main__":

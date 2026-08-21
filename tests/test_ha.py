@@ -144,6 +144,26 @@ class SchedulerTests(unittest.TestCase):
             ["sudo", "systemctl", "start", "NetworkManager.service"],
         ])
 
+    def test_reconciler_does_not_stop_service_when_desired_owner_is_missing(self):
+        reconciler = WorkerReconciler.__new__(WorkerReconciler)
+        reconciler.hostname = "node1"
+        commands = []
+        reconciler.run_command = lambda command: commands.append(command)
+
+        action = reconciler.reconcile_unit(
+            "portal.service",
+            has_placement=True,
+            desired_owner=None,
+            status_before={
+                "load_state": "loaded",
+                "active_state": "active",
+            },
+        )
+
+        self.assertEqual(action["action"], "noop")
+        self.assertEqual(action["reason"], "desired_owner_missing")
+        self.assertEqual(commands, [])
+
     def test_local_recovery_does_not_start_missing_unit(self):
         monitor = LocalRecoveryMonitor.__new__(LocalRecoveryMonitor)
         monitor.hostname = "node1"

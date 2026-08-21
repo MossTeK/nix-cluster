@@ -618,6 +618,14 @@ class WorkerReconciler:
                 "desired_local": False,
             }
 
+        if not desired_owner:
+            return {
+                "action": "noop",
+                "reason": "desired_owner_missing",
+                "success": True,
+                "desired_local": False,
+            }
+
         if load_state != "loaded":
             if desired_local:
                 self.logger.warning(

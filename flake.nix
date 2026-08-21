@@ -249,6 +249,9 @@
       }) cfg.secretGeneration.requests;
       enabledIngressRoutes = lib.filterAttrs (_: route: route.enable) cfg.ingressRouter.routes;
       ingressRouteNames = lib.attrNames enabledIngressRoutes;
+      ingressRoutePlaceholderRules = map (routeName:
+        "f ${cfg.ingressRouter.outputDir}/${routeName}.caddy 0644 ${serviceUser} ${serviceGroup} - respond\\x20\\\"nix-cluster\\x20route\\x20unavailable:\\x20router\\x20not\\x20ready\\\"\\x20503"
+      ) ingressRouteNames;
       ingressRouteVirtualHosts = lib.listToAttrs (lib.concatMap (routeName:
         let
           route = enabledIngressRoutes.${routeName};
@@ -432,6 +435,9 @@
         stale_after_seconds = cfg.ingressRouter.staleAfterSeconds;
         output_dir = cfg.ingressRouter.outputDir;
         caddy_config_path = cfg.ingressRouter.caddyConfigPath;
+        reload_timeout_seconds = cfg.ingressRouter.reloadTimeoutSeconds;
+        reload_backoff_seconds = cfg.ingressRouter.reloadBackoffSeconds;
+        reload_lock_path = cfg.ingressRouter.reloadLockPath;
         node_addresses = cfg.ingressRouter.nodeAddresses;
         routes = lib.mapAttrs (_: route: {
           enable = route.enable;
@@ -729,6 +735,21 @@
             default = "/etc/caddy/caddy_config";
             description = "Caddy config path used when reloading generated routes.";
           };
+          reloadTimeoutSeconds = lib.mkOption {
+            type = lib.types.int;
+            default = 20;
+            description = "Hard timeout for each Caddy reload triggered by dynamic route changes.";
+          };
+          reloadBackoffSeconds = lib.mkOption {
+            type = lib.types.int;
+            default = 30;
+            description = "Minimum delay before retrying Caddy reload after a timeout or reload failure.";
+          };
+          reloadLockPath = lib.mkOption {
+            type = lib.types.str;
+            default = "/run/nix-cluster/ingress/caddy.reload.lock";
+            description = "Lock file used to serialize dynamic ingress Caddy reloads.";
+          };
           nodeAddresses = lib.mkOption {
             type = lib.types.attrsOf lib.types.str;
             default = {};
@@ -891,7 +912,7 @@
               };
               quotaBackendBytes = lib.mkOption {
                 type = lib.types.int;
-                default = 8589934592;
+                default = 1073741824;
                 description = "Maximum etcd backend database size before NOSPACE alarms block writes.";
               };
               autoCompactionMode = lib.mkOption {
@@ -1431,8 +1452,12 @@
           "d ${cfg.paths.metricsDir} 0755 ${serviceUser} ${serviceGroup} -"
           "d ${cfg.paths.heartbeatStateDir} 0755 ${serviceUser} ${serviceGroup} -"
           "d ${cfg.paths.controllerScriptDir} 0755 ${serviceUser} ${serviceGroup} -"
-        ] ++ lib.optionals cfg.ha.runtimeStore.localServer.enable [
-          "d ${cfg.paths.stateDir}/etcd 0755 ${serviceUser} ${serviceGroup} -"
+        ] ++ lib.optionals (cfg.ingressRouter.enable && cfg.apps.caddy.enable) ([
+          "d /run/nix-cluster 0755 ${serviceUser} ${serviceGroup} -"
+          "d /run/nix-cluster/ingress 0755 ${serviceUser} ${serviceGroup} -"
+          "d ${cfg.ingressRouter.outputDir} 0755 ${serviceUser} ${serviceGroup} -"
+        ] ++ ingressRoutePlaceholderRules) ++ lib.optionals cfg.ha.runtimeStore.localServer.enable [
+          "d ${cfg.paths.stateDir}/etcd 0700 ${serviceUser} ${serviceGroup} -"
         ] ++ lib.optionals (cfg.observability.loki.enable && cfg.observability.loki.url != "") [
           "d /var/lib/promtail 0755 promtail promtail -"
         ] ++ lib.optionals (sharedHomes.enable && isSharedHomeNode) [
@@ -1493,20 +1518,6 @@
 
         services.caddy.virtualHosts = lib.mkIf (cfg.ingressRouter.enable && cfg.apps.caddy.enable) ingressRouteVirtualHosts;
 
-        systemd.services.caddy = lib.mkIf (cfg.ingressRouter.enable && cfg.apps.caddy.enable) {
-          preStart = lib.mkBefore ''
-            install -d -m 0755 -o ${serviceUser} -g ${serviceGroup} ${lib.escapeShellArg cfg.ingressRouter.outputDir}
-            for route in ${lib.concatMapStringsSep " " lib.escapeShellArg ingressRouteNames}; do
-              path=${lib.escapeShellArg cfg.ingressRouter.outputDir}/"$route".caddy
-              if [ ! -e "$path" ]; then
-                printf '%s\n' 'respond "nix-cluster route unavailable: router not ready" 503' > "$path"
-                chown ${serviceUser}:${serviceGroup} "$path"
-                chmod 0644 "$path"
-              fi
-            done
-          '';
-        };
-
         systemd.services."nix-cluster-runtime-store" = lib.mkIf cfg.ha.runtimeStore.localServer.enable {
           description = "nix-cluster runtime state store (etcd)";
           wantedBy = [ "multi-user.target" ];
@@ -1518,6 +1529,9 @@
             Restart = "always";
             RestartSec = "10s";
             WorkingDirectory = "${cfg.paths.stateDir}/etcd";
+            OOMPolicy = "continue";
+            OOMScoreAdjust = "-700";
+            MemoryHigh = "768M";
           };
           script = ''
             exec ${pkgs.etcd}/bin/etcd \
