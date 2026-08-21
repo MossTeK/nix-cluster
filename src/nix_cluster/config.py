@@ -170,6 +170,33 @@ class HASettings:
 
 
 @dataclass(slots=True)
+class IngressRouteSettings:
+    name: str
+    enable: bool
+    domain: str
+    aliases: list[str]
+    unit: str
+    scheme: str
+    port: int
+    health_path: str
+    auth: str
+    authentik_host: str
+    authentik_port: int
+    extra_config: str
+
+
+@dataclass(slots=True)
+class IngressRouterSettings:
+    enable: bool
+    interval_seconds: int
+    stale_after_seconds: int
+    output_dir: str
+    caddy_config_path: str
+    node_addresses: dict[str, str]
+    routes: dict[str, IngressRouteSettings]
+
+
+@dataclass(slots=True)
 class MatrixSettings:
     enable: bool
     trigger_keywords: list[str]
@@ -199,6 +226,7 @@ class RuntimeConfig:
     observability: ObservabilitySettings
     local_recovery: LocalRecoverySettings
     ha: HASettings
+    ingress_router: IngressRouterSettings
     matrix: MatrixSettings
     webhook: WebhookSettings
 
@@ -225,6 +253,7 @@ class RuntimeConfig:
         runtime_store_raw = ha_raw.get("runtime_store", {})
         local_server_raw = runtime_store_raw.get("local_server", {})
         scheduler_raw = ha_raw.get("scheduler", {})
+        ingress_router_raw = raw.get("ingress_router", {})
         matrix_raw = raw.get("matrix", {})
         webhook_raw = raw.get("webhook", {})
 
@@ -325,6 +354,36 @@ class RuntimeConfig:
             ),
         )
 
+        routes: dict[str, IngressRouteSettings] = {}
+        for name, route_raw in dict(ingress_router_raw.get("routes", {})).items():
+            route_name = str(name)
+            if not route_name:
+                continue
+            routes[route_name] = IngressRouteSettings(
+                name=route_name,
+                enable=_as_bool(route_raw.get("enable"), True),
+                domain=str(route_raw.get("domain", "")),
+                aliases=_as_list(route_raw.get("aliases", [])),
+                unit=str(route_raw.get("unit", "")),
+                scheme=str(route_raw.get("scheme", "http")),
+                port=_as_int(route_raw.get("port"), 80),
+                health_path=str(route_raw.get("health_path", "/")),
+                auth=str(route_raw.get("auth", "none")),
+                authentik_host=str(route_raw.get("authentik_host", "127.0.0.1")),
+                authentik_port=_as_int(route_raw.get("authentik_port"), 9000),
+                extra_config=str(route_raw.get("extra_config", "")),
+            )
+
+        ingress_router = IngressRouterSettings(
+            enable=_as_bool(ingress_router_raw.get("enable"), False),
+            interval_seconds=_as_int(ingress_router_raw.get("interval_seconds"), 5),
+            stale_after_seconds=_as_int(ingress_router_raw.get("stale_after_seconds"), 45),
+            output_dir=str(ingress_router_raw.get("output_dir", "/run/nix-cluster/ingress/caddy.d")),
+            caddy_config_path=str(ingress_router_raw.get("caddy_config_path", "/etc/caddy/caddy_config")),
+            node_addresses={str(name): str(address) for name, address in dict(ingress_router_raw.get("node_addresses", {})).items()},
+            routes=routes,
+        )
+
         matrix = MatrixSettings(
             enable=_as_bool(matrix_raw.get("enable"), True),
             trigger_keywords=[keyword.lower() for keyword in _as_list(matrix_raw.get("trigger_keywords", ["push", "commit", "update"]))],
@@ -352,6 +411,7 @@ class RuntimeConfig:
             observability=observability,
             local_recovery=local_recovery,
             ha=ha,
+            ingress_router=ingress_router,
             matrix=matrix,
             webhook=webhook,
         )

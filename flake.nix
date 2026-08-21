@@ -98,6 +98,11 @@
             --add-flags "-m nix_cluster.ha recovery" \
             --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.systemd pkgs.coreutils pkgs.bash ]}
 
+          makeWrapper ${pythonEnv}/bin/python3 $out/bin/nix-cluster-ingress-router \
+            --prefix PYTHONPATH : "$out/lib" \
+            --add-flags "-m nix_cluster.ingress" \
+            --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.systemd pkgs.coreutils pkgs.bash ]}
+
           ln -s nix-cluster-daemon $out/bin/nops-daemon
           ln -s nix-cluster-webhook $out/bin/nops-webhook
           ln -s nix-cluster-observe $out/bin/nops-observe
@@ -110,6 +115,7 @@
           ln -s nix-cluster-monitor $out/bin/nops-monitor
           ln -s nix-cluster-reconciler $out/bin/nops-reconciler
           ln -s nix-cluster-recovery $out/bin/nops-recovery
+          ln -s nix-cluster-ingress-router $out/bin/nops-ingress-router
         '';
       };
 
@@ -163,6 +169,63 @@
       runtimeConfigEtcPath = lib.removePrefix "/etc/" cfg.paths.runtimeConfigPath;
       serviceLogFile = "${cfg.paths.logDir}/main.log";
       repoPathString = toString cfg.repoPath;
+      ingressRouteType = lib.types.submodule ({ name, ... }: {
+        options = {
+          enable = lib.mkOption {
+            type = lib.types.bool;
+            default = true;
+            description = "Enable this dynamic ingress route.";
+          };
+          domain = lib.mkOption {
+            type = lib.types.str;
+            default = name;
+            description = "Primary HTTP hostname served by this dynamic ingress route.";
+          };
+          aliases = lib.mkOption {
+            type = lib.types.listOf lib.types.str;
+            default = [];
+            description = "Additional hostnames that should import the same generated route.";
+          };
+          unit = lib.mkOption {
+            type = lib.types.str;
+            description = "Scheduler-managed systemd unit whose desired owner receives traffic.";
+          };
+          scheme = lib.mkOption {
+            type = lib.types.enum [ "http" "https" ];
+            default = "http";
+            description = "Scheme used between Caddy and the selected backend node.";
+          };
+          port = lib.mkOption {
+            type = lib.types.port;
+            description = "Backend port on the scheduler-selected owner node.";
+          };
+          healthPath = lib.mkOption {
+            type = lib.types.str;
+            default = "/";
+            description = "Caddy active health-check path for this backend.";
+          };
+          auth = lib.mkOption {
+            type = lib.types.enum [ "none" "authentik" ];
+            default = "none";
+            description = "Optional generated ingress auth wrapper.";
+          };
+          authentikHost = lib.mkOption {
+            type = lib.types.str;
+            default = "127.0.0.1";
+            description = "Authentik outpost upstream host used when auth is authentik.";
+          };
+          authentikPort = lib.mkOption {
+            type = lib.types.port;
+            default = 9000;
+            description = "Authentik outpost upstream port used when auth is authentik.";
+          };
+          extraConfig = lib.mkOption {
+            type = lib.types.lines;
+            default = "";
+            description = "Additional Caddy directives appended inside the generated reverse_proxy block.";
+          };
+        };
+      });
       legacyRepoPath = if lib.hasPrefix "${serviceHome}/" repoPathString then "${legacyServiceHome}/${lib.removePrefix "${serviceHome}/" repoPathString}" else "";
       storeCfg = cfg.ha.runtimeStore.localServer;
       storeAdvertisePeerUrl = if storeCfg.initialAdvertisePeerUrls != [] then builtins.elemAt storeCfg.initialAdvertisePeerUrls 0 else "http://${config.networking.hostName}:2380";
@@ -184,6 +247,21 @@
         generator = request.generator;
         length = request.length;
       }) cfg.secretGeneration.requests;
+      enabledIngressRoutes = lib.filterAttrs (_: route: route.enable) cfg.ingressRouter.routes;
+      ingressRouteNames = lib.attrNames enabledIngressRoutes;
+      ingressRouteVirtualHosts = lib.listToAttrs (lib.concatMap (routeName:
+        let
+          route = enabledIngressRoutes.${routeName};
+          domains = [ route.domain ] ++ route.aliases;
+        in
+          map (domain: {
+            name = "http://${domain}:80";
+            value.extraConfig = ''
+              bind 0.0.0.0
+              import ${cfg.ingressRouter.outputDir}/${routeName}.caddy
+            '';
+          }) domains
+      ) ingressRouteNames);
       workerInventory = lib.mapAttrs (name: worker: {
         hostname = name;
         node_directory = worker.nodeDirectory;
@@ -347,6 +425,27 @@
           resource_prefix = cfg.ha.scheduler.resourcePrefix;
           resource_interval_seconds = cfg.ha.scheduler.resourceIntervalSeconds;
         };
+      };
+      ingress_router = {
+        enable = cfg.ingressRouter.enable;
+        interval_seconds = cfg.ingressRouter.intervalSeconds;
+        stale_after_seconds = cfg.ingressRouter.staleAfterSeconds;
+        output_dir = cfg.ingressRouter.outputDir;
+        caddy_config_path = cfg.ingressRouter.caddyConfigPath;
+        node_addresses = cfg.ingressRouter.nodeAddresses;
+        routes = lib.mapAttrs (_: route: {
+          enable = route.enable;
+          domain = route.domain;
+          aliases = route.aliases;
+          unit = route.unit;
+          scheme = route.scheme;
+          port = route.port;
+          health_path = route.healthPath;
+          auth = route.auth;
+          authentik_host = route.authentikHost;
+          authentik_port = route.authentikPort;
+          extra_config = route.extraConfig;
+        }) cfg.ingressRouter.routes;
       };
       modules = {
         caddy = {
@@ -606,6 +705,39 @@
             type = lib.types.bool;
             default = false;
             description = "Log local critical-unit recovery actions without starting units.";
+          };
+        };
+        ingressRouter = {
+          enable = lib.mkEnableOption "dynamic Caddy routing from nix-cluster scheduler placement";
+          intervalSeconds = lib.mkOption {
+            type = lib.types.int;
+            default = 5;
+            description = "Seconds between ingress route reconciliation passes.";
+          };
+          staleAfterSeconds = lib.mkOption {
+            type = lib.types.int;
+            default = cfg.ha.runtimeStore.staleAfterSeconds;
+            description = "Maximum age for placement and health records before a route fails closed.";
+          };
+          outputDir = lib.mkOption {
+            type = lib.types.str;
+            default = "/run/nix-cluster/ingress/caddy.d";
+            description = "Runtime directory where generated Caddy snippets are written.";
+          };
+          caddyConfigPath = lib.mkOption {
+            type = lib.types.str;
+            default = "/etc/caddy/caddy_config";
+            description = "Caddy config path used when reloading generated routes.";
+          };
+          nodeAddresses = lib.mkOption {
+            type = lib.types.attrsOf lib.types.str;
+            default = {};
+            description = "Backend addresses keyed by node hostname. These are consumed only by the runtime router.";
+          };
+          routes = lib.mkOption {
+            type = lib.types.attrsOf ingressRouteType;
+            default = {};
+            description = "Dynamic ingress routes keyed by stable route name.";
           };
         };
         observability.extraTrackedUnits = lib.mkOption {
@@ -1359,6 +1491,22 @@
           serviceConfig.SupplementaryGroups = [ "systemd-journal" ];
         };
 
+        services.caddy.virtualHosts = lib.mkIf (cfg.ingressRouter.enable && cfg.apps.caddy.enable) ingressRouteVirtualHosts;
+
+        systemd.services.caddy = lib.mkIf (cfg.ingressRouter.enable && cfg.apps.caddy.enable) {
+          preStart = lib.mkBefore ''
+            install -d -m 0755 -o ${serviceUser} -g ${serviceGroup} ${lib.escapeShellArg cfg.ingressRouter.outputDir}
+            for route in ${lib.concatMapStringsSep " " lib.escapeShellArg ingressRouteNames}; do
+              path=${lib.escapeShellArg cfg.ingressRouter.outputDir}/"$route".caddy
+              if [ ! -e "$path" ]; then
+                printf '%s\n' 'respond "nix-cluster route unavailable: router not ready" 503' > "$path"
+                chown ${serviceUser}:${serviceGroup} "$path"
+                chmod 0644 "$path"
+              fi
+            done
+          '';
+        };
+
         systemd.services."nix-cluster-runtime-store" = lib.mkIf cfg.ha.runtimeStore.localServer.enable {
           description = "nix-cluster runtime state store (etcd)";
           wantedBy = [ "multi-user.target" ];
@@ -1498,6 +1646,10 @@
 
              if [ "${builtins.toString cfg.localRecovery.enable}" = "1" ]; then
                ${self.packages.${system}.default}/bin/nix-cluster-recovery &
+             fi
+
+             if [ "${builtins.toString (cfg.ingressRouter.enable && cfg.ha.runtimeStore.type == "etcd" && cfg.ha.runtimeStore.endpoint != "")}" = "1" ]; then
+               ${self.packages.${system}.default}/bin/nix-cluster-ingress-router &
              fi
              
              wait -n
