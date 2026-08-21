@@ -528,6 +528,16 @@
           default = [];
           description = "SSH public keys authorized for the nix-cluster service account.";
         };
+        serviceAccount.uid = lib.mkOption {
+          type = lib.types.nullOr lib.types.int;
+          default = null;
+          description = "Fixed numeric UID for the nix-cluster service account. Required when shared homes are enabled.";
+        };
+        serviceAccount.gid = lib.mkOption {
+          type = lib.types.nullOr lib.types.int;
+          default = null;
+          description = "Fixed numeric GID for the nix-cluster service group. Required when shared homes are enabled.";
+        };
         identity.sharedHomes = {
           enable = lib.mkEnableOption "controller-backed shared Unix home directories";
           homeNode = lib.mkOption {
@@ -1334,6 +1344,10 @@
             message = "Shared homes require a homeNode, homeAddress, and mountPath=/home.";
           }
           {
+            assertion = !sharedHomes.enable || (cfg.serviceAccount.uid != null && cfg.serviceAccount.gid != null);
+            message = "Shared homes require fixed services.nix-cluster.serviceAccount.uid and .gid so NFS ownership is stable across nodes.";
+          }
+          {
             assertion = !sharedStorage.enable || (sharedHomes.enable && sharedStorage.appRoot != "" && lib.hasPrefix "/srv/nix-cluster/" (toString sharedStorage.appRoot));
             message = "Shared application storage requires shared homes and an appRoot below /srv/nix-cluster/.";
           }
@@ -1414,8 +1428,12 @@
           createHome = true;
           shell = pkgs.bash;
           openssh.authorizedKeys.keys = cfg.serviceAccount.authorizedKeys;
+        } // lib.optionalAttrs (cfg.serviceAccount.uid != null) {
+          uid = cfg.serviceAccount.uid;
         };
-        users.groups.${serviceGroup} = {};
+        users.groups.${serviceGroup} = {} // lib.optionalAttrs (cfg.serviceAccount.gid != null) {
+          gid = cfg.serviceAccount.gid;
+        };
         environment.systemPackages = [ 
           self.packages.${system}.default 
           pkgs.git 

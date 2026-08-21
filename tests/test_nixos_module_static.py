@@ -12,6 +12,16 @@ class NixOSModuleStaticTests(unittest.TestCase):
         self.assertNotIn("caddy-pre-start", text)
         self.assertNotIn("install -d -m 0755 -o ${serviceUser} -g ${serviceGroup} ${lib.escapeShellArg cfg.ingressRouter.outputDir}", text)
 
+    def test_shared_homes_require_fixed_service_account_ids(self):
+        flake = Path(__file__).resolve().parents[1] / "flake.nix"
+        text = flake.read_text(encoding="utf-8")
+
+        self.assertIn("serviceAccount.uid = lib.mkOption", text)
+        self.assertIn("serviceAccount.gid = lib.mkOption", text)
+        self.assertIn("cfg.serviceAccount.uid != null && cfg.serviceAccount.gid != null", text)
+        self.assertIn("uid = cfg.serviceAccount.uid;", text)
+        self.assertIn("gid = cfg.serviceAccount.gid;", text)
+
 
 if __name__ == "__main__":
     unittest.main()
