@@ -15,6 +15,8 @@ from .core import ProcessRunner, configure_logging
 
 logger = configure_logging("nix-cluster-update")
 UPDATE_LOCK = threading.Lock()
+PENDING_LOCK = threading.Lock()
+PENDING_TRIGGER_ID: str | None = None
 
 
 class UpdateManager:
@@ -190,11 +192,21 @@ class UpdateManager:
         repo_head_after = self._run_command(["git", "rev-parse", "HEAD"], cwd=repo_dir, stage="SECRET-HEAD-AFTER")
         return repo_head_before != repo_head_after
 
-    def perform_update(self, trigger_id: str) -> str:
-        if not UPDATE_LOCK.acquire(blocking=False):
-            logger.info("NIX-CLUSTER UPDATE ALREADY RUNNING. SKIPPING TRIGGER: %s", trigger_id)
-            return "SKIPPED: update already in progress"
+    def _queue_update_trigger(self, trigger_id: str) -> str:
+        global PENDING_TRIGGER_ID
+        with PENDING_LOCK:
+            PENDING_TRIGGER_ID = trigger_id
+        logger.info("NIX-CLUSTER UPDATE ALREADY RUNNING. QUEUING TRIGGER: %s", trigger_id)
+        return "QUEUED: update already in progress"
 
+    def _pop_queued_update_trigger(self) -> str | None:
+        global PENDING_TRIGGER_ID
+        with PENDING_LOCK:
+            trigger_id = PENDING_TRIGGER_ID
+            PENDING_TRIGGER_ID = None
+        return trigger_id
+
+    def _perform_update_once(self, trigger_id: str) -> str:
         logger.info("NIX-CLUSTER UPDATE SEQUENCE INITIATED: %s", trigger_id)
         repo_dir = self.runtime_config.repo_dir
         is_controller = self.runtime_config.is_controller
@@ -252,6 +264,21 @@ class UpdateManager:
         except Exception as error:
             logger.error("NIX-CLUSTER UPDATE PIPELINE FAILED: %s", error)
             return f"FAILURE: {error}"
+
+    def perform_update(self, trigger_id: str) -> str:
+        if not UPDATE_LOCK.acquire(blocking=False):
+            return self._queue_update_trigger(trigger_id)
+
+        current_trigger = trigger_id
+        results = []
+        try:
+            while True:
+                results.append(self._perform_update_once(current_trigger))
+                queued_trigger = self._pop_queued_update_trigger()
+                if queued_trigger is None:
+                    return "\n".join(filter(None, results)).strip()
+                logger.info("NIX-CLUSTER QUEUED UPDATE STARTING: %s", queued_trigger)
+                current_trigger = queued_trigger
         finally:
             UPDATE_LOCK.release()
 

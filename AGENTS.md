@@ -162,3 +162,26 @@ nix run .#install         # Run installer directly
 - `\r` carriage returns in controllerScript are auto-stripped (Windows Git workaround)
 - `# NODES_MARKER` comment in fleet flake.nix must not be removed (setup.sh injects nodes there)
 - No test suite — all testing is live enrollment and rebuild
+
+## App and Fleet Input Update Workflow
+
+When changing `sgt/nix-cluster`, `apps/nix-cluster-portal`,
+`sgt/app-registry`, or any app repository consumed by a fleet, pushing the
+source repository is not enough. Fleets deploy pinned flake inputs and will keep
+serving the old code until their lockfiles are updated and rebuilt.
+
+Required workflow:
+- Commit and push the source repository change.
+- In the consuming fleet, run `nix flake lock --update-input <input>` for the
+  changed input.
+- Inspect the fleet diff and confirm it only updates the intended lock entry
+  unless broader fleet changes were requested.
+- Run `git diff --check` and evaluate affected NixOS configurations.
+- Commit and push the fleet lock update.
+- Verify the controller fetched the new fleet commit, rebuilt from it, and
+  restarted the affected service.
+- For UI/static asset changes, verify the live origin serves the new asset hash
+  or that the served CSS/JS contains the expected change.
+
+If a webhook arrives while another update is active, confirm the queued
+follow-up update ran before concluding the deployment is current.
