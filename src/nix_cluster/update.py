@@ -54,6 +54,22 @@ class UpdateManager:
         except Exception:
             return []
 
+    def _get_changed_files_between(self, repo_dir: str, old_ref: str, new_ref: str) -> list[str]:
+        if old_ref == new_ref:
+            return []
+        try:
+            output = self._run_command(
+                ["git", "diff", "--name-only", old_ref, new_ref],
+                cwd=repo_dir,
+                stage="GIT-DIFF-RESET-ADVANCE",
+            )
+            return output.splitlines() if output else []
+        except Exception:
+            return []
+
+    def _rev_parse(self, repo_dir: str, ref: str, stage: str) -> str:
+        return self._run_command(["git", "rev-parse", ref], cwd=repo_dir, stage=stage).strip()
+
     def _should_rebuild(self, changed_files: list[str]) -> bool:
         if not changed_files:
             return False
@@ -230,12 +246,20 @@ class UpdateManager:
                 self._fetch(repo_dir, "GIT-FETCH-POST")
 
             if is_controller:
+                head_before_reset = self._rev_parse(repo_dir, "HEAD", "GIT-HEAD-BEFORE-SECRET-SYNC")
                 self._reset(repo_dir, "GIT-RESET-SECRET-SYNC")
+                head_after_reset = self._rev_parse(repo_dir, "HEAD", "GIT-HEAD-AFTER-SECRET-SYNC")
+                reset_advanced_files = self._get_changed_files_between(repo_dir, head_before_reset, head_after_reset)
                 secrets_changed = self._sync_declared_secrets(repo_dir)
                 if secrets_changed:
                     self._fetch(repo_dir, "GIT-FETCH-SECRET-POST")
                 changed_files = self._get_changed_files(repo_dir)
-                needs_rebuild = needs_rebuild or secrets_changed or self._should_rebuild(changed_files)
+                needs_rebuild = (
+                    needs_rebuild
+                    or secrets_changed
+                    or self._should_rebuild(reset_advanced_files)
+                    or self._should_rebuild(changed_files)
+                )
             else:
                 logger.info(
                     "NODE IS WORKER. PAUSING %ss FOR CONTROLLER TO PROVISION SECRETS...",

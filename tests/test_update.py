@@ -83,6 +83,55 @@ class UpdateManagerTests(unittest.TestCase):
         self.assertEqual(results, ["done:first\ndone:second"])
         self.assertEqual(triggers, ["first", "second"])
 
+    def test_controller_rebuilds_when_reset_advances_to_queued_commit(self):
+        class ResetAdvanceManager(UpdateManager):
+            def _fetch(self, repo_dir, stage):
+                calls.append(("fetch", stage))
+
+            def _get_changed_files(self, repo_dir):
+                return []
+
+            def _should_rebuild(self, files):
+                return any(path.startswith("flake.lock") for path in files)
+
+            def _write_controller_script(self, script):
+                return "/tmp/controller.sh"
+
+            def _reset(self, repo_dir, stage):
+                calls.append(("reset", stage))
+
+            def _rev_parse(self, repo_dir, ref, stage):
+                return reset_heads.pop(0)
+
+            def _get_changed_files_between(self, repo_dir, old_ref, new_ref):
+                return ["flake.lock"]
+
+            def _sync_declared_secrets(self, repo_dir):
+                return False
+
+            def _switch_in_progress(self, repo_dir):
+                return False
+
+            def _run_command(self, command, cwd, stage):
+                calls.append(("run", stage, command))
+                return ""
+
+        manager = ResetAdvanceManager.__new__(ResetAdvanceManager)
+        manager.runtime_config = SimpleNamespace(
+            repo_dir="/repo",
+            is_controller=True,
+            controller_script="echo controller",
+            update=SimpleNamespace(commands=["echo rebuild"]),
+        )
+        manager.hostname = "node1"
+        calls = []
+        reset_heads = ["old", "new"]
+
+        result = manager._perform_update_once("queued")
+
+        self.assertEqual(result, "")
+        self.assertIn(("run", "REBUILD", ["bash", "-c", "echo rebuild"]), calls)
+
 
 if __name__ == "__main__":
     unittest.main()
