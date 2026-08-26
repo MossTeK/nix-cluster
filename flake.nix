@@ -1700,39 +1700,65 @@
           # Spawns enabled listeners as background processes and waits for either to exit, triggering a systemd restart.
           script = ''
              export PATH=/run/wrappers/bin:/run/current-system/sw/bin:$PATH
+             pids=()
+
+             cleanup() {
+               trap - TERM INT EXIT
+               if [ ''${#pids[@]} -gt 0 ]; then
+                 kill "''${pids[@]}" 2>/dev/null || true
+                 wait "''${pids[@]}" 2>/dev/null || true
+               fi
+             }
+
+             trap cleanup TERM INT EXIT
              
              if [ "${builtins.toString cfg.matrix.enable}" = "1" ]; then
                export MATRIX_BOT_TOKEN=$(cat $MATRIX_BOT_TOKEN_FILE)
                export MATRIX_ROOM_ID=$(cat $MATRIX_ROOM_ID_FILE)
                export MATRIX_HOMESERVER=$(cat $MATRIX_HOMESERVER_FILE)
                ${self.packages.${system}.default}/bin/nix-cluster-daemon &
+               pids+=("$!")
              fi
 
              if [ "${builtins.toString cfg.webhook.enable}" = "1" ]; then
                ${self.packages.${system}.default}/bin/nix-cluster-webhook &
+               pids+=("$!")
              fi
 
              if [ "${builtins.toString (cfg.ha.enable && cfg.ha.reporting.enable)}" = "1" ]; then
                ${self.packages.${system}.default}/bin/nix-cluster-reporter &
+               pids+=("$!")
              fi
 
              if [ "${builtins.toString (cfg.isController && cfg.ha.enable && cfg.ha.scheduler.enable && cfg.ha.runtimeStore.type == "etcd" && cfg.ha.runtimeStore.endpoint != "")}" = "1" ]; then
                ${self.packages.${system}.default}/bin/nix-cluster-monitor &
+               pids+=("$!")
              fi
 
              if [ "${builtins.toString (cfg.ha.enable && cfg.ha.scheduler.enable && cfg.ha.scheduler.reconcilerEnable && cfg.ha.runtimeStore.type == "etcd" && cfg.ha.runtimeStore.endpoint != "")}" = "1" ]; then
                ${self.packages.${system}.default}/bin/nix-cluster-reconciler &
+               pids+=("$!")
              fi
 
              if [ "${builtins.toString cfg.localRecovery.enable}" = "1" ]; then
                ${self.packages.${system}.default}/bin/nix-cluster-recovery &
+               pids+=("$!")
              fi
 
              if [ "${builtins.toString (cfg.ingressRouter.enable && cfg.ha.runtimeStore.type == "etcd" && cfg.ha.runtimeStore.endpoint != "")}" = "1" ]; then
                ${self.packages.${system}.default}/bin/nix-cluster-ingress-router &
+               pids+=("$!")
              fi
-             
-             wait -n
+
+             if [ ''${#pids[@]} -eq 0 ]; then
+               echo "No nix-cluster components enabled."
+               exit 0
+             fi
+
+             wait -n "''${pids[@]}"
+             status=$?
+             cleanup
+             exit "$status"
           '';
         };
 

@@ -33,6 +33,15 @@ class NixOSModuleStaticTests(unittest.TestCase):
         self.assertIn('home = "/var/lib/nix-cluster-recovery/${name}";', text)
         self.assertIn("openssh.authorizedKeys.keys = userCfg.authorizedKeys;", text)
 
+    def test_nix_cluster_service_cleans_up_child_processes(self):
+        flake = Path(__file__).resolve().parents[1] / "flake.nix"
+        text = flake.read_text(encoding="utf-8")
+
+        self.assertIn("pids=()", text)
+        self.assertIn("trap cleanup TERM INT EXIT", text)
+        self.assertIn("kill \"''${pids[@]}\"", text)
+        self.assertIn("wait -n \"''${pids[@]}\"", text)
+
 
 if __name__ == "__main__":
     unittest.main()
