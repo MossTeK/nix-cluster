@@ -1,6 +1,8 @@
 import unittest
+import subprocess
 from types import SimpleNamespace
 
+from nix_cluster import ha as ha_module
 from nix_cluster.ha import HEALTHY_ACTIVE_STATES, ClusterMonitor, LocalRecoveryMonitor, WorkerReconciler, _payload_digest
 
 
@@ -163,6 +165,59 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(action["action"], "noop")
         self.assertEqual(action["reason"], "desired_owner_missing")
         self.assertEqual(commands, [])
+
+    def test_reconciler_command_timeout_returns_failed_process(self):
+        reconciler = WorkerReconciler.__new__(WorkerReconciler)
+
+        original_run = ha_module.subprocess.run
+        original_timeout = ha_module.RECONCILER_COMMAND_TIMEOUT_SECONDS
+
+        def fake_run(command, **kwargs):
+            self.assertEqual(kwargs["timeout"], 1)
+            raise subprocess.TimeoutExpired(command, timeout=1, output="partial")
+
+        try:
+            ha_module.RECONCILER_COMMAND_TIMEOUT_SECONDS = 1
+            ha_module.subprocess.run = fake_run
+            result = reconciler.run_command(["sudo", "systemctl", "start", "hung.service"])
+        finally:
+            ha_module.subprocess.run = original_run
+            ha_module.RECONCILER_COMMAND_TIMEOUT_SECONDS = original_timeout
+
+        self.assertEqual(result.returncode, 124)
+        self.assertIn("timed out", result.stderr)
+        self.assertEqual(result.stdout, "partial")
+
+    def test_reconciler_starts_desired_unit_without_blocking(self):
+        reconciler = WorkerReconciler.__new__(WorkerReconciler)
+        reconciler.hostname = "node2"
+        reconciler.config = SimpleNamespace(
+            ha=SimpleNamespace(scheduler=SimpleNamespace(reconciler_dry_run=False))
+        )
+        reconciler.logger = SimpleNamespace(
+            warning=lambda *args, **kwargs: None,
+            info=lambda *args, **kwargs: None,
+        )
+        commands = []
+
+        def fake_run(command):
+            commands.append(command)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        reconciler.run_command = fake_run
+        action = reconciler.reconcile_unit(
+            "vaultwarden.service",
+            has_placement=True,
+            desired_owner="node2",
+            status_before={
+                "load_state": "loaded",
+                "active_state": "inactive",
+            },
+        )
+
+        self.assertEqual(action["action"], "start")
+        self.assertEqual(action["reason"], "applied")
+        self.assertEqual(commands, [["sudo", "systemctl", "--no-block", "start", "vaultwarden.service"]])
 
     def test_local_recovery_does_not_start_missing_unit(self):
         monitor = LocalRecoveryMonitor.__new__(LocalRecoveryMonitor)

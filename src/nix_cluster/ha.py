@@ -19,6 +19,7 @@ from .runtime import EtcdClient, RuntimeStoreRateLimited, RuntimeStoreWriteBlock
 ACTIVE_STATES = {"active", "activating", "reloading"}
 HEALTHY_ACTIVE_STATES = {"active", "reloading"}
 REPEATED_WARNING_INTERVAL_SECONDS = 60.0
+RECONCILER_COMMAND_TIMEOUT_SECONDS = 60
 MIN_AVAILABLE_MEMORY_BYTES = 512 * 1024 * 1024
 MIN_STATE_FREE_BYTES = 2 * 1024 * 1024 * 1024
 CLUSTER_STATE_KEY = "/nix-cluster/cluster-state"
@@ -265,7 +266,27 @@ class LocalRecoveryMonitor:
         self.previous_states: dict[str, bool] = {}
 
     def run_command(self, command: list[str]) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(command, capture_output=True, text=True, check=False)
+        try:
+            return subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=RECONCILER_COMMAND_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired as error:
+            stdout = error.stdout or ""
+            stderr = error.stderr or ""
+            if isinstance(stdout, bytes):
+                stdout = stdout.decode(errors="replace")
+            if isinstance(stderr, bytes):
+                stderr = stderr.decode(errors="replace")
+            return subprocess.CompletedProcess(
+                command,
+                124,
+                stdout=stdout,
+                stderr=stderr or f"command timed out after {RECONCILER_COMMAND_TIMEOUT_SECONDS}s",
+            )
 
     def collect_unit_status(self, unit: str) -> dict[str, Any]:
         result = self.run_command([
@@ -389,7 +410,27 @@ class WorkerReconciler:
         self.logger.warning(message, *args)
 
     def run_command(self, command: list[str]) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(command, capture_output=True, text=True, check=False)
+        try:
+            return subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=RECONCILER_COMMAND_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired as error:
+            stdout = error.stdout or ""
+            stderr = error.stderr or ""
+            if isinstance(stdout, bytes):
+                stdout = stdout.decode(errors="replace")
+            if isinstance(stderr, bytes):
+                stderr = stderr.decode(errors="replace")
+            return subprocess.CompletedProcess(
+                command,
+                124,
+                stdout=stdout,
+                stderr=stderr or f"command timed out after {RECONCILER_COMMAND_TIMEOUT_SECONDS}s",
+            )
 
     def collect_unit_status(self, unit: str, now: int) -> dict[str, Any]:
         result = self.run_command([
@@ -665,7 +706,7 @@ class WorkerReconciler:
                 "desired_local": desired_local,
             }
 
-        result = self.run_command(["sudo", "systemctl", verb, unit])
+        result = self.run_command(["sudo", "systemctl", "--no-block", verb, unit])
         if result.returncode != 0:
             self.logger.warning(
                 "scheduler_reconcile_failed host=%s unit=%s action=%s desired_owner=%s error=%s",
