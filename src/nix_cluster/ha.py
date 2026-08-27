@@ -8,6 +8,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import uuid
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,7 @@ MIN_STATE_FREE_BYTES = 2 * 1024 * 1024 * 1024
 CLUSTER_STATE_KEY = "/nix-cluster/cluster-state"
 NODE_DETAIL_PREFIX = "/nix-cluster/node-details"
 MANAGED_UNITS_KEY = "/nix-cluster/scheduler/managed-units"
+NODE_HEARTBEAT_PREFIX = "/nix-cluster/heartbeats"
 IGNORED_DISK_FSTYPES = {
     "autofs",
     "binfmt_misc",
@@ -97,6 +99,9 @@ class ServiceReporter:
         self.previous_etcd_write_at: dict[str, float] = {}
         self.last_runtime_store_warning: tuple[str, str] | None = None
         self.last_runtime_store_warning_at = 0.0
+        self.instance_id = uuid.uuid4().hex
+        self.sequence = 0
+        self.last_collection_duration_seconds = 0.0
 
     def log_runtime_store_warning(self, endpoint: str, message: str, *args: Any) -> None:
         rendered = message % args if args else message
@@ -154,6 +159,49 @@ class ServiceReporter:
             "observed_at": int(time.time()),
         }
 
+    def collect_unit_statuses(self, units: list[str], observed_at: int) -> dict[str, dict[str, Any]]:
+        """Collect selected units with one bounded systemctl invocation."""
+        if not units:
+            return {}
+        properties = [
+            "Id", "LoadState", "ActiveState", "SubState", "UnitFileState",
+            "Result", "ExecMainPID", "ExecMainStatus", "ActiveEnterTimestamp",
+        ]
+        command = ["systemctl", "show", *units, *[f"--property={name}" for name in properties]]
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=max(1, self.config.ha.reporting.collection_deadline_seconds),
+        )
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip() or "batched systemctl show failed")
+        services: dict[str, dict[str, Any]] = {}
+        for block in result.stdout.strip().split("\n\n"):
+            values = dict(line.split("=", 1) for line in block.splitlines() if "=" in line)
+            unit = values.get("Id", "")
+            if not unit:
+                continue
+            active_state = values.get("ActiveState", "unknown")
+            services[unit] = {
+                "host": self.hostname,
+                "unit": unit,
+                "load_state": values.get("LoadState", "unknown"),
+                "active_state": active_state,
+                "sub_state": values.get("SubState", "unknown"),
+                "unit_file_state": values.get("UnitFileState", "unknown"),
+                "result": values.get("Result", "unknown"),
+                "exec_main_pid": values.get("ExecMainPID", "0"),
+                "exec_main_status": values.get("ExecMainStatus", "0"),
+                "active_enter_timestamp": values.get("ActiveEnterTimestamp", ""),
+                "healthy": active_state in HEALTHY_ACTIVE_STATES and values.get("LoadState", "") == "loaded",
+                "observed_at": observed_at,
+                "reporter_instance_id": self.instance_id,
+                "sequence": self.sequence,
+            }
+        return services
+
     def build_metric_lines(self, services: dict[str, dict[str, Any]]) -> str:
         lines = [
             "# HELP nix_cluster_service_healthy Whether a reported systemd unit is healthy.",
@@ -170,6 +218,9 @@ class ServiceReporter:
             "# HELP nix_cluster_report_timestamp_seconds Unix timestamp of the most recent reporter pass.",
             "# TYPE nix_cluster_report_timestamp_seconds gauge",
             f'nix_cluster_report_timestamp_seconds{{host="{self.hostname}"}} {int(time.time())}',
+            "# HELP nix_cluster_report_collection_duration_seconds Duration of the latest service collection pass.",
+            "# TYPE nix_cluster_report_collection_duration_seconds gauge",
+            f'nix_cluster_report_collection_duration_seconds{{host="{self.hostname}"}} {self.last_collection_duration_seconds:.3f}',
         ])
         return "\n".join(lines) + "\n"
 
@@ -207,12 +258,32 @@ class ServiceReporter:
         self.logger.info("starting service reporter on %s", self.hostname)
         while True:
             try:
+                loop_started = time.monotonic()
+                observed_at = int(time.time())
+                self.sequence += 1
+                if etcd and time.monotonic() >= backoff_until:
+                    etcd.put_json(
+                        f"{NODE_HEARTBEAT_PREFIX}/{self.hostname}",
+                        {
+                            "host": self.hostname,
+                            "observed_at": observed_at,
+                            "reporter_instance_id": self.instance_id,
+                            "sequence": self.sequence,
+                        },
+                    )
                 units = self.selected_units(self.list_all_service_units())
-                services: dict[str, dict[str, Any]] = {}
+                services = self.collect_unit_statuses(units, observed_at)
+                self.last_collection_duration_seconds = time.monotonic() - loop_started
+                if self.last_collection_duration_seconds > self.config.ha.reporting.collection_deadline_seconds:
+                    self.logger.warning(
+                        "reporter_collection_deadline_exceeded host=%s duration=%.3f deadline=%s",
+                        self.hostname,
+                        self.last_collection_duration_seconds,
+                        self.config.ha.reporting.collection_deadline_seconds,
+                    )
                 etcd_updates: dict[str, dict[str, Any]] = {}
-                for unit in units:
-                    payload = self.collect_unit_status(unit)
-                    services[unit] = payload
+                for unit, payload in services.items():
+                    payload["collection_duration_seconds"] = round(self.last_collection_duration_seconds, 3)
                     prior = self.previous_states.get(unit)
                     current = bool(payload["healthy"])
                     if prior is None or prior != current:
@@ -398,6 +469,47 @@ class WorkerReconciler:
         self.previous_assignments: dict[str, str | None] = {}
         self.last_runtime_store_warning: tuple[str, str] | None = None
         self.last_runtime_store_warning_at = 0.0
+        self.owned_leases: dict[str, int] = {}
+
+    def ensure_service_lease(self, etcd: EtcdClient, ownership_key: str, unit: str, generation: int, now: int) -> bool:
+        ttl = max(15, self.config.ha.scheduler.lease_ttl_seconds)
+        existing = etcd.get_key(ownership_key)
+        payload = {"host": self.hostname, "unit": unit, "generation": generation, "observed_at": now}
+        new_lease = etcd.grant_lease(ttl)
+        if not new_lease:
+            return False
+        old_lease = 0
+        if existing is None:
+            acquired = etcd.put_json_if_absent(ownership_key, payload, lease_id=new_lease)
+        else:
+            value = existing.get("value", {})
+            old_lease = _safe_int(existing.get("lease"))
+            acquired = bool(
+                value.get("host") == self.hostname
+                and _safe_int(value.get("generation")) == generation
+                and old_lease
+                and etcd.replace_json_if_lease(ownership_key, old_lease, payload, lease_id=new_lease)
+            )
+        if not acquired:
+            etcd.revoke_lease(new_lease)
+            return False
+        self.owned_leases[unit] = new_lease
+        if old_lease and old_lease != new_lease:
+            etcd.revoke_lease(old_lease)
+        return True
+
+    def release_service_lease(self, etcd: EtcdClient, ownership_key: str, unit: str) -> None:
+        existing = etcd.get_key(ownership_key)
+        if existing and existing.get("value", {}).get("host") == self.hostname:
+            etcd.revoke_lease(_safe_int(existing.get("lease")))
+        self.owned_leases.pop(unit, None)
+
+    def fail_closed_stop(self, units: Iterable[str], reason: str) -> None:
+        for unit in list(units):
+            status = self.collect_unit_status(unit, int(time.time()))
+            if status.get("active_state") in ACTIVE_STATES:
+                self.logger.error("scheduler_lease_lost_fail_closed host=%s unit=%s reason=%s", self.hostname, unit, reason)
+                self.run_command(["sudo", "systemctl", "--no-block", "stop", unit])
 
     def log_runtime_store_warning(self, endpoint: str, message: str, *args: Any) -> None:
         rendered = message % args if args else message
@@ -798,6 +910,7 @@ class WorkerReconciler:
         resource_interval = max(15, self.config.ha.scheduler.resource_interval_seconds)
         managed_units = sorted(set(self.config.ha.scheduler.managed_units))
         placement_prefix = self.config.ha.scheduler.placement_prefix.rstrip("/")
+        ownership_prefix = self.config.ha.scheduler.ownership_prefix.rstrip("/")
         resource_prefix = self.config.ha.scheduler.resource_prefix.rstrip("/")
         node_detail_prefix = NODE_DETAIL_PREFIX.rstrip("/")
         reconcile_state_path = Path(self.config.directories.state) / "ha" / "scheduler-reconciler.json"
@@ -846,14 +959,35 @@ class WorkerReconciler:
                             desired_owner,
                         )
                     status_before = self.collect_unit_status(unit, now)
-                    action = self.reconcile_unit(
-                        unit,
-                        has_placement=has_placement,
-                        desired_owner=desired_owner or None,
-                        status_before=status_before,
-                    )
+                    generation = max(1, _safe_int(placement_payload.get("generation"), 1)) if placement_payload else 1
+                    ownership_key = f"{ownership_prefix}/{unit}"
+                    desired_local = has_placement and desired_owner == self.hostname
+                    lease_held = False
+                    lease_enforced = self.config.ha.scheduler.ownership_lease_enable
+                    if desired_local and lease_enforced:
+                        lease_held = self.ensure_service_lease(etcd, ownership_key, unit, generation, now)
+                        if lease_held:
+                            action = self.reconcile_unit(
+                                unit,
+                                has_placement=has_placement,
+                                desired_owner=desired_owner or None,
+                                status_before=status_before,
+                            )
+                        else:
+                            if status_before.get("active_state") in ACTIVE_STATES:
+                                self.run_command(["sudo", "systemctl", "--no-block", "stop", unit])
+                            action = {"action": "wait-for-lease", "reason": "ownership_lease_unavailable", "success": True, "desired_local": True}
+                    else:
+                        action = self.reconcile_unit(
+                            unit,
+                            has_placement=has_placement,
+                            desired_owner=desired_owner or None,
+                            status_before=status_before,
+                        )
                     status_after = self.collect_unit_status(unit, now)
                     active_local = status_after.get("load_state") == "loaded" and status_after.get("active_state") in ACTIVE_STATES
+                    if lease_enforced and not desired_local and not active_local:
+                        self.release_service_lease(etcd, ownership_key, unit)
                     units[unit] = {
                         "desired_owner": desired_owner or None,
                         "desired_local": bool(action.get("desired_local")),
@@ -861,6 +995,8 @@ class WorkerReconciler:
                         "has_placement": has_placement,
                         "placement_key": placement_key,
                         "placement_updated_at": _safe_int(placement_payload.get("updated_at")) if placement_payload else 0,
+                        "placement_generation": generation,
+                        "ownership_lease_held": lease_held,
                         "last_action": action.get("action"),
                         "last_action_reason": action.get("reason"),
                         "last_action_success": bool(action.get("success")),
@@ -895,6 +1031,7 @@ class WorkerReconciler:
                             retry_after,
                         )
             except RuntimeStoreRateLimited as error:
+                self.fail_closed_stop(self.owned_leases.keys(), type(error).__name__)
                 event, retry_after = _runtime_store_warning_details(error, max(5.0, float(interval)))
                 write_backoff_until = time.monotonic() + retry_after
                 self.log_runtime_store_warning(
@@ -905,6 +1042,7 @@ class WorkerReconciler:
                     retry_after,
                 )
             except urllib.error.URLError as error:
+                self.fail_closed_stop(self.owned_leases.keys(), type(error).__name__)
                 self.log_runtime_store_warning(
                     endpoint,
                     "runtime_store_unreachable endpoint=%s error=%s",
@@ -912,6 +1050,7 @@ class WorkerReconciler:
                     error,
                 )
             except Exception as error:
+                self.fail_closed_stop(self.owned_leases.keys(), type(error).__name__)
                 self.logger.exception("reconciler_loop_failed: %s", error)
             time.sleep(interval)
 
@@ -1146,6 +1285,117 @@ class ClusterMonitor:
                 return next_nodes[0]
         return ranked_nodes[0]
 
+    def advance_placement(
+        self,
+        service: str,
+        current: dict[str, Any],
+        candidate_nodes: list[str],
+        healthy_nodes: list[str],
+        ranked_nodes: list[str],
+        reports: dict[str, dict[str, Any]],
+        ownership: dict[str, Any] | None,
+        now: int,
+        stale_after: int,
+    ) -> dict[str, Any]:
+        """Advance one fail-closed, hysteretic placement state machine."""
+        cfg = self.config.ha.scheduler
+        desired = str(current.get("desired_owner") or "") or None
+        active = str(current.get("active_owner") or desired or "") or None
+        target = str(current.get("target_owner") or "") or None
+        phase = str(current.get("phase") or "stable")
+        generation = max(1, _safe_int(current.get("generation"), 1))
+        failures = max(0, _safe_int(current.get("failure_count")))
+        successes = max(0, _safe_int(current.get("success_count")))
+        stable_since = _safe_int(current.get("stable_since"), _safe_int(current.get("updated_at"), now))
+        phase_started_at = _safe_int(current.get("phase_started_at"), now)
+        cooldowns = {str(host): _safe_int(until) for host, until in dict(current.get("cooldowns", {})).items() if _safe_int(until) > now}
+
+        def fresh(host: str | None) -> bool:
+            report = reports.get(host or "", {})
+            return bool(report) and now - _safe_int(report.get("observed_at")) <= stale_after
+
+        def healthy(host: str | None) -> bool:
+            return fresh(host) and bool(reports.get(host or "", {}).get("healthy"))
+
+        owner_host = str((ownership or {}).get("host") or "") or None
+        owner_generation = _safe_int((ownership or {}).get("generation"))
+        lease_matches_active = bool(active and owner_host == active and owner_generation == generation)
+        lease_matches_target = bool(target and owner_host == target and owner_generation == generation)
+
+        eligible = [host for host in ranked_nodes if host not in cooldowns]
+        if not desired:
+            chosen = next(iter(eligible), None)
+            desired = chosen
+            target = chosen
+            active = None
+            phase = "activating" if chosen else "stable"
+            phase_started_at = now
+            stable_since = now
+
+        if phase == "stable" and active:
+            if healthy(active):
+                failures = 0
+            elif fresh(active):
+                failures += 1
+            elif cfg.ownership_lease_enable and not lease_matches_active:
+                failures += 1
+            # Unknown telemetry with a live ownership lease is not failure.
+            if failures >= max(1, cfg.failure_threshold):
+                alternatives = [host for host in eligible if host != active]
+                if alternatives:
+                    target = alternatives[0]
+                    desired = target
+                    generation += 1
+                    phase = "deactivating"
+                    phase_started_at = now
+                    successes = 0
+
+        elif phase != "stable":
+            if target and now - phase_started_at > max(1, cfg.transition_timeout_seconds):
+                cooldowns[target] = now + max(1, cfg.target_cooldown_seconds)
+                alternatives = [host for host in eligible if host not in {target, active}]
+                if alternatives:
+                    target = alternatives[0]
+                    desired = target
+                    generation += 1
+                    phase = "deactivating"
+                    phase_started_at = now
+                    successes = 0
+                else:
+                    phase = "awaiting-fence"
+            elif cfg.ownership_lease_enable and owner_host and not lease_matches_target:
+                phase = "awaiting-fence"
+            elif target:
+                phase = "verifying" if lease_matches_target and healthy(target) else "activating"
+                if healthy(target) and (lease_matches_target or not cfg.ownership_lease_enable):
+                    successes += 1
+                    if successes >= max(1, cfg.recovery_threshold):
+                        active = target
+                        desired = target
+                        target = None
+                        phase = "stable"
+                        stable_since = now
+                        phase_started_at = now
+                        failures = 0
+                        successes = 0
+                else:
+                    successes = 0
+
+        return {
+            "desired_owner": desired,
+            "active_owner": active,
+            "target_owner": target,
+            "generation": generation,
+            "phase": phase,
+            "phase_started_at": phase_started_at,
+            "stable_since": stable_since,
+            "failure_count": failures,
+            "success_count": successes,
+            "cooldowns": cooldowns,
+            "ownership_host": owner_host,
+            "ownership_generation": owner_generation,
+        }
+
     def build_cluster_metrics(self, cluster_state: dict[str, Any]) -> str:
         lines = [
             "# HELP nix_cluster_service_instances Number of nodes currently reporting a service by health state.",
@@ -1192,7 +1442,31 @@ class ClusterMonitor:
                 lines.append(f'nix_cluster_scheduler_node_schedulable{{host="{host}"}} {1 if payload.get("schedulable") else 0}')
                 lines.append(f'nix_cluster_scheduler_node_load_per_cpu{{host="{host}"}} {_safe_float(payload.get("load_1_per_cpu"))}')
         desired_owner_header_added = False
+        lines.extend([
+            "# HELP nix_cluster_service_report_age_seconds Age of a worker service report.",
+            "# TYPE nix_cluster_service_report_age_seconds gauge",
+            "# HELP nix_cluster_placement_transition_age_seconds Age of the current placement phase.",
+            "# TYPE nix_cluster_placement_transition_age_seconds gauge",
+            "# HELP nix_cluster_placement_failures Consecutive confirmed owner failures.",
+            "# TYPE nix_cluster_placement_failures gauge",
+            "# HELP nix_cluster_placement_phase Current placement state-machine phase.",
+            "# TYPE nix_cluster_placement_phase gauge",
+        ])
         for service, payload in sorted(cluster_state.get("services", {}).items()):
+            escaped_service = service.replace('"', '\\"')
+            for host, report in sorted(payload.get("reports", {}).items()):
+                escaped_host = host.replace('"', '\\"')
+                lines.append(
+                    f'nix_cluster_service_report_age_seconds{{service="{escaped_service}",host="{escaped_host}"}} '
+                    f'{max(0, int(time.time()) - _safe_int(report.get("observed_at")))}'
+                )
+            phase = str(payload.get("phase", "legacy")).replace('"', '\\"')
+            lines.append(f'nix_cluster_placement_phase{{service="{escaped_service}",phase="{phase}"}} 1')
+            lines.append(f'nix_cluster_placement_failures{{service="{escaped_service}"}} {_safe_int(payload.get("failure_count"))}')
+            lines.append(
+                f'nix_cluster_placement_transition_age_seconds{{service="{escaped_service}"}} '
+                f'{max(0, int(time.time()) - _safe_int(payload.get("phase_started_at"), int(time.time())))}'
+            )
             desired_owner = payload.get("desired_owner")
             if not desired_owner:
                 continue
@@ -1232,6 +1506,7 @@ class ClusterMonitor:
         metrics_path = Path(self.config.directories.metrics) / "cluster-state.prom"
         etcd = EtcdClient(endpoint)
         placement_prefix = self.config.ha.scheduler.placement_prefix.rstrip("/")
+        ownership_prefix = self.config.ha.scheduler.ownership_prefix.rstrip("/")
         node_detail_prefix = NODE_DETAIL_PREFIX.rstrip("/")
         write_backoff_until = 0.0
 
@@ -1259,6 +1534,12 @@ class ClusterMonitor:
                         service = key.removeprefix(placement_prefix + "/")
                         if service:
                             current_placements[service] = payload
+                ownership_records: dict[str, dict[str, Any]] = {}
+                if ownership_prefix:
+                    for key, entry in etcd.get_prefix_entries(ownership_prefix).items():
+                        service = key.removeprefix(ownership_prefix + "/")
+                        if service:
+                            ownership_records[service] = dict(entry.get("value", {}))
                 services: dict[str, dict[str, Any]] = {}
                 placement_updates: dict[str, dict[str, Any]] = {}
                 for key, payload in records.items():
@@ -1306,16 +1587,18 @@ class ClusterMonitor:
                     )
                     current_placement = current_placements.get(service, {})
                     current_owner = str(current_placement.get("desired_owner") or "") or None
-                    target = self.choose_desired_owner(
+                    state = self.advance_placement(
                         service,
+                        current_placement,
                         candidate_nodes,
                         healthy_nodes,
-                        resource_records,
-                        reports=payload["reports"],
-                        current_owner=current_owner,
-                        now=now,
-                        stale_after=resource_stale_after,
+                        ranked_nodes,
+                        payload["reports"],
+                        ownership_records.get(service),
+                        now,
+                        stale_after,
                     )
+                    target = state["desired_owner"]
                     prior = current_owner or self.previous_targets.get(service)
                     if prior != target and (prior is not None or target is not None):
                         self.logger.info(
@@ -1329,10 +1612,13 @@ class ClusterMonitor:
                     payload["scheduler_managed"] = service in managed_units
                     payload["current_owner"] = current_owner
                     payload["desired_owner"] = target if (is_leader and service in managed_units) else None
+                    payload.update({key: value for key, value in state.items() if key != "desired_owner"})
                     payload["placement_published_at"] = now if (is_leader and service in managed_units) else None
                     self.previous_targets[service] = target
                     if is_leader and service in managed_units:
-                        if not candidate_nodes:
+                        if state["phase"] != "stable":
+                            transition_reason = f"handoff_{state['phase']}"
+                        elif not candidate_nodes:
                             transition_reason = "no_candidate_nodes"
                         elif current_owner and current_owner != target:
                             transition_reason = "current_owner_unhealthy_or_less_available"
@@ -1355,6 +1641,7 @@ class ClusterMonitor:
                             "resource_ranked_nodes": ranked_nodes,
                             "transition_reason": transition_reason,
                             "updated_at": now,
+                            **state,
                         }
                     if not healthy_nodes:
                         if self.should_log_service_unavailable(service, payload["unhealthy_nodes"], payload["stale_nodes"]):

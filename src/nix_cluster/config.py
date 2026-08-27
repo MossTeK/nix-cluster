@@ -118,6 +118,7 @@ class ReportingSettings:
     services: list[str]
     include_tracked_units: bool
     interval_seconds: int
+    collection_deadline_seconds: int
 
 
 @dataclass(slots=True)
@@ -159,6 +160,13 @@ class SchedulerSettings:
     reconciler_dry_run: bool
     resource_prefix: str
     resource_interval_seconds: int
+    ownership_prefix: str
+    failure_threshold: int
+    recovery_threshold: int
+    minimum_owner_seconds: int
+    transition_timeout_seconds: int
+    target_cooldown_seconds: int
+    ownership_lease_enable: bool
 
 
 @dataclass(slots=True)
@@ -320,6 +328,7 @@ class RuntimeConfig:
                 services=_as_list(reporting_raw.get("services", [])),
                 include_tracked_units=_as_bool(reporting_raw.get("include_tracked_units"), True),
                 interval_seconds=_as_int(reporting_raw.get("interval_seconds"), 15),
+                collection_deadline_seconds=_as_int(reporting_raw.get("collection_deadline_seconds"), 30),
             ),
             runtime_store=RuntimeStoreSettings(
                 type=str(runtime_store_raw.get("type", "none")),
@@ -354,6 +363,13 @@ class RuntimeConfig:
                 reconciler_dry_run=_as_bool(scheduler_raw.get("reconciler_dry_run"), False),
                 resource_prefix=str(scheduler_raw.get("resource_prefix", "/nix-cluster/scheduler/resources")),
                 resource_interval_seconds=_as_int(scheduler_raw.get("resource_interval_seconds"), 30),
+                ownership_prefix=str(scheduler_raw.get("ownership_prefix", "/nix-cluster/scheduler/ownership")),
+                failure_threshold=_as_int(scheduler_raw.get("failure_threshold"), 3),
+                recovery_threshold=_as_int(scheduler_raw.get("recovery_threshold"), 2),
+                minimum_owner_seconds=_as_int(scheduler_raw.get("minimum_owner_seconds"), 300),
+                transition_timeout_seconds=_as_int(scheduler_raw.get("transition_timeout_seconds"), 120),
+                target_cooldown_seconds=_as_int(scheduler_raw.get("target_cooldown_seconds"), 300),
+                ownership_lease_enable=_as_bool(scheduler_raw.get("ownership_lease_enable"), False),
             ),
         )
 

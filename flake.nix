@@ -412,6 +412,7 @@
           services = cfg.ha.reporting.services;
           include_tracked_units = cfg.ha.reporting.includeTrackedUnits;
           interval_seconds = cfg.ha.reporting.intervalSeconds;
+          collection_deadline_seconds = cfg.ha.reporting.collectionDeadlineSeconds;
         };
         runtime_store = {
           type = cfg.ha.runtimeStore.type;
@@ -446,6 +447,13 @@
           reconciler_dry_run = cfg.ha.scheduler.reconcilerDryRun;
           resource_prefix = cfg.ha.scheduler.resourcePrefix;
           resource_interval_seconds = cfg.ha.scheduler.resourceIntervalSeconds;
+          ownership_prefix = cfg.ha.scheduler.ownershipPrefix;
+          failure_threshold = cfg.ha.scheduler.failureThreshold;
+          recovery_threshold = cfg.ha.scheduler.recoveryThreshold;
+          minimum_owner_seconds = cfg.ha.scheduler.minimumOwnerSeconds;
+          transition_timeout_seconds = cfg.ha.scheduler.transitionTimeoutSeconds;
+          target_cooldown_seconds = cfg.ha.scheduler.targetCooldownSeconds;
+          ownership_lease_enable = cfg.ha.scheduler.ownershipLeaseEnable;
         };
       };
       ingress_router = {
@@ -880,6 +888,11 @@
               default = 15;
               description = "Seconds between health snapshots emitted by the reporter.";
             };
+            collectionDeadlineSeconds = lib.mkOption {
+              type = lib.types.int;
+              default = 30;
+              description = "Maximum expected duration of one service-health collection pass.";
+            };
           };
           runtimeStore = {
             type = lib.mkOption {
@@ -1064,6 +1077,41 @@
               type = lib.types.int;
               default = 15;
               description = "Seconds between local resource and capacity snapshots published for scheduler decisions.";
+            };
+            ownershipPrefix = lib.mkOption {
+              type = lib.types.str;
+              default = "/nix-cluster/scheduler/ownership";
+              description = "Runtime-store prefix for exclusive per-service ownership leases.";
+            };
+            failureThreshold = lib.mkOption {
+              type = lib.types.int;
+              default = 3;
+              description = "Consecutive confirmed failure observations required before handoff.";
+            };
+            recoveryThreshold = lib.mkOption {
+              type = lib.types.int;
+              default = 2;
+              description = "Consecutive healthy observations required before committing a target.";
+            };
+            minimumOwnerSeconds = lib.mkOption {
+              type = lib.types.int;
+              default = 300;
+              description = "Minimum stable ownership dwell time outside confirmed failure handling.";
+            };
+            transitionTimeoutSeconds = lib.mkOption {
+              type = lib.types.int;
+              default = 120;
+              description = "Maximum time allowed for activation and verification phases.";
+            };
+            targetCooldownSeconds = lib.mkOption {
+              type = lib.types.int;
+              default = 300;
+              description = "Cooldown applied to a target after a failed transition.";
+            };
+            ownershipLeaseEnable = lib.mkOption {
+              type = lib.types.bool;
+              default = false;
+              description = "Require an exclusive etcd lease before a managed service may run.";
             };
           };
         };
@@ -1387,6 +1435,10 @@
           {
             assertion = (!cfg.ha.scheduler.enable) || cfg.ha.scheduler.controllerMode != "elected" || cfg.ha.scheduler.leaseTtlSeconds > cfg.ha.scheduler.intervalSeconds;
             message = "services.nix-cluster.ha.scheduler.leaseTtlSeconds must be greater than intervalSeconds when elected scheduler leadership is enabled.";
+          }
+          {
+            assertion = (!cfg.ha.reporting.enable) || cfg.ha.runtimeStore.staleAfterSeconds >= ((3 * cfg.ha.reporting.intervalSeconds) + cfg.ha.reporting.collectionDeadlineSeconds);
+            message = "services.nix-cluster.ha.runtimeStore.staleAfterSeconds must be at least three reporting intervals plus collectionDeadlineSeconds.";
           }
           {
             assertion =

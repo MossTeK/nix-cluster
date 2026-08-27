@@ -7,6 +7,63 @@ from nix_cluster.ha import HEALTHY_ACTIVE_STATES, ClusterMonitor, LocalRecoveryM
 
 
 class SchedulerTests(unittest.TestCase):
+    def monitor_with_stable_policy(self):
+        monitor = ClusterMonitor.__new__(ClusterMonitor)
+        monitor.previous_targets = {}
+        monitor.config = SimpleNamespace(ha=SimpleNamespace(scheduler=SimpleNamespace(
+            default_strategy="prefer-current-healthy",
+            ownership_lease_enable=True,
+            failure_threshold=3,
+            recovery_threshold=2,
+            minimum_owner_seconds=300,
+            transition_timeout_seconds=120,
+            target_cooldown_seconds=300,
+        )))
+        return monitor
+
+    def test_stale_report_with_live_lease_retains_owner(self):
+        monitor = self.monitor_with_stable_policy()
+        state = monitor.advance_placement(
+            "demo.service",
+            {"desired_owner": "node2", "active_owner": "node2", "generation": 1, "phase": "stable", "updated_at": 100},
+            ["node4"], [], ["node4"],
+            {"node2": {"observed_at": 40, "healthy": True}},
+            {"host": "node2", "generation": 1},
+            100, 30,
+        )
+        self.assertEqual(state["desired_owner"], "node2")
+        self.assertEqual(state["failure_count"], 0)
+        self.assertEqual(state["phase"], "stable")
+
+    def test_three_fresh_failures_begin_handoff(self):
+        monitor = self.monitor_with_stable_policy()
+        placement = {"desired_owner": "node2", "active_owner": "node2", "generation": 1, "phase": "stable", "updated_at": 100}
+        for now in (100, 115, 130):
+            placement.update(monitor.advance_placement(
+                "demo.service", placement, ["node2", "node4"], [], ["node4", "node2"],
+                {"node2": {"observed_at": now, "healthy": False}},
+                {"host": "node2", "generation": 1}, now, 45,
+            ))
+        self.assertEqual(placement["desired_owner"], "node4")
+        self.assertEqual(placement["active_owner"], "node2")
+        self.assertEqual(placement["phase"], "deactivating")
+        self.assertEqual(placement["generation"], 2)
+
+    def test_target_requires_lease_and_two_healthy_reports(self):
+        monitor = self.monitor_with_stable_policy()
+        placement = {
+            "desired_owner": "node4", "active_owner": "node2", "target_owner": "node4",
+            "generation": 2, "phase": "activating", "phase_started_at": 100,
+        }
+        for now in (110, 125):
+            placement.update(monitor.advance_placement(
+                "demo.service", placement, ["node2", "node4"], ["node4"], ["node4", "node2"],
+                {"node4": {"observed_at": now, "healthy": True}},
+                {"host": "node4", "generation": 2}, now, 45,
+            ))
+        self.assertEqual(placement["active_owner"], "node4")
+        self.assertEqual(placement["phase"], "stable")
+
     def test_activating_units_are_not_considered_healthy(self):
         self.assertNotIn("activating", HEALTHY_ACTIVE_STATES)
 

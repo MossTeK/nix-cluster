@@ -102,6 +102,17 @@ class IngressRouterTests(unittest.TestCase):
         self.assertIsNone(target)
         self.assertEqual(reason, "owner not healthy")
 
+    def test_versioned_route_requires_matching_active_owner_lease(self):
+        now = int(time.time())
+        placement = {"desired_owner": "node4", "active_owner": "node2", "generation": 7, "updated_at": now}
+        state = {"observed_at": now, "services": {"nix-cluster-portal.service": {"reports": {"node2": {"observed_at": now, "healthy": True}}}}}
+        target, reason = target_for_route(
+            route(), {"nix-cluster-portal.service": placement}, state, {"node2": "192.0.2.22"}, now, 45,
+            {"nix-cluster-portal.service": {"host": "node4", "generation": 7}},
+        )
+        self.assertIsNone(target)
+        self.assertEqual(reason, "owner lease not valid")
+
     def test_authentik_route_uses_same_backend_for_all_paths(self):
         snippet = render_route_snippet(route(), "http://192.0.2.22:8090", None)
 

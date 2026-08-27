@@ -53,6 +53,7 @@ def target_for_route(
     node_addresses: dict[str, str],
     now: int,
     stale_after: int,
+    ownership_records: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[str | None, str | None]:
     if not route.enable:
         return None, "disabled"
@@ -65,7 +66,7 @@ def target_for_route(
     if now - _safe_int(placement.get("updated_at")) > stale_after:
         return None, "stale placement"
 
-    owner = str(placement.get("desired_owner") or "")
+    owner = str(placement.get("active_owner") or placement.get("desired_owner") or "")
     if not owner:
         return None, "missing desired owner"
 
@@ -75,6 +76,11 @@ def target_for_route(
 
     if not _healthy_owner(cluster_state, route.unit, owner, now, stale_after):
         return None, "owner not healthy"
+
+    if "active_owner" in placement and ownership_records is not None:
+        ownership = ownership_records.get(route.unit, {})
+        if ownership.get("host") != owner or _safe_int(ownership.get("generation")) != _safe_int(placement.get("generation")):
+            return None, "owner lease not valid"
 
     return f"{route.scheme}://{address}:{route.port}", None
 
@@ -147,6 +153,11 @@ class IngressRouter:
             return {}
         return entry["value"]
 
+    def load_ownership(self) -> dict[str, dict[str, Any]]:
+        prefix = self.config.ha.scheduler.ownership_prefix.rstrip("/")
+        records = self.etcd.get_prefix(prefix) if prefix else {}
+        return {key.removeprefix(prefix + "/"): payload for key, payload in records.items()}
+
     def write_snippets(self, snippets: dict[str, str]) -> bool:
         output_dir = Path(self.router.output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -208,6 +219,7 @@ class IngressRouter:
         now = int(time.time())
         placements = self.load_placements()
         cluster_state = self.load_cluster_state()
+        ownership_records = self.load_ownership() if self.config.ha.scheduler.ownership_lease_enable else None
         snippets: dict[str, str] = {}
         for name, route in sorted(self.router.routes.items()):
             target, reason = target_for_route(
@@ -217,6 +229,7 @@ class IngressRouter:
                 self.router.node_addresses,
                 now,
                 self.router.stale_after_seconds,
+                ownership_records,
             )
             snippets[name] = render_route_snippet(route, target, reason)
 
