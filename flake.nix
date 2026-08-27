@@ -1665,6 +1665,7 @@
             User = serviceUser;
             Restart = "always";
             RestartSec = "10s";
+            TimeoutStopSec = "20s";
             WorkingDirectory = "/";
           };
           
@@ -1706,6 +1707,23 @@
                trap - TERM INT EXIT
                if [ ''${#pids[@]} -gt 0 ]; then
                  kill "''${pids[@]}" 2>/dev/null || true
+                 deadline=$((SECONDS + 10))
+                 while [ "$SECONDS" -lt "$deadline" ]; do
+                   alive=0
+                   for pid in "''${pids[@]}"; do
+                     if kill -0 "$pid" 2>/dev/null; then
+                       alive=1
+                       break
+                     fi
+                   done
+                   [ "$alive" -eq 0 ] && break
+                   sleep 0.1
+                 done
+                 for pid in "''${pids[@]}"; do
+                   if kill -0 "$pid" 2>/dev/null; then
+                     kill -KILL "$pid" 2>/dev/null || true
+                   fi
+                 done
                  wait "''${pids[@]}" 2>/dev/null || true
                fi
              }

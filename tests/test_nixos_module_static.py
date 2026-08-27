@@ -40,6 +40,9 @@ class NixOSModuleStaticTests(unittest.TestCase):
         self.assertIn("pids=()", text)
         self.assertIn("trap cleanup TERM INT EXIT", text)
         self.assertIn("kill \"''${pids[@]}\"", text)
+        self.assertIn('TimeoutStopSec = "20s"', text)
+        self.assertIn("deadline=$((SECONDS + 10))", text)
+        self.assertIn('kill -KILL "$pid"', text)
         self.assertIn("wait -n \"''${pids[@]}\"", text)
 
 
