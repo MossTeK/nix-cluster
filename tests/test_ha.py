@@ -49,6 +49,39 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(placement["phase"], "deactivating")
         self.assertEqual(placement["generation"], 2)
 
+    def test_operator_request_begin_handoff_without_failure(self):
+        monitor = self.monitor_with_stable_policy()
+        state = monitor.advance_placement(
+            "demo.service",
+            {"desired_owner": "node2", "active_owner": "node2", "generation": 1, "phase": "stable", "updated_at": 100},
+            ["node2", "node4"], ["node2"], ["node4", "node2"],
+            {
+                "node2": {"observed_at": 100, "healthy": True},
+                "node4": {"observed_at": 100, "healthy": False},
+            },
+            {"host": "node2", "generation": 1},
+            100, 45,
+            requested_target="node4",
+        )
+
+        self.assertEqual(state["desired_owner"], "node4")
+        self.assertEqual(state["active_owner"], "node2")
+        self.assertEqual(state["target_owner"], "node4")
+        self.assertEqual(state["phase"], "deactivating")
+        self.assertEqual(state["generation"], 2)
+
+    def test_move_request_expires_before_handoff(self):
+        monitor = self.monitor_with_stable_policy()
+        target, update = monitor.move_request_target(
+            "demo.service",
+            {"status": "pending", "target_owner": "node4", "expires_at": 99},
+            ["node4"],
+            100,
+        )
+
+        self.assertIsNone(target)
+        self.assertEqual(update["status"], "expired")
+
     def test_target_requires_lease_and_two_healthy_reports(self):
         monitor = self.monitor_with_stable_policy()
         placement = {

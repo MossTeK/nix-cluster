@@ -125,6 +125,12 @@
             --add-flags "-m nix_cluster.ingress" \
             --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.systemd pkgs.coreutils pkgs.bash ]}
 
+          # Operator CLI: reads scheduler/app state and submits safe move requests.
+          makeWrapper ${pythonEnv}/bin/python3 $out/bin/nix-cluster \
+            --prefix PYTHONPATH : "$out/lib" \
+            --add-flags "-m nix_cluster.cli" \
+            --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.coreutils pkgs.bash ]}
+
           # Old nops command names stay around so existing fleets can upgrade
           # without changing all scripts and service references at once.
           ln -s nix-cluster-daemon $out/bin/nops-daemon
@@ -503,9 +509,11 @@
             fixed_controller_host = cfg.ha.scheduler.fixedControllerHost;
             leader_key = cfg.ha.scheduler.leaderKey;
             placement_prefix = cfg.ha.scheduler.placementPrefix;
+            request_prefix = cfg.ha.scheduler.requestPrefix;
             lease_ttl_seconds = cfg.ha.scheduler.leaseTtlSeconds;
             default_strategy = cfg.ha.scheduler.defaultStrategy;
           managed_units = cfg.ha.scheduler.managedUnits;
+          app_groups = cfg.ha.scheduler.appGroups;
           reconciler_enable = cfg.ha.scheduler.reconcilerEnable;
           reconciler_interval_seconds = cfg.ha.scheduler.reconcilerIntervalSeconds;
           reconciler_dry_run = cfg.ha.scheduler.reconcilerDryRun;
@@ -1123,6 +1131,11 @@
               default = "/nix-cluster/scheduler/placement";
               description = "Runtime store prefix where the scheduler publishes desired service ownership records.";
             };
+            requestPrefix = lib.mkOption {
+              type = lib.types.str;
+              default = "/nix-cluster/scheduler/requests";
+              description = "Runtime store prefix where operator move requests are submitted for controller-mediated handoff.";
+            };
             leaseTtlSeconds = lib.mkOption {
               type = lib.types.int;
               default = 15;
@@ -1137,6 +1150,11 @@
               type = lib.types.listOf lib.types.str;
               default = [];
               description = "Systemd units that the worker-side scheduler reconciler may start or stop based on desired placement records.";
+            };
+            appGroups = lib.mkOption {
+              type = lib.types.attrsOf (lib.types.listOf lib.types.str);
+              default = {};
+              description = "Named application groups that should be listed and moved together by the nix-cluster operator CLI.";
             };
             reconcilerEnable = lib.mkOption {
               type = lib.types.bool;

@@ -27,6 +27,7 @@ CLUSTER_STATE_KEY = "/nix-cluster/cluster-state"
 NODE_DETAIL_PREFIX = "/nix-cluster/node-details"
 MANAGED_UNITS_KEY = "/nix-cluster/scheduler/managed-units"
 NODE_HEARTBEAT_PREFIX = "/nix-cluster/heartbeats"
+REQUEST_COMPLETE_TTL_SECONDS = 300
 IGNORED_DISK_FSTYPES = {
     "autofs",
     "binfmt_misc",
@@ -1344,6 +1345,7 @@ class ClusterMonitor:
         ownership: dict[str, Any] | None,
         now: int,
         stale_after: int,
+        requested_target: str | None = None,
     ) -> dict[str, Any]:
         """Advance one fail-closed, hysteretic placement state machine."""
         cfg = self.config.ha.scheduler
@@ -1372,7 +1374,7 @@ class ClusterMonitor:
 
         eligible = [host for host in ranked_nodes if host not in cooldowns]
         if not desired:
-            chosen = next(iter(eligible), None)
+            chosen = requested_target if requested_target in eligible else next(iter(eligible), None)
             desired = chosen
             target = chosen
             active = None
@@ -1381,7 +1383,15 @@ class ClusterMonitor:
             stable_since = now
 
         if phase == "stable" and active:
-            if healthy(active):
+            if requested_target and requested_target in eligible and requested_target != active:
+                target = requested_target
+                desired = target
+                generation += 1
+                phase = "deactivating"
+                phase_started_at = now
+                failures = 0
+                successes = 0
+            elif healthy(active):
                 failures = 0
             elif fresh(active):
                 failures += 1
@@ -1443,6 +1453,49 @@ class ClusterMonitor:
             "ownership_host": owner_host,
             "ownership_generation": owner_generation,
         }
+
+    def move_request_target(
+        self,
+        service: str,
+        request: dict[str, Any] | None,
+        candidate_nodes: list[str],
+        now: int,
+    ) -> tuple[str | None, dict[str, Any] | None]:
+        if not request or request.get("status") != "pending":
+            return None, None
+        target = str(request.get("target_owner") or "") or None
+        if _safe_int(request.get("expires_at")) <= now:
+            failed = dict(request)
+            failed.update({"status": "expired", "completed_at": now, "failure": "request expired"})
+            return None, failed
+        if not target:
+            failed = dict(request)
+            failed.update({"status": "failed", "completed_at": now, "failure": "missing target_owner"})
+            return None, failed
+        if target not in candidate_nodes:
+            failed = dict(request)
+            failed.update({"status": "failed", "completed_at": now, "failure": f"target does not report unit {service}"})
+            return None, failed
+        return target, None
+
+    def update_move_request(
+        self,
+        request: dict[str, Any] | None,
+        state: dict[str, Any],
+        now: int,
+    ) -> dict[str, Any] | None:
+        if not request or request.get("status") != "pending":
+            return None
+        target = str(request.get("target_owner") or "")
+        if state.get("phase") == "stable" and state.get("active_owner") == target:
+            complete = dict(request)
+            complete.update({
+                "status": "completed",
+                "completed_at": now,
+                "expires_at": now + REQUEST_COMPLETE_TTL_SECONDS,
+            })
+            return complete
+        return None
 
     def build_cluster_metrics(self, cluster_state: dict[str, Any]) -> str:
         # Render Prometheus metrics for the controller's aggregate cluster view.
@@ -1556,6 +1609,7 @@ class ClusterMonitor:
         metrics_path = Path(self.config.directories.metrics) / "cluster-state.prom"
         etcd = EtcdClient(endpoint)
         placement_prefix = self.config.ha.scheduler.placement_prefix.rstrip("/")
+        request_prefix = self.config.ha.scheduler.request_prefix.rstrip("/")
         ownership_prefix = self.config.ha.scheduler.ownership_prefix.rstrip("/")
         node_detail_prefix = NODE_DETAIL_PREFIX.rstrip("/")
         write_backoff_until = 0.0
@@ -1584,6 +1638,12 @@ class ClusterMonitor:
                         service = key.removeprefix(placement_prefix + "/")
                         if service:
                             current_placements[service] = payload
+                move_requests: dict[str, dict[str, Any]] = {}
+                if request_prefix:
+                    for key, payload in etcd.get_prefix(request_prefix).items():
+                        service = key.removeprefix(request_prefix + "/")
+                        if service and isinstance(payload, dict):
+                            move_requests[service] = payload
                 ownership_records: dict[str, dict[str, Any]] = {}
                 if ownership_prefix:
                     for key, entry in etcd.get_prefix_entries(ownership_prefix).items():
@@ -1637,6 +1697,12 @@ class ClusterMonitor:
                     )
                     current_placement = current_placements.get(service, {})
                     current_owner = str(current_placement.get("desired_owner") or "") or None
+                    requested_target, request_update = self.move_request_target(
+                        service,
+                        move_requests.get(service),
+                        candidate_nodes,
+                        now,
+                    )
                     state = self.advance_placement(
                         service,
                         current_placement,
@@ -1647,7 +1713,10 @@ class ClusterMonitor:
                         ownership_records.get(service),
                         now,
                         stale_after,
+                        requested_target=requested_target,
                     )
+                    if request_update is None:
+                        request_update = self.update_move_request(move_requests.get(service), state, now)
                     target = state["desired_owner"]
                     prior = current_owner or self.previous_targets.get(service)
                     if prior != target and (prior is not None or target is not None):
@@ -1670,6 +1739,8 @@ class ClusterMonitor:
                             transition_reason = f"handoff_{state['phase']}"
                         elif not candidate_nodes:
                             transition_reason = "no_candidate_nodes"
+                        elif requested_target:
+                            transition_reason = "operator_requested_move"
                         elif current_owner and current_owner != target:
                             transition_reason = "current_owner_unhealthy_or_less_available"
                         elif current_owner == target:
@@ -1693,6 +1764,8 @@ class ClusterMonitor:
                             "updated_at": now,
                             **state,
                         }
+                        if request_update and request_prefix:
+                            placement_updates[f"{request_prefix}/{service}"] = request_update
                     if not healthy_nodes:
                         if self.should_log_service_unavailable(service, payload["unhealthy_nodes"], payload["stale_nodes"]):
                             self.logger.warning(

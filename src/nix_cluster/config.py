@@ -169,9 +169,11 @@ class SchedulerSettings:
     fixed_controller_host: str
     leader_key: str
     placement_prefix: str
+    request_prefix: str
     lease_ttl_seconds: int
     default_strategy: str
     managed_units: list[str]
+    app_groups: dict[str, list[str]]
     reconciler_enable: bool
     reconciler_interval_seconds: int
     reconciler_dry_run: bool
@@ -380,9 +382,11 @@ class RuntimeConfig:
                 fixed_controller_host=str(scheduler_raw.get("fixed_controller_host", "")),
                 leader_key=str(scheduler_raw.get("leader_key", "/nix-cluster/scheduler/leader")),
                 placement_prefix=str(scheduler_raw.get("placement_prefix", "/nix-cluster/scheduler/placement")),
+                request_prefix=str(scheduler_raw.get("request_prefix", "/nix-cluster/scheduler/requests")),
                 lease_ttl_seconds=_as_int(scheduler_raw.get("lease_ttl_seconds"), 45),
                 default_strategy=str(scheduler_raw.get("default_strategy", "prefer-current-healthy")),
                 managed_units=_as_list(scheduler_raw.get("managed_units", [])),
+                app_groups={str(name): _as_list(units) for name, units in dict(scheduler_raw.get("app_groups", {})).items()},
                 reconciler_enable=_as_bool(scheduler_raw.get("reconciler_enable"), False),
                 reconciler_interval_seconds=_as_int(scheduler_raw.get("reconciler_interval_seconds"), 15),
                 reconciler_dry_run=_as_bool(scheduler_raw.get("reconciler_dry_run"), False),
