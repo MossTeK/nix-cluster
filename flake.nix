@@ -6,12 +6,17 @@
     sops-nix.url = "github:Mic92/sops-nix";
   };
 
+  # Everything this flake exposes lives under one Linux system target for now.
   outputs = { self, nixpkgs, sops-nix, ... }: let
     system = "x86_64-linux";
     pkgs = nixpkgs.legacyPackages.${system};
     
+    # These are the Python libraries the runtime daemons import directly.
     pythonDeps = ps: with ps; [ matrix-nio pyyaml aiohttp ];
+    # The wrappers below call this Python with src/ added to PYTHONPATH.
     pythonEnv = pkgs.python3.withPackages pythonDeps;
+    # Shared NFS mounts should block until storage is truly reachable, not fail
+    # open through automount behavior that can hide broken app data paths.
     sharedStorageClientOptions = [
       "rw"
       "hard"
@@ -22,6 +27,7 @@
       "x-systemd.after=network-online.target"
     ];
   in {
+    # Build outputs: one runtime package and one installer package.
     packages.${system} = {
       # Package definition for nix-cluster daemons.
       # Compiles the Python-based Matrix listener and Webhook server into wrapped executables.
@@ -54,55 +60,73 @@
             --add-flags "-m nix_cluster.webhook" \
             --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.git pkgs.inetutils pkgs.nixos-rebuild pkgs.systemd pkgs.procps pkgs.bash pkgs.sops pkgs.age pkgs.jq pkgs.openssh pkgs.sshpass pkgs.mkpasswd ]}
 
+          # Local status/journal helper. This is for looking at the current node.
           makeWrapper ${pkgs.bash}/bin/bash $out/bin/nix-cluster-observe \
             --add-flags "$out/lib/scripts/observe.sh" \
             --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.systemd pkgs.jq pkgs.bash ]}
 
+          # Remote status/journal helper. This shells into another node and
+          # asks that node to run nix-cluster-observe.
           makeWrapper ${pkgs.bash}/bin/bash $out/bin/nix-cluster-node \
             --add-flags "$out/lib/scripts/node-observe.sh" \
             --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.openssh pkgs.sshpass pkgs.sops pkgs.age pkgs.jq pkgs.bash ]}
 
+          # Fleet summary helper. It fans out through nix-cluster-node and
+          # returns either readable text or JSON.
           makeWrapper ${pkgs.bash}/bin/bash $out/bin/nix-cluster-fleet-status \
             --add-flags "$out/lib/scripts/fleet-status.sh" \
             --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.sops pkgs.age pkgs.jq pkgs.openssh pkgs.bash ]}
 
+          # Polling view over fleet-status, useful while enrollments or
+          # failovers are moving.
           makeWrapper ${pkgs.bash}/bin/bash $out/bin/nix-cluster-fleet-watch \
             --add-flags "$out/lib/scripts/fleet-watch.sh" \
             --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.jq pkgs.coreutils pkgs.bash ]}
 
+          # Secret reconciler used by the controller before rebuilds. It creates
+          # missing generated SOPS values and can commit them back to Git.
           makeWrapper ${pkgs.bash}/bin/bash $out/bin/nix-cluster-secret-ensure \
             --add-flags "$out/lib/scripts/secret-ensure.sh" \
             --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.git pkgs.sops pkgs.age pkgs.openssl pkgs.jq pkgs.coreutils pkgs.bash ]}
 
+          # Worker-side heartbeat helper. It only records controller reachability;
+          # it does not deploy or rebuild anything.
           makeWrapper ${pkgs.bash}/bin/bash $out/bin/nix-cluster-controller-heartbeat \
             --add-flags "$out/lib/scripts/controller-heartbeat.sh" \
             --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.iputils pkgs.inetutils pkgs.systemd pkgs.jq pkgs.coreutils pkgs.bash ]}
 
+          # HA reporter: samples local systemd units and publishes health.
           makeWrapper ${pythonEnv}/bin/python3 $out/bin/nix-cluster-reporter \
             --prefix PYTHONPATH : "$out/lib" \
             --add-flags "-m nix_cluster.ha reporter" \
             --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.systemd pkgs.coreutils pkgs.bash ]}
 
+          # Controller HA monitor: reads health reports and publishes desired owners.
           makeWrapper ${pythonEnv}/bin/python3 $out/bin/nix-cluster-monitor \
             --prefix PYTHONPATH : "$out/lib" \
             --add-flags "-m nix_cluster.ha monitor" \
             --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.systemd pkgs.coreutils pkgs.bash ]}
 
+          # Worker reconciler: starts/stops scheduler-managed units locally.
           makeWrapper ${pythonEnv}/bin/python3 $out/bin/nix-cluster-reconciler \
             --prefix PYTHONPATH : "$out/lib" \
             --add-flags "-m nix_cluster.ha reconciler" \
             --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.systemd pkgs.coreutils pkgs.bash ]}
 
+          # Local recovery loop: keeps critical local units alive regardless of HA.
           makeWrapper ${pythonEnv}/bin/python3 $out/bin/nix-cluster-recovery \
             --prefix PYTHONPATH : "$out/lib" \
             --add-flags "-m nix_cluster.ha recovery" \
             --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.systemd pkgs.coreutils pkgs.bash ]}
 
+          # Dynamic ingress router: turns scheduler placement into Caddy snippets.
           makeWrapper ${pythonEnv}/bin/python3 $out/bin/nix-cluster-ingress-router \
             --prefix PYTHONPATH : "$out/lib" \
             --add-flags "-m nix_cluster.ingress" \
             --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.systemd pkgs.coreutils pkgs.bash ]}
 
+          # Old nops command names stay around so existing fleets can upgrade
+          # without changing all scripts and service references at once.
           ln -s nix-cluster-daemon $out/bin/nops-daemon
           ln -s nix-cluster-webhook $out/bin/nops-webhook
           ln -s nix-cluster-observe $out/bin/nops-observe
@@ -138,6 +162,8 @@
           chmod +x $out/share/nix-cluster/src/setup.sh $out/share/nix-cluster/src/scripts/*.sh 2>/dev/null || true
           cp -r templates $out/share/nix-cluster/templates
 
+          # The installer is a Bash state machine plus templates. Environment
+          # variables point it at the files copied into the Nix store above.
           makeWrapper ${pkgs.bash}/bin/bash $out/bin/nix-cluster-install \
             --add-flags "$out/share/nix-cluster/src/setup.sh" \
             --set NIX_CLUSTER_TEMPLATES_DIR "$out/share/nix-cluster/templates" \
@@ -159,16 +185,25 @@
     # Declares the nix-cluster service user, systemd daemon(s), firewall rules, and injects SOPS-decrypted secrets.
     nixosModules.default = { config, lib, pkgs, ... }: 
     let 
+      # `cfg` is the user-facing module config at services.nix-cluster.*.
       cfg = config.services."nix-cluster";
+      # Shared home and app storage are split so a fleet can share /home,
+      # app data, both, or neither.
       sharedHomes = cfg.identity.sharedHomes;
       sharedStorage = cfg.storage;
+      # Runtime services always run as this account. The old nops home is kept
+      # below only for upgrade/migration compatibility.
       serviceUser = "nix-cluster";
       serviceGroup = serviceUser;
       serviceHome = "/home/${serviceUser}";
       legacyServiceHome = "/home/nops";
+      # environment.etc wants a path relative to /etc, while the Python code
+      # wants the full absolute path in its environment.
       runtimeConfigEtcPath = lib.removePrefix "/etc/" cfg.paths.runtimeConfigPath;
       serviceLogFile = "${cfg.paths.logDir}/main.log";
       repoPathString = toString cfg.repoPath;
+      # Per-route schema for dynamic ingress. Python later turns these records
+      # into Caddy snippets when the scheduler has picked a healthy owner.
       ingressRouteType = lib.types.submodule ({ name, ... }: {
         options = {
           enable = lib.mkOption {
@@ -226,6 +261,8 @@
           };
         };
       });
+      # Emergency users deliberately live outside shared /home so an NFS/home
+      # outage does not lock operators out of recovery.
       recoverySshUserType = lib.types.submodule ({ name, ... }: {
         options = {
           uid = lib.mkOption {
@@ -245,13 +282,19 @@
           };
         };
       });
+      # If an older install used /home/nops, copy it forward during activation.
       legacyRepoPath = if lib.hasPrefix "${serviceHome}/" repoPathString then "${legacyServiceHome}/${lib.removePrefix "${serviceHome}/" repoPathString}" else "";
+      # Local etcd startup needs a single comma-separated initial-cluster value.
+      # If the user does not provide one, this node starts as a one-member store.
       storeCfg = cfg.ha.runtimeStore.localServer;
       storeAdvertisePeerUrl = if storeCfg.initialAdvertisePeerUrls != [] then builtins.elemAt storeCfg.initialAdvertisePeerUrls 0 else "http://${config.networking.hostName}:2380";
       storeInitialCluster = if storeCfg.initialCluster != [] then lib.concatStringsSep "," storeCfg.initialCluster else "${storeCfg.name}=${storeAdvertisePeerUrl}";
+      # These booleans decide whether this node exports storage or mounts it.
       isSharedHomeNode = config.networking.hostName == sharedHomes.homeNode;
       sharedHomeClient = sharedHomes.enable && !isSharedHomeNode && !(builtins.elem config.networking.hostName sharedHomes.skipClientNodes);
       sharedStorageClient = sharedStorage.enable && !isSharedHomeNode;
+      # The observability list is intentionally assembled here so apps can add
+      # their units without the Python reporter hard-coding every app.
       trackedUnits = lib.unique (
         [ "nix-cluster.service" ]
         ++ lib.optionals cfg.localRecovery.enable cfg.localRecovery.criticalUnits
@@ -262,15 +305,20 @@
         ++ cfg.observability.extraTrackedUnits
       );
       appCfg = cfg.apps;
+      # Keep only the fields the Python secret reconciler needs at runtime.
       secretGenerationRequests = lib.mapAttrs (_: request: {
         generator = request.generator;
         length = request.length;
       }) cfg.secretGeneration.requests;
+      # Caddy gets placeholder snippets at boot, then ingress.py replaces them
+      # once scheduler placement and health records exist.
       enabledIngressRoutes = lib.filterAttrs (_: route: route.enable) cfg.ingressRouter.routes;
       ingressRouteNames = lib.attrNames enabledIngressRoutes;
       ingressRoutePlaceholderRules = map (routeName:
         "f ${cfg.ingressRouter.outputDir}/${routeName}.caddy 0644 ${serviceUser} ${serviceGroup} - respond\\x20\\\"nix-cluster\\x20route\\x20unavailable:\\x20router\\x20not\\x20ready\\\"\\x20503"
       ) ingressRouteNames;
+      # The static NixOS Caddy config imports per-route files. The route body is
+      # runtime data, but the virtual host names stay declarative.
       ingressRouteVirtualHosts = lib.listToAttrs (lib.concatMap (routeName:
         let
           route = enabledIngressRoutes.${routeName};
@@ -284,6 +332,8 @@
             '';
           }) domains
       ) ingressRouteNames);
+      # Controller-driven enrollment serializes worker relationships into the
+      # runtime JSON so shell/Python helpers do not need to evaluate Nix live.
       workerInventory = lib.mapAttrs (name: worker: {
         hostname = name;
         node_directory = worker.nodeDirectory;
@@ -307,12 +357,15 @@
         node_admin_pass = worker.nodeAdminPass;
         node_admin_password_hash = worker.nodeAdminPasswordHash;
       }) cfg.workers;
-      # Serializes repo path and rebuild commands to a JSON file the Python daemon reads at startup.
+      # Serializes module options into the JSON file read by every Python daemon.
+      # This is the bridge from declarative Nix config into runtime behavior.
     nixClusterConfig = pkgs.writeText "nix-cluster-config.json" (builtins.toJSON {
+      # Top-level identity and role of this node.
       is_controller = cfg.isController;
       hostname = config.networking.hostName;
       # AUTOMATIC SANITIZATION: Strip \r from the controller script
       controller_script = builtins.replaceStrings [ "\r" ] [ "" ] cfg.controllerScript;
+      # Paths the runtime code uses for Git state, logs, metrics, and scripts.
       directories = {
         repo = cfg.repoPath;
         log = cfg.paths.logDir;
@@ -322,10 +375,12 @@
         runtime_config = cfg.paths.runtimeConfigPath;
         controller_script_dir = cfg.paths.controllerScriptDir;
       };
+      # Legacy shape kept for older code that looked under `commands.update`.
       commands = {
         # AUTOMATIC SANITIZATION: Strip \r from every command in the update list
         update = builtins.map (cmd: builtins.replaceStrings [ "\r" ] [ "" ] cmd) cfg.afterPush;
       };
+      # Current update-manager shape: Git remote/ref, rebuild commands, and path filters.
       update = {
         update = builtins.map (cmd: builtins.replaceStrings [ "\r" ] [ "" ] cmd) cfg.afterPush;
         remote_name = cfg.update.remoteName;
@@ -333,6 +388,7 @@
         relevant_paths = cfg.update.relevantPaths;
         worker_wait_seconds = cfg.update.workerWaitSeconds;
       };
+      # Controller timing and worker heartbeat settings.
       controller = {
         reconcile_interval_seconds = cfg.controller.reconcileIntervalSeconds;
         monitor = {
@@ -341,18 +397,23 @@
           targets = cfg.controller.monitor.targets;
         };
       };
+      # Static node role labels consumed by templates, apps, and runtime policy.
       placement = {
         node_role = cfg.placement.nodeRole;
         ha_role = cfg.placement.haRole;
         keepalived_role = cfg.placement.keepalivedRole;
       };
+      # Critical local units should be recovered even when HA scheduling is disabled.
       local_recovery = {
         enable = cfg.localRecovery.enable;
         critical_units = cfg.localRecovery.criticalUnits;
         interval_seconds = cfg.localRecovery.intervalSeconds;
         dry_run = cfg.localRecovery.dryRun;
       };
+      # Enrollment/provisioning inventory for controller-driven workers.
       workers = workerInventory;
+      # App settings are included for installer/runtime helpers that need the
+      # deployment knobs without parsing the Nix module directly.
       apps = {
         caddy = {
           enable = appCfg.caddy.enable;
@@ -388,6 +449,7 @@
           enable = appCfg.postgresBackup.enable;
         };
       };
+      # Units and integrations that feed local status, Prometheus, and logs.
       observability = {
         tracked_units = trackedUnits;
         prometheus = {
@@ -399,11 +461,13 @@
           url = cfg.observability.loki.url;
         };
       };
+      # App-declared generated secrets that the controller reconciles into SOPS.
       secret_generation = {
         enable = cfg.secretGeneration.enable;
         sops_file = cfg.secretGeneration.sopsFile;
         requests = secretGenerationRequests;
       };
+      # HA runtime-store and scheduler settings consumed by ha.py.
       ha = {
         enable = cfg.ha.enable;
         reporting = {
@@ -456,6 +520,7 @@
           ownership_lease_enable = cfg.ha.scheduler.ownershipLeaseEnable;
         };
       };
+      # Dynamic ingress settings consumed by ingress.py.
       ingress_router = {
         enable = cfg.ingressRouter.enable;
         interval_seconds = cfg.ingressRouter.intervalSeconds;
@@ -480,6 +545,7 @@
           extra_config = route.extraConfig;
         }) cfg.ingressRouter.routes;
       };
+      # Deprecated alias of `apps`; kept so older helpers do not break during upgrades.
       modules = {
         caddy = {
           enable = appCfg.caddy.enable;
@@ -515,6 +581,7 @@
           enable = appCfg.postgresBackup.enable;
         };
       };
+      # Trigger listener settings.
       matrix = {
         enable = cfg.matrix.enable;
         trigger_keywords = cfg.matrix.triggerKeywords;
@@ -529,13 +596,17 @@
       };
     });
     in {
+      # Bring in SOPS and keep old option names usable during the nops -> nix-cluster rename.
       imports = [
         sops-nix.nixosModules.sops
         (lib.mkRenamedOptionModule [ "services" "nops" ] [ "services" "nix-cluster" ])
         (lib.mkRenamedOptionModule [ "services" "nix-cluster" "modules" ] [ "services" "nix-cluster" "apps" ])
       ];
+      # Public module API. These options are what fleet repos set under
+      # services.nix-cluster.*.
       options.services."nix-cluster" = {
         enable = lib.mkEnableOption "nix-cluster - Nix Cluster Controller";
+        # Core GitOps/update identity.
         isController = lib.mkOption {
           type = lib.types.bool;
           default = false;
@@ -570,6 +641,7 @@
           default = {};
           description = "Local emergency SSH users with homes outside shared /home so operators can recover shared-home or NFS failures.";
         };
+        # Optional shared /home support. The home node exports, other nodes mount.
         identity.sharedHomes = {
           enable = lib.mkEnableOption "controller-backed shared Unix home directories";
           homeNode = lib.mkOption {
@@ -613,6 +685,8 @@
             description = "When shared homes are enabled, keep SSH key lookup in local /etc instead of reading authorized_keys from NFS-backed home directories.";
           };
         };
+        # Optional shared app storage. This is intended for app data, not
+        # multi-writer databases unless the database explicitly supports it.
         storage = {
           enable = lib.mkEnableOption "controller-backed shared application storage";
           appRoot = lib.mkOption {
@@ -631,6 +705,7 @@
             description = "NFS client options for shared application storage.";
           };
         };
+        # Paths written into runtime JSON and used by systemd tmpfiles.
         paths = {
           logDir = lib.mkOption {
             type = lib.types.str;
@@ -663,6 +738,7 @@
             description = "Directory where the controller hook script is materialized before execution.";
           };
         };
+        # Git comparison and rebuild behavior for UpdateManager.
         update = {
           remoteName = lib.mkOption {
             type = lib.types.str;
@@ -701,6 +777,7 @@
           ];
           description = "Array of shell commands to execute after a push is received.";
         };
+        # Controller reconciliation and worker reachability monitoring.
         controller.reconcileIntervalSeconds = lib.mkOption {
           type = lib.types.int;
           default = 60;
@@ -721,6 +798,7 @@
           default = [];
           description = "Controller hostnames or IPs that workers should ping. Configure at least one stable controller address or VIP.";
         };
+        # Static scheduling roles for this node.
         placement = {
           nodeRole = lib.mkOption {
             type = lib.types.enum [ "controller" "worker" "service" "backup" "spare" ];
@@ -738,6 +816,7 @@
             description = "Derived Keepalived placement role for apps that need ingress/VIP awareness.";
           };
         };
+        # Small local safety net for units like NetworkManager.
         localRecovery = {
           enable = lib.mkOption {
             type = lib.types.bool;
@@ -760,6 +839,7 @@
             description = "Log local critical-unit recovery actions without starting units.";
           };
         };
+        # Dynamic Caddy routing from scheduler placement to healthy backend nodes.
         ingressRouter = {
           enable = lib.mkEnableOption "dynamic Caddy routing from nix-cluster scheduler placement";
           intervalSeconds = lib.mkOption {
@@ -808,6 +888,7 @@
             description = "Dynamic ingress routes keyed by stable route name.";
           };
         };
+        # Observability settings shared by local tools, HA reporter, Prometheus, and Loki.
         observability.extraTrackedUnits = lib.mkOption {
           type = lib.types.listOf lib.types.str;
           default = [];
@@ -834,6 +915,8 @@
             description = "Loki push endpoint, for example http://loki:3100/loki/api/v1/push.";
           };
         };
+        # Secret generation lets apps ask for generated SOPS values without
+        # shipping plaintext defaults.
         secretGeneration = {
           enable = lib.mkOption {
             type = lib.types.bool;
@@ -864,6 +947,8 @@
             description = "App-declared generated secrets keyed by the SOPS secret name.";
           };
         };
+        # HA is split into three jobs: reporters publish node state, controllers
+        # aggregate/schedule, and workers reconcile local service ownership.
         ha = {
           enable = lib.mkEnableOption "real-time service health reporting and controller-side aggregation";
           reporting = {
@@ -1115,6 +1200,7 @@
             };
           };
         };
+        # Built-in app knobs used by templates and fleet module composition.
         apps = {
           caddy.enable = lib.mkOption {
             type = lib.types.bool;
@@ -1243,6 +1329,8 @@
             description = "Enable PostgreSQL backups for Forgejo.";
           };
         };
+        # Worker declarations give the controller enough information to probe
+        # live installers and enroll/reinstall machines.
         workers = lib.mkOption {
           type = lib.types.attrsOf (lib.types.submodule ({ name, ... }: {
             options = {
@@ -1351,6 +1439,7 @@
           default = {};
           description = "Controller-to-worker relationship inventory used to hydrate PXE/live install behavior while each worker still owns its full system config under its node directory.";
         };
+        # Matrix and webhook are the two supported update triggers.
         matrix = {
           enable = lib.mkOption {
             type = lib.types.bool;
@@ -1397,7 +1486,10 @@
         };
       };
 
+      # Actual NixOS configuration emitted when services.nix-cluster.enable = true.
       config = lib.mkIf cfg.enable {
+        # Fill in role defaults from other high-level choices unless the fleet
+        # explicitly overrides them.
         services."nix-cluster".placement = {
           nodeRole = lib.mkDefault (if cfg.isController then "controller" else "worker");
           haRole = lib.mkDefault (
@@ -1411,6 +1503,8 @@
             else "backup"
           );
         };
+        # Assertions fail evaluation early for states that would be dangerous or
+        # internally inconsistent at runtime.
         assertions = [
           {
             assertion = lib.hasPrefix "/etc/" cfg.paths.runtimeConfigPath;
@@ -1451,7 +1545,10 @@
             message = "services.nix-cluster.apps.keepalived is enabled on a node whose placement role is not allowed to own this VIP.";
           }
         ];
+        # Cluster timestamps are compared across nodes, so time sync is part of
+        # the module's base contract.
         services.timesyncd.enable = true;
+        # The shared-home node exports /home and app storage over NFS.
         services.nfs.server = lib.mkIf (sharedHomes.enable && isSharedHomeNode) {
           enable = true;
           exports = ''
@@ -1460,6 +1557,7 @@
             ${sharedStorage.exportPath} ${sharedHomes.exportNetwork}(rw,sync,no_subtree_check,no_root_squash,fsid=1,crossmnt)
           '';
         };
+        # Non-home nodes mount shared /home and/or app storage when enabled.
         fileSystems = lib.mkMerge [
           (lib.mkIf sharedHomeClient {
             ${sharedHomes.mountPath} = lib.mkForce {
@@ -1478,6 +1576,8 @@
             };
           })
         ];
+        # App units can depend on this guard so they fail closed if shared
+        # storage is missing or mounted from the wrong place.
         systemd.services.nix-cluster-shared-storage-ready = lib.mkIf (sharedHomes.enable || sharedStorage.enable) {
           description = "Verify nix-cluster shared storage is mounted and authoritative";
           wantedBy = [ "multi-user.target" ];
@@ -1499,6 +1599,7 @@
             ''}
           '';
         };
+        # Open only the ports for components this node actually runs.
         networking.firewall.allowedTCPPorts =
           lib.optionals cfg.webhook.enable [ cfg.webhook.port ]
           ++ lib.optionals cfg.ha.runtimeStore.localServer.enable [ 2379 2380 ]
@@ -1507,6 +1608,7 @@
         services.openssh.authorizedKeysFiles = lib.mkIf (sharedHomes.enable && sharedHomes.localAuthorizedKeysOnly) (
           lib.mkForce [ "/etc/ssh/authorized_keys.d/%u" ]
         );
+        # Main service account plus optional break-glass recovery users.
         users.users = {
           ${serviceUser} = {
             isNormalUser = true;
@@ -1534,6 +1636,7 @@
         users.groups.${serviceGroup} = {} // lib.optionalAttrs (cfg.serviceAccount.gid != null) {
           gid = cfg.serviceAccount.gid;
         };
+        # Put the wrapped tools and core diagnostics on the host PATH.
         environment.systemPackages = [ 
           self.packages.${system}.default 
           pkgs.git 
@@ -1546,6 +1649,7 @@
           pkgs.sshpass
           pkgs.mkpasswd
         ] ++ lib.optionals cfg.ha.runtimeStore.localServer.enable [ pkgs.etcd ];
+        # One-way migration from the old nops account/home to nix-cluster.
         system.activationScripts.nix-cluster-account-migration.text = ''
           install -d -m 0755 ${serviceHome}
           if [ -d ${legacyServiceHome} ] && [ ! -L ${legacyServiceHome} ]; then
@@ -1562,7 +1666,9 @@
             chown -R ${serviceUser}:${serviceGroup} ${repoPathString} 2>/dev/null || true
           fi
         '';
+        # This is the concrete /etc file that config.py loads at runtime.
         environment.etc.${runtimeConfigEtcPath}.source = nixClusterConfig;
+        # Create writable runtime directories owned by the service account.
         systemd.tmpfiles.rules = [
           "d ${cfg.paths.logDir} 0755 ${serviceUser} ${serviceGroup} -"
           "d ${cfg.paths.stateDir} 0755 ${serviceUser} ${serviceGroup} -"
@@ -1585,6 +1691,7 @@
           "f ${sharedStorage.appRoot}/.nix-cluster-shared-root 0644 root root -"
         ];
 
+        # Optional node-exporter textfile collector for nix-cluster metrics.
         services.prometheus.exporters.node = lib.mkIf cfg.observability.prometheus.enable {
           enable = true;
           port = cfg.observability.prometheus.port;
@@ -1593,6 +1700,7 @@
           extraFlags = [ "--collector.textfile.directory=${cfg.paths.metricsDir}" ];
         };
 
+        # Optional journal shipping through Promtail.
         services.promtail = lib.mkIf (cfg.observability.loki.enable && cfg.observability.loki.url != "") {
           enable = true;
           configuration = {
@@ -1634,8 +1742,10 @@
           serviceConfig.SupplementaryGroups = [ "systemd-journal" ];
         };
 
+        # Caddy owns the virtual hosts; ingress.py owns the imported snippets.
         services.caddy.virtualHosts = lib.mkIf (cfg.ingressRouter.enable && cfg.apps.caddy.enable) ingressRouteVirtualHosts;
 
+        # Optional local etcd. This is the runtime-state store used by HA.
         systemd.services."nix-cluster-runtime-store" = lib.mkIf cfg.ha.runtimeStore.localServer.enable {
           description = "nix-cluster runtime state store (etcd)";
           wantedBy = [ "multi-user.target" ];
@@ -1667,6 +1777,7 @@
           '';
         };
 
+        # Maintenance keeps etcd from growing until NOSPACE blocks writes.
         systemd.services."nix-cluster-runtime-store-maintenance" = lib.mkIf (cfg.ha.runtimeStore.localServer.enable && storeCfg.maintenance.enable) {
           description = "nix-cluster runtime state store maintenance";
           after = [ "nix-cluster-runtime-store.service" ];
@@ -1695,6 +1806,7 @@
           '';
         };
 
+        # Timer for local etcd compaction/defrag/alarm cleanup.
         systemd.timers."nix-cluster-runtime-store-maintenance" = lib.mkIf (cfg.ha.runtimeStore.localServer.enable && storeCfg.maintenance.enable) {
           wantedBy = [ "timers.target" ];
           timerConfig = {
@@ -1832,6 +1944,7 @@
           '';
         };
 
+        # Worker timer job that records whether a controller target is reachable.
         systemd.services."nix-cluster-controller-heartbeat" = lib.mkIf (!cfg.isController && cfg.controller.monitor.enable && cfg.controller.monitor.targets != []) {
           description = "nix-cluster controller heartbeat monitor";
           after = [ "network-online.target" ];
@@ -1852,6 +1965,8 @@
           '';
         };
 
+        # Schedule the worker heartbeat loop through systemd timers instead of
+        # keeping another always-running process around.
         systemd.timers."nix-cluster-controller-heartbeat" = lib.mkIf (!cfg.isController && cfg.controller.monitor.enable && cfg.controller.monitor.targets != []) {
           description = "nix-cluster controller heartbeat monitor timer";
           wantedBy = [ "timers.target" ];
@@ -1871,6 +1986,8 @@
         program = "${self.packages.${system}.install}/bin/nix-cluster-install"; 
       };
     };
+    # Guardrail: shared storage must fail closed, so automount is intentionally
+    # not allowed in the default NFS client options.
     checks.${system}.shared-storage-client-options = assert !(builtins.elem "x-systemd.automount" sharedStorageClientOptions); pkgs.runCommand "shared-storage-client-options" {} ''
       touch $out
     '';

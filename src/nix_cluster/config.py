@@ -9,6 +9,7 @@ DEFAULT_CONFIG_PATH = "/etc/nix-cluster-runtime-config.json"
 LEGACY_CONFIG_PATH = "/etc/nops-runtime-config.json"
 
 
+# Normalize loose JSON values into a list of non-empty strings.
 def _as_list(raw: Any) -> list[str]:
     if raw is None:
         return []
@@ -18,18 +19,21 @@ def _as_list(raw: Any) -> list[str]:
     return [text] if text else []
 
 
+# Read a boolean-ish config value, falling back only when it is missing.
 def _as_bool(raw: Any, default: bool = False) -> bool:
     if raw is None:
         return default
     return bool(raw)
 
 
+# Read an integer config value, with a default for omitted fields.
 def _as_int(raw: Any, default: int) -> int:
     if raw is None:
         return default
     return int(raw)
 
 
+# Find the runtime config path, including old `nops` names for upgrades.
 def _resolve_config_path(path: str | None) -> str:
     candidates = [
         path,
@@ -45,6 +49,7 @@ def _resolve_config_path(path: str | None) -> str:
 
 
 @dataclass(slots=True)
+# Filesystem paths shared by the Python daemons and helper scripts.
 class DirectorySettings:
     repo: str
     log: str
@@ -56,6 +61,7 @@ class DirectorySettings:
 
 
 @dataclass(slots=True)
+# Git remote, branch, rebuild commands, and path filters for update runs.
 class UpdateSettings:
     commands: list[str]
     remote_name: str
@@ -65,6 +71,7 @@ class UpdateSettings:
 
 
 @dataclass(slots=True)
+# Worker-side controller reachability checks written by the heartbeat helper.
 class ControllerMonitorSettings:
     enable: bool
     interval_seconds: int
@@ -72,12 +79,14 @@ class ControllerMonitorSettings:
 
 
 @dataclass(slots=True)
+# Controller-only timing knobs, currently periodic reconciliation and monitoring.
 class ControllerSettings:
     reconcile_interval_seconds: int
     monitor: ControllerMonitorSettings
 
 
 @dataclass(slots=True)
+# Static role labels for this node, used by modules and HA decisions.
 class PlacementSettings:
     node_role: str
     ha_role: str
@@ -85,18 +94,21 @@ class PlacementSettings:
 
 
 @dataclass(slots=True)
+# Whether node-exporter textfile metrics are expected and where they are exposed.
 class PrometheusSettings:
     enable: bool
     port: int
 
 
 @dataclass(slots=True)
+# Optional journal shipping target for Promtail.
 class LokiSettings:
     enable: bool
     url: str
 
 
 @dataclass(slots=True)
+# Service units and metrics/logging integrations that runtime tools should watch.
 class ObservabilitySettings:
     tracked_units: list[str]
     prometheus: PrometheusSettings
@@ -104,6 +116,7 @@ class ObservabilitySettings:
 
 
 @dataclass(slots=True)
+# Local critical-unit restart policy, independent of fleet HA placement.
 class LocalRecoverySettings:
     enable: bool
     critical_units: list[str]
@@ -112,6 +125,7 @@ class LocalRecoverySettings:
 
 
 @dataclass(slots=True)
+# Which systemd units the HA reporter should publish.
 class ReportingSettings:
     enable: bool
     mode: str
@@ -122,6 +136,7 @@ class ReportingSettings:
 
 
 @dataclass(slots=True)
+# Settings for the optional local etcd process managed by the NixOS module.
 class LocalRuntimeStoreSettings:
     enable: bool
     name: str
@@ -134,6 +149,7 @@ class LocalRuntimeStoreSettings:
 
 
 @dataclass(slots=True)
+# Cross-node runtime-state backend, usually etcd when HA is enabled.
 class RuntimeStoreSettings:
     type: str
     endpoint: str
@@ -145,6 +161,7 @@ class RuntimeStoreSettings:
 
 
 @dataclass(slots=True)
+# How controller nodes choose service owners and how workers apply that choice.
 class SchedulerSettings:
     enable: bool
     interval_seconds: int
@@ -170,6 +187,7 @@ class SchedulerSettings:
 
 
 @dataclass(slots=True)
+# All high-availability reporting, state-store, and scheduler settings.
 class HASettings:
     enable: bool
     reporting: ReportingSettings
@@ -178,6 +196,7 @@ class HASettings:
 
 
 @dataclass(slots=True)
+# One dynamic Caddy route tied to a scheduler-managed systemd unit.
 class IngressRouteSettings:
     name: str
     enable: bool
@@ -194,6 +213,7 @@ class IngressRouteSettings:
 
 
 @dataclass(slots=True)
+# Runtime Caddy snippet generation based on HA placement and health.
 class IngressRouterSettings:
     enable: bool
     interval_seconds: int
@@ -208,12 +228,14 @@ class IngressRouterSettings:
 
 
 @dataclass(slots=True)
+# Matrix trigger settings used by the long-polling listener.
 class MatrixSettings:
     enable: bool
     trigger_keywords: list[str]
 
 
 @dataclass(slots=True)
+# HTTP webhook listener settings.
 class WebhookSettings:
     enable: bool
     bind_address: str
@@ -224,6 +246,7 @@ class WebhookSettings:
 
 
 @dataclass(slots=True)
+# Typed view of `/etc/nix-cluster-runtime-config.json` for all Python daemons.
 class RuntimeConfig:
     path: str
     raw: dict[str, Any]
@@ -243,6 +266,7 @@ class RuntimeConfig:
 
     @classmethod
     def from_path(cls, path: str | None = None) -> "RuntimeConfig":
+        # Load the runtime JSON file and return the normalized config object.
         resolved = _resolve_config_path(path)
         with open(resolved, "r", encoding="utf-8") as handle:
             raw = json.load(handle)
@@ -250,6 +274,7 @@ class RuntimeConfig:
 
     @classmethod
     def from_raw(cls, path: str, raw: dict[str, Any]) -> "RuntimeConfig":
+        # Turn the raw JSON dictionary from Nix into small typed settings objects.
         directories_raw = raw.get("directories", {})
         update_raw = raw.get("update", raw.get("commands", {}))
         controller_raw = raw.get("controller", {})
@@ -440,8 +465,10 @@ class RuntimeConfig:
 
     @property
     def repo_dir(self) -> str:
+        # Shortcut for the fleet checkout path.
         return self.directories.repo
 
     @property
     def update_commands(self) -> list[str]:
+        # Shortcut for commands that run after a relevant update is accepted.
         return self.update.commands

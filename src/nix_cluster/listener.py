@@ -11,10 +11,12 @@ from .core import configure_logging
 from .update import UpdateManager
 
 
+# Long-poll Matrix and hand matching room messages to the update manager.
 class MatrixListener:
     __slots__ = ("updater", "client", "hostname", "next_batch", "logger", "room_id", "trigger_keywords")
 
     def __init__(self, config_path: str, log_file: str):
+        # Load config, build the Matrix client, and remember the room/keywords to watch.
         self.logger = configure_logging("nix-cluster-listener", log_file=log_file)
         self.updater = UpdateManager(config_path)
 
@@ -30,10 +32,12 @@ class MatrixListener:
         self.trigger_keywords = self.updater.runtime_config.matrix.trigger_keywords
 
     def should_trigger_update(self, body: str) -> bool:
+        # Return true when a Matrix message contains one of the configured trigger words.
         normalized = body.lower()
         return any(keyword in normalized for keyword in self.trigger_keywords)
 
     async def handle_message(self, room_id: str, event: object) -> None:
+        # Check one Matrix timeline event and run the GitOps update if it matches.
         if room_id != self.room_id:
             return
         try:
@@ -47,6 +51,7 @@ class MatrixListener:
             self.logger.error("FAILED TO PROCESS MESSAGE: %s", error, exc_info=True)
 
     async def run(self) -> None:
+        # Keep syncing Matrix forever, using `next_batch` so old messages are not replayed.
         self.logger.info("STARTING NIX-CLUSTER-LISTENER ON %s", self.client.homeserver)
         try:
             self.updater.run_boot_sequence()
@@ -83,6 +88,7 @@ class MatrixListener:
                 await asyncio.sleep(5)
 
 
+# CLI entry point used by the `nix-cluster-daemon` wrapper.
 def main() -> None:
     config_path = (
         os.environ.get("NIX_CLUSTER_CONFIG_PATH")

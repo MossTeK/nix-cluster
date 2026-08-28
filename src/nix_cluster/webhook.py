@@ -11,13 +11,16 @@ from .core import configure_logging
 from .update import UpdateManager
 
 
+# aiohttp app that turns HTTP push events into nix-cluster update runs.
 class WebhookServer:
     def __init__(self, config_path: str, log_file: str):
+        # Load runtime config once and build the shared update manager.
         self.logger = configure_logging("nix-cluster-webhook", log_file=log_file)
         self.updater = UpdateManager(config_path)
         self.config = self.updater.runtime_config
 
     async def periodic_reconcile(self) -> None:
+        # On controllers, wake up occasionally even if no webhook arrives.
         interval = self.config.controller.reconcile_interval_seconds
         if not self.config.is_controller or interval <= 0:
             self.logger.info("PERIODIC CONTROLLER RECONCILIATION DISABLED")
@@ -30,6 +33,7 @@ class WebhookServer:
             await loop.run_in_executor(None, self.updater.perform_update, "periodic-reconcile")
 
     async def periodic_reconcile_ctx(self, _app: web.Application):
+        # Tie the periodic reconcile background task to the aiohttp app lifetime.
         task = asyncio.create_task(self.periodic_reconcile())
         try:
             yield
@@ -39,6 +43,7 @@ class WebhookServer:
                 await task
 
     async def handle_webhook(self, request: web.Request) -> web.Response:
+        # Handle a push payload, honor skip markers, and call `UpdateManager`.
         self.logger.info("WEBHOOK PUSH EVENT DETECTED")
         try:
             payload = await request.json()
@@ -58,6 +63,7 @@ class WebhookServer:
         return web.Response(text="nix-cluster update triggered successfully.\n")
 
     async def init_app(self) -> web.Application:
+        # Create the aiohttp app and run the same boot sync as the Matrix daemon.
         self.logger.info("INITIALIZING NIX-CLUSTER-WEBHOOK...")
         try:
             self.updater.run_boot_sequence()
@@ -71,6 +77,7 @@ class WebhookServer:
         return app
 
 
+# CLI entry point used by the `nix-cluster-webhook` wrapper.
 def main() -> None:
     config_path = (
         os.environ.get("NIX_CLUSTER_CONFIG_PATH")

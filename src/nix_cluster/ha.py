@@ -50,6 +50,7 @@ IGNORED_DISK_FSTYPES = {
 }
 
 
+# Convert loose runtime data to int without breaking the long-running loop.
 def _safe_int(raw: Any, default: int = 0) -> int:
     try:
         return int(raw)
@@ -57,6 +58,7 @@ def _safe_int(raw: Any, default: int = 0) -> int:
         return default
 
 
+# Convert loose runtime data to float without breaking the long-running loop.
 def _safe_float(raw: Any, default: float = 0.0) -> float:
     try:
         return float(raw)
@@ -64,6 +66,7 @@ def _safe_float(raw: Any, default: float = 0.0) -> float:
         return default
 
 
+# Remove repeated unit names while keeping the user's configured order.
 def _dedupe_preserve_order(values: Iterable[str]) -> list[str]:
     seen: set[str] = set()
     result: list[str] = []
@@ -75,6 +78,7 @@ def _dedupe_preserve_order(values: Iterable[str]) -> list[str]:
     return result
 
 
+# Turn an etcd write/backoff exception into a log event name and delay.
 def _runtime_store_warning_details(error: RuntimeStoreRateLimited, default_retry_after: float) -> tuple[str, float]:
     retry_after = error.retry_after if error.retry_after is not None else default_retry_after
     if isinstance(error, RuntimeStoreWriteBlocked):
@@ -82,6 +86,7 @@ def _runtime_store_warning_details(error: RuntimeStoreRateLimited, default_retry
     return "runtime_store_rate_limited", retry_after
 
 
+# Hash a service payload while ignoring its timestamp-only churn.
 def _payload_digest(payload: dict[str, Any]) -> str:
     stable_payload = dict(payload)
     stable_payload.pop("observed_at", None)
@@ -89,8 +94,10 @@ def _payload_digest(payload: dict[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+# Publish this node's systemd service health to files, metrics, and etcd.
 class ServiceReporter:
     def __init__(self, config_path: str | None = None):
+        # Load runtime config and prepare change tracking for reported units.
         self.config = RuntimeConfig.from_path(config_path)
         self.logger = configure_logging("nix-cluster-reporter")
         self.hostname = socket.gethostname()
@@ -104,6 +111,7 @@ class ServiceReporter:
         self.last_collection_duration_seconds = 0.0
 
     def log_runtime_store_warning(self, endpoint: str, message: str, *args: Any) -> None:
+        # Log repeated etcd warnings at a slower pace so journals stay readable.
         rendered = message % args if args else message
         signature = (endpoint, rendered)
         now = time.monotonic()
@@ -114,12 +122,14 @@ class ServiceReporter:
         self.logger.warning(message, *args)
 
     def run_command(self, command: list[str]) -> str:
+        # Run a system command and return stdout, raising on failure.
         result = subprocess.run(command, capture_output=True, text=True, check=False)
         if result.returncode != 0:
             raise RuntimeError(result.stderr.strip() or f"command failed: {' '.join(command)}")
         return result.stdout
 
     def list_all_service_units(self) -> set[str]:
+        # Ask systemd for every known service unit on this node.
         output = self.run_command([
             "systemctl", "list-unit-files", "--type=service", "--plain", "--no-legend", "--no-pager",
         ])
@@ -131,6 +141,7 @@ class ServiceReporter:
         return units
 
     def collect_unit_status(self, unit: str) -> dict[str, Any]:
+        # Collect the systemd fields nix-cluster uses to decide service health.
         output = self.run_command([
             "systemctl", "show", unit,
             "--property=Id", "--property=LoadState", "--property=ActiveState", "--property=SubState",
@@ -203,6 +214,7 @@ class ServiceReporter:
         return services
 
     def build_metric_lines(self, services: dict[str, dict[str, Any]]) -> str:
+        # Render Prometheus textfile metrics for the latest service snapshot.
         lines = [
             "# HELP nix_cluster_service_healthy Whether a reported systemd unit is healthy.",
             "# TYPE nix_cluster_service_healthy gauge",
@@ -225,6 +237,7 @@ class ServiceReporter:
         return "\n".join(lines) + "\n"
 
     def selected_units(self, all_units: set[str]) -> list[str]:
+        # Apply reporting mode and tracked-unit config to choose units to publish.
         reporting_cfg = self.config.ha.reporting
         tracked_units = set(self.config.observability.tracked_units)
         configured_units = set(reporting_cfg.services)
@@ -242,6 +255,7 @@ class ServiceReporter:
         return sorted(unit for unit in units if unit)
 
     def run(self) -> None:
+        # Main reporter loop: sample systemd, write local files, publish to etcd.
         if not (self.config.ha.enable and self.config.ha.reporting.enable):
             self.logger.info("service reporting disabled")
             return
@@ -329,14 +343,17 @@ class ServiceReporter:
             time.sleep(interval)
 
 
+# Keep a short list of local critical services alive on each node.
 class LocalRecoveryMonitor:
     def __init__(self, config_path: str | None = None):
+        # Load recovery config and remember prior health for change-only logging.
         self.config = RuntimeConfig.from_path(config_path)
         self.logger = configure_logging("nix-cluster-recovery")
         self.hostname = socket.gethostname()
         self.previous_states: dict[str, bool] = {}
 
     def run_command(self, command: list[str]) -> subprocess.CompletedProcess[str]:
+        # Run recovery commands with a timeout so the loop cannot hang forever.
         try:
             return subprocess.run(
                 command,
@@ -360,6 +377,7 @@ class LocalRecoveryMonitor:
             )
 
     def collect_unit_status(self, unit: str) -> dict[str, Any]:
+        # Collect enough systemd state to decide if a critical unit needs help.
         result = self.run_command([
             "systemctl", "show", unit,
             "--property=Id", "--property=LoadState", "--property=ActiveState", "--property=SubState",
@@ -384,6 +402,7 @@ class LocalRecoveryMonitor:
         }
 
     def recover_unit(self, unit: str, status: dict[str, Any]) -> bool:
+        # Reset and start an unhealthy critical unit unless recovery is dry-run.
         if status.get("load_state") != "loaded":
             self.logger.warning(
                 "critical_unit_missing host=%s unit=%s load_state=%s",
@@ -426,6 +445,7 @@ class LocalRecoveryMonitor:
         return False
 
     def run(self) -> None:
+        # Main recovery loop for configured critical units.
         recovery_cfg = self.config.local_recovery
         if not recovery_cfg.enable:
             self.logger.info("local recovery monitor disabled")
@@ -461,8 +481,10 @@ class LocalRecoveryMonitor:
             time.sleep(interval)
 
 
+# Apply scheduler placement locally by starting or stopping managed units.
 class WorkerReconciler:
     def __init__(self, config_path: str | None = None):
+        # Load scheduler settings and remember previous assignments for logging.
         self.config = RuntimeConfig.from_path(config_path)
         self.logger = configure_logging("nix-cluster-reconciler")
         self.hostname = socket.gethostname()
@@ -512,6 +534,7 @@ class WorkerReconciler:
                 self.run_command(["sudo", "systemctl", "--no-block", "stop", unit])
 
     def log_runtime_store_warning(self, endpoint: str, message: str, *args: Any) -> None:
+        # Log repeated etcd warnings at a slower pace so journals stay readable.
         rendered = message % args if args else message
         signature = (endpoint, rendered)
         now = time.monotonic()
@@ -522,6 +545,7 @@ class WorkerReconciler:
         self.logger.warning(message, *args)
 
     def run_command(self, command: list[str]) -> subprocess.CompletedProcess[str]:
+        # Run reconciler commands with a timeout and return the completed process.
         try:
             return subprocess.run(
                 command,
@@ -545,6 +569,7 @@ class WorkerReconciler:
             )
 
     def collect_unit_status(self, unit: str, now: int) -> dict[str, Any]:
+        # Collect detailed systemd status for a scheduler-managed unit.
         result = self.run_command([
             "systemctl", "show", unit,
             "--property=Id", "--property=LoadState", "--property=ActiveState", "--property=SubState",
@@ -590,6 +615,7 @@ class WorkerReconciler:
         }
 
     def read_controller_status(self) -> bool:
+        # Read the worker heartbeat file and treat missing status as reachable.
         if self.config.is_controller:
             return True
         status_path = Path(self.config.directories.heartbeat) / "controller-status.json"
@@ -603,6 +629,7 @@ class WorkerReconciler:
         return bool(payload.get("reachable", True))
 
     def collect_uptime_seconds(self) -> float:
+        # Read this node's uptime from `/proc/uptime` for dashboard detail.
         try:
             with open("/proc/uptime", "r", encoding="utf-8") as handle:
                 return _safe_float(handle.read().split()[0])
@@ -610,6 +637,7 @@ class WorkerReconciler:
             return 0.0
 
     def collect_disk_snapshots(self) -> list[dict[str, Any]]:
+        # Summarize real mounted disks while skipping virtual/kernel filesystems.
         disks: list[dict[str, Any]] = []
         seen_mounts: set[str] = set()
         try:
@@ -645,6 +673,7 @@ class WorkerReconciler:
         return sorted(disks, key=lambda item: str(item.get("mount", "")))
 
     def collect_resource_snapshot(self, now: int) -> dict[str, Any]:
+        # Collect CPU, memory, disk, and controller reachability for scheduling.
         memory_total_bytes = 0
         memory_available_bytes = 0
         with open("/proc/meminfo", "r", encoding="utf-8") as handle:
@@ -698,6 +727,7 @@ class WorkerReconciler:
         units: dict[str, dict[str, Any]],
         now: int,
     ) -> dict[str, Any]:
+        # Build the richer per-node status document consumed by dashboards.
         memory_total = _safe_int(resource_snapshot.get("memory_total_bytes"))
         memory_available = _safe_int(resource_snapshot.get("memory_available_bytes"))
         memory_used = max(memory_total - memory_available, 0)
@@ -758,6 +788,7 @@ class WorkerReconciler:
         desired_owner: str | None,
         status_before: dict[str, Any],
     ) -> dict[str, Any]:
+        # Start or stop one managed unit so local state matches desired ownership.
         load_state = str(status_before.get("load_state", "unknown"))
         active_state = str(status_before.get("active_state", "unknown"))
         active_local = load_state == "loaded" and active_state in ACTIVE_STATES
@@ -844,6 +875,7 @@ class WorkerReconciler:
         }
 
     def build_metric_lines(self, resource_snapshot: dict[str, Any], units: dict[str, dict[str, Any]], now: int) -> str:
+        # Render Prometheus metrics for scheduler resource and unit state.
         lines = [
             "# HELP nix_cluster_scheduler_node_schedulable Whether this node currently meets the minimum scheduler capacity thresholds.",
             "# TYPE nix_cluster_scheduler_node_schedulable gauge",
@@ -897,6 +929,7 @@ class WorkerReconciler:
         return "\n".join(lines) + "\n"
 
     def run(self) -> None:
+        # Main worker loop: publish resources, read placements, reconcile units.
         if not (self.config.ha.enable and self.config.ha.scheduler.enable and self.config.ha.scheduler.reconciler_enable):
             self.logger.info("scheduler reconciler disabled")
             return
@@ -1055,8 +1088,10 @@ class WorkerReconciler:
             time.sleep(interval)
 
 
+# Controller-side scheduler that turns health reports into placement records.
 class ClusterMonitor:
     def __init__(self, config_path: str | None = None):
+        # Load scheduler config and initialize leadership/target change tracking.
         self.config = RuntimeConfig.from_path(config_path)
         self.logger = configure_logging("nix-cluster-monitor")
         self.controller = socket.gethostname()
@@ -1070,6 +1105,7 @@ class ClusterMonitor:
         self.last_runtime_store_warning_at = 0.0
 
     def log_runtime_store_warning(self, endpoint: str, message: str, *args: Any) -> None:
+        # Log repeated etcd warnings at a slower pace so journals stay readable.
         rendered = message % args if args else message
         signature = (endpoint, rendered)
         now = time.monotonic()
@@ -1080,6 +1116,7 @@ class ClusterMonitor:
         self.logger.warning(message, *args)
 
     def should_log_service_unavailable(self, service: str, unhealthy_nodes: list[str], stale_nodes: list[str]) -> bool:
+        # Throttle identical service-unavailable warnings.
         signature = (tuple(unhealthy_nodes), tuple(stale_nodes))
         now = time.monotonic()
         previous_signature = self.previous_unavailable_signatures.get(service)
@@ -1092,15 +1129,18 @@ class ClusterMonitor:
 
     @staticmethod
     def service_and_host_from_key(prefix: str, key: str) -> tuple[str, str]:
+        # Split `/prefix/host/unit` health keys back into host and unit names.
         trimmed = key.removeprefix(prefix.rstrip("/") + "/")
         host, _, unit = trimmed.partition("/")
         return host, unit
 
     @staticmethod
     def host_from_resource_key(prefix: str, key: str) -> str:
+        # Split `/prefix/host` resource keys back into host names.
         return key.removeprefix(prefix.rstrip("/") + "/")
 
     def build_leader_payload(self, now: int, lease_id: int = 0) -> dict[str, Any]:
+        # Create the scheduler leadership record written to etcd.
         scheduler_cfg = self.config.ha.scheduler
         payload: dict[str, Any] = {
             "hostname": self.controller,
@@ -1113,12 +1153,14 @@ class ClusterMonitor:
         return payload
 
     def resolve_fixed_leader_host(self) -> str:
+        # Return the configured fixed scheduler leader, defaulting to this host.
         fixed_host = self.config.ha.scheduler.fixed_controller_host.strip()
         if fixed_host:
             return fixed_host
         return self.controller
 
     def note_leadership_state(self, is_leader: bool, leader_payload: dict[str, Any]) -> None:
+        # Log leadership changes without repeating the same state every loop.
         leader_host = str(leader_payload.get("hostname", "") or "")
         if leader_host != self.previous_leader_host or is_leader != self.previous_is_leader:
             self.logger.info(
@@ -1132,6 +1174,7 @@ class ClusterMonitor:
             self.previous_is_leader = is_leader
 
     def ensure_scheduler_leadership(self, etcd: EtcdClient, now: int) -> tuple[bool, dict[str, Any]]:
+        # Decide whether this controller may publish placement decisions.
         scheduler_cfg = self.config.ha.scheduler
         leader_key = scheduler_cfg.leader_key
 
@@ -1204,11 +1247,13 @@ class ClusterMonitor:
         return False, leader_payload
 
     def resource_record_is_fresh(self, payload: dict[str, Any] | None, now: int, stale_after: int) -> bool:
+        # Return true when a node resource snapshot is recent enough to trust.
         if not payload:
             return False
         return (now - _safe_int(payload.get("observed_at"))) <= stale_after
 
     def resource_record_is_schedulable(self, payload: dict[str, Any] | None, now: int, stale_after: int) -> bool:
+        # Return true when a fresh resource snapshot says the node can take work.
         if not self.resource_record_is_fresh(payload, now, stale_after):
             return False
         return bool(payload.get("schedulable", True))
@@ -1222,7 +1267,9 @@ class ClusterMonitor:
         now: int,
         stale_after: int,
     ) -> list[str]:
+        # Order candidate nodes by health first, then capacity and load.
         def resource_sort_key(host: str) -> tuple[int, int, int, int, int, float, str]:
+            # Build the tuple Python uses to sort best scheduler targets first.
             payload = resource_records.get(host)
             report = reports.get(host, {}) if reports else {}
             report_load_state = str(report.get("load_state", "unknown"))
@@ -1259,6 +1306,7 @@ class ClusterMonitor:
         now: int,
         stale_after: int,
     ) -> str | None:
+        # Pick which node should own a service for the next scheduler interval.
         if not candidate_nodes:
             return None
         strategy = self.config.ha.scheduler.default_strategy
@@ -1397,6 +1445,7 @@ class ClusterMonitor:
         }
 
     def build_cluster_metrics(self, cluster_state: dict[str, Any]) -> str:
+        # Render Prometheus metrics for the controller's aggregate cluster view.
         lines = [
             "# HELP nix_cluster_service_instances Number of nodes currently reporting a service by health state.",
             "# TYPE nix_cluster_service_instances gauge",
@@ -1485,6 +1534,7 @@ class ClusterMonitor:
         return "\n".join(lines) + "\n"
 
     def run(self) -> None:
+        # Main controller loop: read health, choose owners, write placements.
         if not self.config.is_controller:
             self.logger.info("monitor disabled on non-controller node")
             return
@@ -1720,18 +1770,22 @@ class ClusterMonitor:
             time.sleep(interval)
 
 
+# CLI entry point for `python -m nix_cluster.ha reporter`.
 def reporter_main() -> None:
     ServiceReporter().run()
 
 
+# CLI entry point for `python -m nix_cluster.ha monitor`.
 def monitor_main() -> None:
     ClusterMonitor().run()
 
 
+# CLI entry point for `python -m nix_cluster.ha reconciler`.
 def reconciler_main() -> None:
     WorkerReconciler().run()
 
 
+# CLI entry point for `python -m nix_cluster.ha recovery`.
 def recovery_main() -> None:
     LocalRecoveryMonitor().run()
 

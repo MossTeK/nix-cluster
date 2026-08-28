@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 
+# Write a text file by replacing it in one move, so readers never see half a file.
 def atomic_write_text(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile("w", delete=False, dir=path.parent, encoding="utf-8") as handle:
@@ -17,10 +18,12 @@ def atomic_write_text(path: Path, content: str) -> None:
     temp_path.replace(path)
 
 
+# Write a small JSON state file in the same safe way as `atomic_write_text`.
 def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     atomic_write_text(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
+# Build the logger style used by the daemons: stdout first, optional file second.
 def configure_logging(name: str, log_file: str | None = None, level: int = logging.INFO) -> logging.Logger:
     logger = logging.getLogger(name)
     logger.setLevel(level)
@@ -43,8 +46,10 @@ def configure_logging(name: str, log_file: str | None = None, level: int = loggi
     return logger
 
 
+# Small wrapper around subprocess so command logging and error handling stay consistent.
 class ProcessRunner:
     def __init__(self, logger: logging.Logger):
+        # Keep the logger that will receive command, stdout, stderr, and failure details.
         self.logger = logger
 
     def run(
@@ -55,6 +60,7 @@ class ProcessRunner:
         check: bool = True,
         capture_output: bool = True,
     ) -> subprocess.CompletedProcess[str]:
+        # Run one external command and optionally raise if it exits non-zero.
         self.logger.info("Running command: %s", " ".join(command))
         result = subprocess.run(
             list(command),

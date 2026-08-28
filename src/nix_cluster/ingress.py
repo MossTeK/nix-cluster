@@ -16,6 +16,7 @@ from .runtime import EtcdClient
 CLUSTER_STATE_KEY = "/nix-cluster/cluster-state"
 
 
+# Parse route timestamps and ports without letting bad data crash routing.
 def _safe_int(value: Any) -> int:
     try:
         return int(value)
@@ -23,14 +24,17 @@ def _safe_int(value: Any) -> int:
         return 0
 
 
+# Escape text before embedding it in generated Caddy snippets.
 def _caddy_escape(text: str) -> str:
     return text.replace("\\", "\\\\").replace('"', '\\"')
 
 
+# Return a fail-closed Caddy response for routes without a healthy backend.
 def _route_unavailable(reason: str) -> str:
     return f'respond "nix-cluster route unavailable: {_caddy_escape(reason)}" 503\n'
 
 
+# Check whether the scheduler's chosen owner has a fresh healthy report.
 def _healthy_owner(cluster_state: dict[str, Any], unit: str, owner: str, now: int, stale_after: int) -> bool:
     observed_at = _safe_int(cluster_state.get("observed_at"))
     if not observed_at or now - observed_at > stale_after:
@@ -55,6 +59,7 @@ def target_for_route(
     stale_after: int,
     ownership_records: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[str | None, str | None]:
+    # Choose the backend URL for a route, or explain why it must stay closed.
     if not route.enable:
         return None, "disabled"
     if not route.unit:
@@ -85,6 +90,7 @@ def target_for_route(
     return f"{route.scheme}://{address}:{route.port}", None
 
 
+# Render the Caddy snippet for one dynamic route.
 def render_route_snippet(route: IngressRouteSettings, target: str | None, reason: str | None) -> str:
     if not target:
         return _route_unavailable(reason or "no backend")
@@ -128,8 +134,10 @@ def render_route_snippet(route: IngressRouteSettings, target: str | None, reason
     return proxy_block
 
 
+# Generate and reload Caddy route snippets from scheduler placement in etcd.
 class IngressRouter:
     def __init__(self, config: RuntimeConfig):
+        # Keep the runtime config and connect to the configured etcd endpoint.
         self.config = config
         self.router = config.ingress_router
         self.logger = logging.getLogger("nix-cluster.ingress")
@@ -138,6 +146,7 @@ class IngressRouter:
         self.reload_backoff_until = 0.0
 
     def load_placements(self) -> dict[str, dict[str, Any]]:
+        # Read scheduler placement records keyed by managed systemd unit.
         prefix = self.config.ha.scheduler.placement_prefix.rstrip("/")
         records = self.etcd.get_prefix(prefix) if prefix else {}
         placements: dict[str, dict[str, Any]] = {}
@@ -148,6 +157,7 @@ class IngressRouter:
         return placements
 
     def load_cluster_state(self) -> dict[str, Any]:
+        # Read the aggregated cluster health document from etcd.
         entry = self.etcd.get_key(CLUSTER_STATE_KEY)
         if not entry or not isinstance(entry.get("value"), dict):
             return {}
@@ -159,6 +169,7 @@ class IngressRouter:
         return {key.removeprefix(prefix + "/"): payload for key, payload in records.items()}
 
     def write_snippets(self, snippets: dict[str, str]) -> bool:
+        # Write changed Caddy snippets and report whether any file changed.
         output_dir = Path(self.router.output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         changed = False
@@ -174,6 +185,7 @@ class IngressRouter:
         return changed
 
     def reload_caddy(self) -> None:
+        # Reload Caddy once snippets change, with a lock and failure backoff.
         now = time.monotonic()
         if now < self.reload_backoff_until:
             self.logger.warning("skipping caddy reload while previous failure is in backoff")
@@ -216,6 +228,7 @@ class IngressRouter:
             self.logger.error("failed to reload caddy: %s", (result.stderr or result.stdout).strip())
 
     def reconcile_once(self) -> bool:
+        # Run one placement-to-Caddy pass and reload when rendered output changes.
         now = int(time.time())
         placements = self.load_placements()
         cluster_state = self.load_cluster_state()
@@ -242,6 +255,7 @@ class IngressRouter:
         return changed
 
     def run(self) -> None:
+        # Loop forever when ingress routing is enabled and an etcd store exists.
         if not self.router.enable:
             self.logger.info("ingress router disabled")
             return
@@ -256,6 +270,7 @@ class IngressRouter:
             time.sleep(max(1, self.router.interval_seconds))
 
 
+# CLI entry point used by the `nix-cluster-ingress-router` wrapper.
 def main() -> None:
     parser = argparse.ArgumentParser(description="nix-cluster dynamic ingress router")
     parser.add_argument("--config", default=None)
