@@ -4,6 +4,7 @@ import argparse
 import json
 import sys
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Any
 
@@ -138,19 +139,32 @@ def build_inventory(config: RuntimeConfig, etcd: EtcdClient) -> list[AppInfo]:
     ]
 
 
+def resolve_units(config: RuntimeConfig, selector: str) -> list[str]:
+    groups = app_units(config)
+    if selector in groups:
+        return groups[selector]
+    if selector in config.ha.scheduler.managed_units:
+        return [selector]
+    return []
+
+
 def validate_move(config: RuntimeConfig, app: str, node: str, etcd: EtcdClient, now: int | None = None) -> tuple[list[str], list[str]]:
     now = int(time.time()) if now is None else now
-    groups = app_units(config)
-    units = groups.get(app)
+    units = resolve_units(config, app)
     if not units:
         return [], [f"unknown app: {app}"]
 
     cluster_state = load_cluster_state(etcd)
+    scheduler = dict(cluster_state.get("scheduler", {}))
+    leader = dict(scheduler.get("leader", {}))
+    if not scheduler.get("is_leader") or not leader.get("hostname"):
+        errors = ["no current controller leader is publishing scheduler state"]
+    else:
+        errors = []
     services = dict(cluster_state.get("services", {}))
     resources = dict(cluster_state.get("resources", {}))
     stale_after = max(1, config.ha.runtime_store.stale_after_seconds)
     resource_stale_after = max(stale_after, config.ha.scheduler.resource_interval_seconds * 3)
-    errors: list[str] = []
 
     resource = dict(resources.get(node, {}))
     if not resource:
@@ -173,19 +187,20 @@ def validate_move(config: RuntimeConfig, app: str, node: str, etcd: EtcdClient, 
     return units, errors
 
 
-def move_request_payload(app: str, unit: str, node: str, reason: str, now: int, ttl: int = DEFAULT_REQUEST_TTL_SECONDS) -> dict[str, Any]:
+def move_request_payload(app: str, unit: str, node: str, reason: str, now: int, ttl: int = DEFAULT_REQUEST_TTL_SECONDS, request_id: str = "") -> dict[str, Any]:
     return {
         "app": app,
         "unit": unit,
         "target_owner": node,
         "reason": reason,
         "status": "pending",
+        "request_id": request_id or str(uuid.uuid4()),
         "requested_at": now,
         "expires_at": now + ttl,
     }
 
 
-def request_move(config: RuntimeConfig, etcd: EtcdClient, app: str, node: str, reason: str, dry_run: bool = False) -> int:
+def request_move(config: RuntimeConfig, etcd: EtcdClient, app: str, node: str, reason: str, dry_run: bool = False, wait: bool = False, timeout: int = 300) -> int:
     units, errors = validate_move(config, app, node, etcd)
     if errors:
         for error in errors:
@@ -198,9 +213,60 @@ def request_move(config: RuntimeConfig, etcd: EtcdClient, app: str, node: str, r
 
     now = int(time.time())
     prefix = config.ha.scheduler.request_prefix.rstrip("/")
+    request_id = str(uuid.uuid4())
     for unit in units:
-        etcd.put_json(f"{prefix}/{unit}", move_request_payload(app, unit, node, reason, now))
+        etcd.put_json(f"{prefix}/{unit}", move_request_payload(app, unit, node, reason, now, timeout, request_id))
     print(f"requested move {app} -> {node}: {', '.join(units)}")
+    if wait:
+        return wait_for_move(config, etcd, units, node, request_id, timeout)
+    return 0
+
+
+def wait_for_move(config: RuntimeConfig, etcd: EtcdClient, units: list[str], node: str, request_id: str, timeout: int) -> int:
+    deadline = time.monotonic() + max(1, timeout)
+    prefix = config.ha.scheduler.request_prefix.rstrip("/")
+    terminal_failures = {"failed", "rejected", "expired"}
+    while time.monotonic() < deadline:
+        completed = True
+        for unit in units:
+            entry = etcd.get_key(f"{prefix}/{unit}")
+            payload = dict(entry.get("value", {})) if entry else {}
+            if payload.get("request_id") != request_id:
+                print(f"move request was superseded for {unit}", file=sys.stderr)
+                return 3
+            status = str(payload.get("status", "pending"))
+            if status in terminal_failures:
+                print(f"move failed for {unit}: {payload.get('failure') or payload.get('reason') or status}", file=sys.stderr)
+                return 3
+            completed = completed and status == "completed"
+        if completed:
+            placements = load_placements(config, etcd)
+            if all(
+                placements.get(unit, {}).get("phase") == "stable"
+                and placements.get(unit, {}).get("active_owner") == node
+                for unit in units
+            ):
+                print(f"move completed on {node}: {', '.join(units)}")
+                return 0
+        time.sleep(1)
+    print(f"timed out waiting for move after {timeout}s", file=sys.stderr)
+    return 4
+
+
+def print_placement_status(config: RuntimeConfig, etcd: EtcdClient, unit: str | None, json_output: bool) -> int:
+    placements = load_placements(config, etcd)
+    if unit:
+        units = resolve_units(config, unit)
+        if not units:
+            print(f"unknown unit or app: {unit}", file=sys.stderr)
+            return 2
+        placements = {name: placements.get(name, {}) for name in units}
+    if json_output:
+        print(json.dumps(placements, indent=2, sort_keys=True))
+    else:
+        print(f"{'UNIT':<36} {'ACTIVE':<12} {'DESIRED':<12} {'PHASE':<16} GENERATION")
+        for name, state in sorted(placements.items()):
+            print(f"{name:<36} {state.get('active_owner') or '-':<12} {state.get('desired_owner') or '-':<12} {state.get('phase') or 'unknown':<16} {_safe_int(state.get('generation'))}")
     return 0
 
 
@@ -229,6 +295,18 @@ def build_parser() -> argparse.ArgumentParser:
     move.add_argument("--node", required=True)
     move.add_argument("--reason", default="operator requested move")
     move.add_argument("--dry-run", action="store_true")
+
+    placement = subparsers.add_parser("placement", help="Inspect or safely move scheduler placements")
+    placement_commands = placement.add_subparsers(dest="placement_command", required=True)
+    status = placement_commands.add_parser("status", help="Show placement state")
+    status.add_argument("unit", nargs="?")
+    status.add_argument("--json", action="store_true")
+    placement_move = placement_commands.add_parser("move", help="Request a fenced one-shot move")
+    placement_move.add_argument("unit")
+    placement_move.add_argument("node")
+    placement_move.add_argument("--wait", action="store_true")
+    placement_move.add_argument("--timeout", type=int, default=300)
+    placement_move.add_argument("--reason", default="operator requested move")
     return parser
 
 
@@ -247,6 +325,10 @@ def main() -> None:
         return
     if args.command == "move":
         raise SystemExit(request_move(config, etcd, args.app, args.node, args.reason, args.dry_run))
+    if args.command == "placement" and args.placement_command == "status":
+        raise SystemExit(print_placement_status(config, etcd, args.unit, args.json))
+    if args.command == "placement" and args.placement_command == "move":
+        raise SystemExit(request_move(config, etcd, args.unit, args.node, args.reason, False, args.wait, args.timeout))
     parser.print_help()
 
 

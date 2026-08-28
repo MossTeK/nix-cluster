@@ -39,8 +39,11 @@ Each managed unit has at most one leased record under
 `/nix-cluster/scheduler/ownership/<unit>`.  The record identifies the host,
 placement generation, and observation time and is attached to an etcd lease.
 A worker must hold the matching lease before starting a unit.  It stops the
-unit before releasing ownership.  Loss of runtime-store connectivity or lease
-renewal causes the local reconciler to stop the unit fail-closed.
+unit before releasing ownership.  A dedicated keeper renews ownership every
+15 seconds with a default 90-second TTL.  A timeout is an unknown renewal
+result: the worker keeps the unit running only through the last server-confirmed
+local lease deadline.  Confirmed conflicting ownership, confirmed expiry, or
+passing that deadline stops the unit fail-closed.
 
 During handoff the old owner stops and acknowledges inactivity before its
 lease is released.  A target cannot start until it atomically acquires the
@@ -53,6 +56,20 @@ Ingress routes only to a fresh placement's committed `active_owner` when that
 owner has a matching unexpired ownership record and a fresh healthy service
 report.  During a transition the previous active owner remains routable only
 while all of those conditions hold.  Otherwise ingress fails closed with 503.
+
+## Placement policy and operator moves
+
+Per-unit Git policy may express ordered preferred nodes, minimum available
+memory, maximum sustained load per CPU, estimated CPU and memory reservations,
+state-storage requirements, and conservative rebalance thresholds.  Placement
+uses at least three fresh resource samples.  Reservations for assigned and
+activating units reduce advertised capacity before another unit is ranked.
+
+`nix-cluster placement move <unit> <node>` submits a one-shot etcd request.
+The controller validates and executes it through the same generation,
+deactivation, fencing, activation, and verification state machine.  The
+request never becomes a persistent override; durable preferences remain in
+Git.
 
 ## Failure handling and observability
 

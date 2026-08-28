@@ -33,6 +33,11 @@ def _as_int(raw: Any, default: int) -> int:
     return int(raw)
 
 
+def _as_float(raw: Any, default: float) -> float:
+    if raw is None:
+        return default
+    return float(raw)
+
 # Find the runtime config path, including old `nops` names for upgrades.
 def _resolve_config_path(path: str | None) -> str:
     candidates = [
@@ -161,6 +166,19 @@ class RuntimeStoreSettings:
 
 
 @dataclass(slots=True)
+class UnitPolicySettings:
+    preferred_nodes: list[str]
+    minimum_memory_available_bytes: int
+    maximum_load_per_cpu: float
+    estimated_memory_bytes: int
+    estimated_cpu: float
+    automatic_rebalance: bool
+    rebalance_observation_threshold: int
+    minimum_memory_advantage_bytes: int
+    minimum_load_advantage_percent: float
+    require_healthy_state_storage: bool
+
+@dataclass(slots=True)
 # How controller nodes choose service owners and how workers apply that choice.
 class SchedulerSettings:
     enable: bool
@@ -169,7 +187,6 @@ class SchedulerSettings:
     fixed_controller_host: str
     leader_key: str
     placement_prefix: str
-    request_prefix: str
     lease_ttl_seconds: int
     default_strategy: str
     managed_units: list[str]
@@ -186,6 +203,9 @@ class SchedulerSettings:
     transition_timeout_seconds: int
     target_cooldown_seconds: int
     ownership_lease_enable: bool
+    lease_renewal_seconds: int
+    request_prefix: str
+    unit_policies: dict[str, UnitPolicySettings]
 
 
 @dataclass(slots=True)
@@ -383,7 +403,7 @@ class RuntimeConfig:
                 leader_key=str(scheduler_raw.get("leader_key", "/nix-cluster/scheduler/leader")),
                 placement_prefix=str(scheduler_raw.get("placement_prefix", "/nix-cluster/scheduler/placement")),
                 request_prefix=str(scheduler_raw.get("request_prefix", "/nix-cluster/scheduler/requests")),
-                lease_ttl_seconds=_as_int(scheduler_raw.get("lease_ttl_seconds"), 45),
+                lease_ttl_seconds=_as_int(scheduler_raw.get("lease_ttl_seconds"), 90),
                 default_strategy=str(scheduler_raw.get("default_strategy", "prefer-current-healthy")),
                 managed_units=_as_list(scheduler_raw.get("managed_units", [])),
                 app_groups={str(name): _as_list(units) for name, units in dict(scheduler_raw.get("app_groups", {})).items()},
@@ -399,6 +419,22 @@ class RuntimeConfig:
                 transition_timeout_seconds=_as_int(scheduler_raw.get("transition_timeout_seconds"), 120),
                 target_cooldown_seconds=_as_int(scheduler_raw.get("target_cooldown_seconds"), 300),
                 ownership_lease_enable=_as_bool(scheduler_raw.get("ownership_lease_enable"), False),
+                lease_renewal_seconds=_as_int(scheduler_raw.get("lease_renewal_seconds"), 15),
+                unit_policies={
+                    str(unit): UnitPolicySettings(
+                        preferred_nodes=_as_list(policy.get("preferred_nodes", [])),
+                        minimum_memory_available_bytes=_as_int(policy.get("minimum_memory_available_bytes"), 0),
+                        maximum_load_per_cpu=_as_float(policy.get("maximum_load_per_cpu"), 0.0),
+                        estimated_memory_bytes=_as_int(policy.get("estimated_memory_bytes"), 0),
+                        estimated_cpu=_as_float(policy.get("estimated_cpu"), 0.0),
+                        automatic_rebalance=_as_bool(policy.get("automatic_rebalance"), False),
+                        rebalance_observation_threshold=_as_int(policy.get("rebalance_observation_threshold"), 3),
+                        minimum_memory_advantage_bytes=_as_int(policy.get("minimum_memory_advantage_bytes"), 0),
+                        minimum_load_advantage_percent=_as_float(policy.get("minimum_load_advantage_percent"), 30.0),
+                        require_healthy_state_storage=_as_bool(policy.get("require_healthy_state_storage"), True),
+                    )
+                    for unit, policy in dict(scheduler_raw.get("unit_policies", {})).items()
+                },
             ),
         )
 

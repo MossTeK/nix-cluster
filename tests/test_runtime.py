@@ -7,6 +7,11 @@ from nix_cluster.runtime import EtcdClient, RuntimeStoreWriteBlocked
 
 
 class RuntimeStoreTests(unittest.TestCase):
+    def test_keepalive_returns_server_ttl(self):
+        client = EtcdClient("http://127.0.0.1:2379")
+        client._request_json = lambda path, payload, timeout: {"result": {"TTL": 77}}
+        self.assertEqual(client.keep_alive_lease(123), 77)
+
     def test_etcd_nospace_429_is_write_blocked(self):
         error = urllib.error.HTTPError(
             url="http://127.0.0.1:2379/v3/kv/put",

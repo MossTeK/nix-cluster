@@ -1,5 +1,7 @@
 import unittest
 import subprocess
+import threading
+import time
 from types import SimpleNamespace
 
 from nix_cluster import ha as ha_module
@@ -96,6 +98,47 @@ class SchedulerTests(unittest.TestCase):
             ))
         self.assertEqual(placement["active_owner"], "node4")
         self.assertEqual(placement["phase"], "stable")
+
+    def test_timed_out_transition_recovers_when_target_has_matching_lease(self):
+        monitor = self.monitor_with_stable_policy()
+        state = monitor.advance_placement(
+            "demo.service",
+            {
+                "desired_owner": "node4", "active_owner": "node2", "target_owner": "node4",
+                "generation": 2, "phase": "awaiting-fence", "phase_started_at": 1,
+            },
+            ["node2", "node4"], ["node4"], ["node4", "node2"],
+            {"node4": {"observed_at": 500, "healthy": True}},
+            {"host": "node4", "generation": 2}, 500, 45,
+        )
+        self.assertEqual(state["phase"], "verifying")
+        self.assertEqual(state["success_count"], 1)
+
+    def test_policy_excludes_overloaded_node_and_prefers_declared_node(self):
+        monitor = self.monitor_with_stable_policy()
+        policy = SimpleNamespace(
+            preferred_nodes=["node4", "node2"],
+            minimum_memory_available_bytes=2_000,
+            maximum_load_per_cpu=2.0,
+            require_healthy_state_storage=False,
+        )
+        monitor.config.ha.scheduler.unit_policies = {"demo.service": policy}
+        records = {
+            "node2": {"observed_at": 100, "schedulable": True, "controller_reachable": True, "memory_available_bytes": 1_000, "state_dir_free_bytes": 10_000, "load_1_per_cpu": 10.0},
+            "node4": {"observed_at": 100, "schedulable": True, "controller_reachable": True, "memory_available_bytes": 4_000, "state_dir_free_bytes": 10_000, "load_1_per_cpu": 0.5},
+        }
+        ranked = monitor.rank_nodes_by_resources(["node2", "node4"], records, service="demo.service", now=100, stale_after=45)
+        self.assertEqual(ranked, ["node4", "node2"])
+        self.assertFalse(monitor.resource_record_meets_policy("demo.service", records["node2"], 100, 45))
+
+    def test_transient_store_failure_does_not_stop_before_local_lease_deadline(self):
+        reconciler = WorkerReconciler.__new__(WorkerReconciler)
+        reconciler.lease_lock = threading.Lock()
+        reconciler.owned_leases = {"demo.service": {"deadline": time.monotonic() + 60}}
+        stopped = []
+        reconciler.fail_closed_stop = lambda units, reason: stopped.extend(units)
+        reconciler.stop_expired_leases("TimeoutError")
+        self.assertEqual(stopped, [])
 
     def test_activating_units_are_not_considered_healthy(self):
         self.assertNotIn("activating", HEALTHY_ACTIVE_STATES)

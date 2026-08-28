@@ -247,6 +247,16 @@ class EtcdClient:
         )
         return _as_int(response.get("ID"))
 
+    def keep_alive_lease(self, lease_id: int) -> int:
+        """Renew one lease and return its server-reported remaining TTL."""
+        response = self._request_json(
+            "/v3/lease/keepalive",
+            {"ID": int(lease_id)},
+            timeout=3,
+        )
+        result = response.get("result", response)
+        return _as_int(result.get("TTL"))
+
     def revoke_lease(self, lease_id: int) -> None:
         # Release a lease when this process no longer owns it.
         if not lease_id:

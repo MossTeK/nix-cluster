@@ -131,8 +131,6 @@
             --add-flags "-m nix_cluster.cli" \
             --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.coreutils pkgs.bash ]}
 
-          # Old nops command names stay around so existing fleets can upgrade
-          # without changing all scripts and service references at once.
           ln -s nix-cluster-daemon $out/bin/nops-daemon
           ln -s nix-cluster-webhook $out/bin/nops-webhook
           ln -s nix-cluster-observe $out/bin/nops-observe
@@ -265,6 +263,20 @@
             default = "";
             description = "Additional Caddy directives appended inside the generated reverse_proxy block.";
           };
+        };
+      });
+      schedulerUnitPolicyType = lib.types.submodule ({ ... }: {
+        options = {
+          preferredNodes = lib.mkOption { type = lib.types.listOf lib.types.str; default = []; };
+          minimumMemoryAvailableBytes = lib.mkOption { type = lib.types.int; default = 0; };
+          maximumLoadPerCpu = lib.mkOption { type = lib.types.float; default = 0.0; };
+          estimatedMemoryBytes = lib.mkOption { type = lib.types.int; default = 0; };
+          estimatedCpu = lib.mkOption { type = lib.types.float; default = 0.0; };
+          automaticRebalance = lib.mkOption { type = lib.types.bool; default = false; };
+          rebalanceObservationThreshold = lib.mkOption { type = lib.types.int; default = 3; };
+          minimumMemoryAdvantageBytes = lib.mkOption { type = lib.types.int; default = 0; };
+          minimumLoadAdvantagePercent = lib.mkOption { type = lib.types.float; default = 30.0; };
+          requireHealthyStateStorage = lib.mkOption { type = lib.types.bool; default = true; };
         };
       });
       # Emergency users deliberately live outside shared /home so an NFS/home
@@ -511,6 +523,7 @@
             placement_prefix = cfg.ha.scheduler.placementPrefix;
             request_prefix = cfg.ha.scheduler.requestPrefix;
             lease_ttl_seconds = cfg.ha.scheduler.leaseTtlSeconds;
+            lease_renewal_seconds = cfg.ha.scheduler.leaseRenewalSeconds;
             default_strategy = cfg.ha.scheduler.defaultStrategy;
           managed_units = cfg.ha.scheduler.managedUnits;
           app_groups = cfg.ha.scheduler.appGroups;
@@ -526,6 +539,18 @@
           transition_timeout_seconds = cfg.ha.scheduler.transitionTimeoutSeconds;
           target_cooldown_seconds = cfg.ha.scheduler.targetCooldownSeconds;
           ownership_lease_enable = cfg.ha.scheduler.ownershipLeaseEnable;
+          unit_policies = lib.mapAttrs (_: policy: {
+            preferred_nodes = policy.preferredNodes;
+            minimum_memory_available_bytes = policy.minimumMemoryAvailableBytes;
+            maximum_load_per_cpu = policy.maximumLoadPerCpu;
+            estimated_memory_bytes = policy.estimatedMemoryBytes;
+            estimated_cpu = policy.estimatedCpu;
+            automatic_rebalance = policy.automaticRebalance;
+            rebalance_observation_threshold = policy.rebalanceObservationThreshold;
+            minimum_memory_advantage_bytes = policy.minimumMemoryAdvantageBytes;
+            minimum_load_advantage_percent = policy.minimumLoadAdvantagePercent;
+            require_healthy_state_storage = policy.requireHealthyStateStorage;
+          }) cfg.ha.scheduler.unitPolicies;
         };
       };
       # Dynamic ingress settings consumed by ingress.py.
@@ -1138,8 +1163,13 @@
             };
             leaseTtlSeconds = lib.mkOption {
               type = lib.types.int;
+              default = 90;
+              description = "Lease TTL used for scheduler leadership and exclusive service ownership records.";
+            };
+            leaseRenewalSeconds = lib.mkOption {
+              type = lib.types.int;
               default = 15;
-              description = "Lease TTL used for elected scheduler leadership records.";
+              description = "Maximum interval between ownership lease renewals.";
             };
             defaultStrategy = lib.mkOption {
               type = lib.types.enum [ "prefer-current-healthy" "first-healthy" ];
@@ -1215,6 +1245,11 @@
               type = lib.types.bool;
               default = false;
               description = "Require an exclusive etcd lease before a managed service may run.";
+            };
+            unitPolicies = lib.mkOption {
+              type = lib.types.attrsOf schedulerUnitPolicyType;
+              default = {};
+              description = "Per-unit placement preferences, eligibility thresholds, reservations, and rebalance policy.";
             };
           };
         };
@@ -1547,6 +1582,10 @@
           {
             assertion = (!cfg.ha.scheduler.enable) || cfg.ha.scheduler.controllerMode != "elected" || cfg.ha.scheduler.leaseTtlSeconds > cfg.ha.scheduler.intervalSeconds;
             message = "services.nix-cluster.ha.scheduler.leaseTtlSeconds must be greater than intervalSeconds when elected scheduler leadership is enabled.";
+          }
+          {
+            assertion = (!cfg.ha.scheduler.ownershipLeaseEnable) || cfg.ha.scheduler.leaseTtlSeconds >= (3 * cfg.ha.scheduler.leaseRenewalSeconds);
+            message = "services.nix-cluster.ha.scheduler.leaseTtlSeconds must be at least three leaseRenewalSeconds when ownership leases are enabled.";
           }
           {
             assertion = (!cfg.ha.reporting.enable) || cfg.ha.runtimeStore.staleAfterSeconds >= ((3 * cfg.ha.reporting.intervalSeconds) + cfg.ha.reporting.collectionDeadlineSeconds);

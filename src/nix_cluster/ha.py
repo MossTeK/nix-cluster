@@ -6,6 +6,7 @@ import os
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import uuid
@@ -492,10 +493,62 @@ class WorkerReconciler:
         self.previous_assignments: dict[str, str | None] = {}
         self.last_runtime_store_warning: tuple[str, str] | None = None
         self.last_runtime_store_warning_at = 0.0
-        self.owned_leases: dict[str, int] = {}
+        self.owned_leases: dict[str, dict[str, Any]] = {}
+        self.lease_lock = threading.Lock()
+        self.lease_transient_failures: dict[str, int] = {}
+        self.resource_samples: list[dict[str, Any]] = []
+
+    def lease_is_locally_valid(self, unit: str) -> bool:
+        with self.lease_lock:
+            lease = self.owned_leases.get(unit)
+            return bool(lease and time.monotonic() < float(lease.get("deadline", 0.0)))
+
+    def stop_expired_leases(self, reason: str) -> None:
+        with self.lease_lock:
+            expired = [unit for unit, lease in self.owned_leases.items() if time.monotonic() >= float(lease.get("deadline", 0.0))]
+        if expired:
+            self.fail_closed_stop(expired, reason)
+            with self.lease_lock:
+                for unit in expired:
+                    self.owned_leases.pop(unit, None)
+
+    def lease_keeper(self, endpoint: str) -> None:
+        interval = max(1, self.config.ha.scheduler.lease_renewal_seconds)
+        ttl = max(interval * 3, self.config.ha.scheduler.lease_ttl_seconds)
+        etcd = EtcdClient(endpoint)
+        while True:
+            with self.lease_lock:
+                leases = {unit: dict(value) for unit, value in self.owned_leases.items()}
+            for unit, lease in leases.items():
+                try:
+                    remaining = etcd.keep_alive_lease(_safe_int(lease.get("id")))
+                    if remaining <= 0:
+                        with self.lease_lock:
+                            if unit in self.owned_leases:
+                                self.owned_leases[unit]["deadline"] = 0.0
+                        self.stop_expired_leases("lease_expired")
+                        continue
+                    with self.lease_lock:
+                        current = self.owned_leases.get(unit)
+                        if current and _safe_int(current.get("id")) == _safe_int(lease.get("id")):
+                            current["deadline"] = time.monotonic() + min(ttl, remaining)
+                            current["last_renewed_at"] = int(time.time())
+                            self.lease_transient_failures[unit] = 0
+                except (urllib.error.URLError, TimeoutError, OSError) as error:
+                    self.lease_transient_failures[unit] = self.lease_transient_failures.get(unit, 0) + 1
+                    self.log_runtime_store_warning(endpoint, "ownership_lease_renewal_unknown host=%s unit=%s error=%s", self.hostname, unit, type(error).__name__)
+                    self.stop_expired_leases("lease_renewal_deadline_expired")
+                except Exception as error:
+                    self.logger.exception("ownership_lease_keeper_failed host=%s unit=%s error=%s", self.hostname, unit, error)
+                    self.stop_expired_leases("lease_renewal_deadline_expired")
+            time.sleep(interval)
 
     def ensure_service_lease(self, etcd: EtcdClient, ownership_key: str, unit: str, generation: int, now: int) -> bool:
         ttl = max(15, self.config.ha.scheduler.lease_ttl_seconds)
+        with self.lease_lock:
+            tracked = self.owned_leases.get(unit)
+            if tracked and _safe_int(tracked.get("generation")) == generation and time.monotonic() < float(tracked.get("deadline", 0.0)):
+                return True
         existing = etcd.get_key(ownership_key)
         payload = {"host": self.hostname, "unit": unit, "generation": generation, "observed_at": now}
         new_lease = etcd.grant_lease(ttl)
@@ -516,7 +569,14 @@ class WorkerReconciler:
         if not acquired:
             etcd.revoke_lease(new_lease)
             return False
-        self.owned_leases[unit] = new_lease
+        with self.lease_lock:
+            self.owned_leases[unit] = {
+                "id": new_lease,
+                "generation": generation,
+                "key": ownership_key,
+                "deadline": time.monotonic() + ttl,
+                "last_renewed_at": now,
+            }
         if old_lease and old_lease != new_lease:
             etcd.revoke_lease(old_lease)
         return True
@@ -525,7 +585,8 @@ class WorkerReconciler:
         existing = etcd.get_key(ownership_key)
         if existing and existing.get("value", {}).get("host") == self.hostname:
             etcd.revoke_lease(_safe_int(existing.get("lease")))
-        self.owned_leases.pop(unit, None)
+        with self.lease_lock:
+            self.owned_leases.pop(unit, None)
 
     def fail_closed_stop(self, units: Iterable[str], reason: str) -> None:
         for unit in list(units):
@@ -701,7 +762,7 @@ class WorkerReconciler:
         controller_reachable = self.read_controller_status()
         schedulable = memory_available_bytes >= MIN_AVAILABLE_MEMORY_BYTES and state_dir_free_bytes >= MIN_STATE_FREE_BYTES
 
-        return {
+        snapshot = {
             "host": self.hostname,
             "observed_at": now,
             "cpu_count": cpu_count,
@@ -721,6 +782,15 @@ class WorkerReconciler:
             "minimum_memory_available_bytes": MIN_AVAILABLE_MEMORY_BYTES,
             "minimum_state_dir_free_bytes": MIN_STATE_FREE_BYTES,
         }
+        self.resource_samples.append(dict(snapshot))
+        self.resource_samples = self.resource_samples[-3:]
+        if len(self.resource_samples) >= 3:
+            for field in ("memory_available_bytes", "state_dir_free_bytes", "load_1_per_cpu"):
+                snapshot[field] = sum(_safe_float(sample.get(field)) for sample in self.resource_samples) / len(self.resource_samples)
+            snapshot["memory_available_bytes"] = int(snapshot["memory_available_bytes"])
+            snapshot["state_dir_free_bytes"] = int(snapshot["state_dir_free_bytes"])
+        snapshot["sample_count"] = len(self.resource_samples)
+        return snapshot
 
     def build_node_detail(
         self,
@@ -911,6 +981,15 @@ class WorkerReconciler:
                 lines.append(
                     f'nix_cluster_scheduler_unit_active_local{{host="{self.hostname}",service="{unit_label}"}} {1 if payload.get("active_local") else 0}'
                 )
+                with self.lease_lock:
+                    lease = dict(self.owned_leases.get(unit, {}))
+                if lease:
+                    lines.extend([
+                        f'nix_cluster_ownership_lease_valid{{host="{self.hostname}",service="{unit_label}"}} {1 if time.monotonic() < float(lease.get("deadline", 0.0)) else 0}',
+                        f'nix_cluster_ownership_lease_seconds_remaining{{host="{self.hostname}",service="{unit_label}"}} {max(0.0, float(lease.get("deadline", 0.0)) - time.monotonic()):.3f}',
+                        f'nix_cluster_ownership_lease_renewal_age_seconds{{host="{self.hostname}",service="{unit_label}"}} {max(0, now - _safe_int(lease.get("last_renewed_at"), now))}',
+                        f'nix_cluster_ownership_lease_transient_failures{{host="{self.hostname}",service="{unit_label}"}} {self.lease_transient_failures.get(unit, 0)}',
+                    ])
                 if payload.get("last_action"):
                     if not action_header_added:
                         lines.extend([
@@ -945,6 +1024,7 @@ class WorkerReconciler:
         managed_units = sorted(set(self.config.ha.scheduler.managed_units))
         placement_prefix = self.config.ha.scheduler.placement_prefix.rstrip("/")
         ownership_prefix = self.config.ha.scheduler.ownership_prefix.rstrip("/")
+        request_prefix = self.config.ha.scheduler.request_prefix.rstrip("/")
         resource_prefix = self.config.ha.scheduler.resource_prefix.rstrip("/")
         node_detail_prefix = NODE_DETAIL_PREFIX.rstrip("/")
         reconcile_state_path = Path(self.config.directories.state) / "ha" / "scheduler-reconciler.json"
@@ -954,6 +1034,7 @@ class WorkerReconciler:
         next_resource_publish_at = 0.0
         last_resource_snapshot: dict[str, Any] | None = None
 
+        threading.Thread(target=self.lease_keeper, args=(endpoint,), daemon=True, name="nix-cluster-lease-keeper").start()
         self.logger.info("starting scheduler reconciler on %s", self.hostname)
         while True:
             try:
@@ -1065,7 +1146,7 @@ class WorkerReconciler:
                             retry_after,
                         )
             except RuntimeStoreRateLimited as error:
-                self.fail_closed_stop(self.owned_leases.keys(), type(error).__name__)
+                self.stop_expired_leases(type(error).__name__)
                 event, retry_after = _runtime_store_warning_details(error, max(5.0, float(interval)))
                 write_backoff_until = time.monotonic() + retry_after
                 self.log_runtime_store_warning(
@@ -1076,7 +1157,7 @@ class WorkerReconciler:
                     retry_after,
                 )
             except urllib.error.URLError as error:
-                self.fail_closed_stop(self.owned_leases.keys(), type(error).__name__)
+                self.stop_expired_leases(type(error).__name__)
                 self.log_runtime_store_warning(
                     endpoint,
                     "runtime_store_unreachable endpoint=%s error=%s",
@@ -1084,7 +1165,7 @@ class WorkerReconciler:
                     error,
                 )
             except Exception as error:
-                self.fail_closed_stop(self.owned_leases.keys(), type(error).__name__)
+                self.stop_expired_leases(type(error).__name__)
                 self.logger.exception("reconciler_loop_failed: %s", error)
             time.sleep(interval)
 
@@ -1259,17 +1340,34 @@ class ClusterMonitor:
             return False
         return bool(payload.get("schedulable", True))
 
+    def resource_record_meets_policy(self, service: str, payload: dict[str, Any] | None, now: int, stale_after: int) -> bool:
+        if not self.resource_record_is_schedulable(payload, now, stale_after):
+            return False
+        policy = getattr(self.config.ha.scheduler, "unit_policies", {}).get(service)
+        if not policy or not payload:
+            return True
+        if policy.minimum_memory_available_bytes and _safe_int(payload.get("memory_available_bytes")) < policy.minimum_memory_available_bytes:
+            return False
+        if policy.maximum_load_per_cpu and _safe_float(payload.get("load_1_per_cpu"), 9999.0) > policy.maximum_load_per_cpu:
+            return False
+        if policy.require_healthy_state_storage and not bool(payload.get("state_storage_healthy", True)):
+            return False
+        return True
+
     def rank_nodes_by_resources(
         self,
         candidate_nodes: list[str],
         resource_records: dict[str, dict[str, Any]],
         *,
+        service: str = "",
         reports: dict[str, dict[str, Any]] | None = None,
         now: int,
         stale_after: int,
     ) -> list[str]:
-        # Order candidate nodes by health first, then capacity and load.
-        def resource_sort_key(host: str) -> tuple[int, int, int, int, int, float, str]:
+        policy = getattr(self.config.ha.scheduler, "unit_policies", {}).get(service)
+        preferred = policy.preferred_nodes if policy else []
+
+        def resource_sort_key(host: str) -> tuple[int, int, int, int, int, int, float, str]:
             # Build the tuple Python uses to sort best scheduler targets first.
             payload = resource_records.get(host)
             report = reports.get(host, {}) if reports else {}
@@ -1282,11 +1380,12 @@ class ClusterMonitor:
             else:
                 service_state_rank = 2
             if not self.resource_record_is_fresh(payload, now, stale_after):
-                return (service_state_rank, 1, 1, 0, 0, 9999.0, host)
+                return (service_state_rank, 1, 1, len(preferred) + 1, 0, 0, 9999.0, host)
             return (
                 service_state_rank,
-                0 if bool(payload.get("schedulable", True)) else 1,
+                0 if self.resource_record_meets_policy(service, payload, now, stale_after) else 1,
                 0 if bool(payload.get("controller_reachable", True)) else 1,
+                preferred.index(host) if host in preferred else len(preferred),
                 -_safe_int(payload.get("memory_available_bytes")),
                 -_safe_int(payload.get("state_dir_free_bytes")),
                 _safe_float(payload.get("load_1_per_cpu"), 9999.0),
@@ -1312,14 +1411,14 @@ class ClusterMonitor:
             return None
         strategy = self.config.ha.scheduler.default_strategy
         prior = current_owner or self.previous_targets.get(service)
-        ranked_nodes = self.rank_nodes_by_resources(candidate_nodes, resource_records, reports=reports, now=now, stale_after=stale_after)
+        ranked_nodes = self.rank_nodes_by_resources(candidate_nodes, resource_records, service=service, reports=reports, now=now, stale_after=stale_after)
         schedulable_nodes = [
             host for host in ranked_nodes
-            if self.resource_record_is_schedulable(resource_records.get(host), now, stale_after)
+            if self.resource_record_meets_policy(service, resource_records.get(host), now, stale_after)
         ]
 
         if strategy == "prefer-current-healthy" and prior in healthy_nodes:
-            if not schedulable_nodes or self.resource_record_is_schedulable(resource_records.get(prior), now, stale_after):
+            if not schedulable_nodes or self.resource_record_meets_policy(service, resource_records.get(prior), now, stale_after):
                 return prior
 
         if schedulable_nodes:
@@ -1345,6 +1444,7 @@ class ClusterMonitor:
         ownership: dict[str, Any] | None,
         now: int,
         stale_after: int,
+        resource_records: dict[str, dict[str, Any]] | None = None,
         requested_target: str | None = None,
     ) -> dict[str, Any]:
         """Advance one fail-closed, hysteretic placement state machine."""
@@ -1355,6 +1455,7 @@ class ClusterMonitor:
         phase = str(current.get("phase") or "stable")
         generation = max(1, _safe_int(current.get("generation"), 1))
         failures = max(0, _safe_int(current.get("failure_count")))
+        rebalance_observations = max(0, _safe_int(current.get("rebalance_observations")))
         successes = max(0, _safe_int(current.get("success_count")))
         stable_since = _safe_int(current.get("stable_since"), _safe_int(current.get("updated_at"), now))
         phase_started_at = _safe_int(current.get("phase_started_at"), now)
@@ -1407,9 +1508,56 @@ class ClusterMonitor:
                     phase = "deactivating"
                     phase_started_at = now
                     successes = 0
+            policy = getattr(cfg, "unit_policies", {}).get(service)
+            if (
+                policy
+                and policy.automatic_rebalance
+                and active not in eligible
+                and healthy(active)
+                and now - stable_since >= max(1, cfg.minimum_owner_seconds)
+            ):
+                rebalance_observations += 1
+                alternatives = [host for host in eligible if host != active]
+                if resource_records and alternatives:
+                    active_resource = resource_records.get(active, {})
+                    qualified: list[str] = []
+                    for host in alternatives:
+                        target_resource = resource_records.get(host, {})
+                        memory_advantage = _safe_int(target_resource.get("memory_available_bytes")) - _safe_int(active_resource.get("memory_available_bytes"))
+                        active_load = _safe_float(active_resource.get("load_1_per_cpu"))
+                        target_load = _safe_float(target_resource.get("load_1_per_cpu"))
+                        load_advantage = ((active_load - target_load) / active_load * 100.0) if active_load > 0 else 0.0
+                        if memory_advantage >= policy.minimum_memory_advantage_bytes or load_advantage >= policy.minimum_load_advantage_percent:
+                            qualified.append(host)
+                    alternatives = qualified
+                if rebalance_observations >= max(1, policy.rebalance_observation_threshold) and alternatives:
+                    target = alternatives[0]
+                    desired = target
+                    generation += 1
+                    phase = "deactivating"
+                    phase_started_at = now
+                    successes = 0
+                    rebalance_observations = 0
+            else:
+                rebalance_observations = 0
 
         elif phase != "stable":
-            if target and now - phase_started_at > max(1, cfg.transition_timeout_seconds):
+            if lease_matches_target and target:
+                phase = "verifying" if healthy(target) else "activating"
+                if healthy(target):
+                    successes += 1
+                    if successes >= max(1, cfg.recovery_threshold):
+                        active = target
+                        desired = target
+                        target = None
+                        phase = "stable"
+                        stable_since = now
+                        phase_started_at = now
+                        failures = 0
+                        successes = 0
+                else:
+                    successes = 0
+            elif target and now - phase_started_at > max(1, cfg.transition_timeout_seconds):
                 cooldowns[target] = now + max(1, cfg.target_cooldown_seconds)
                 alternatives = [host for host in eligible if host not in {target, active}]
                 if alternatives:
@@ -1448,6 +1596,7 @@ class ClusterMonitor:
             "phase_started_at": phase_started_at,
             "stable_since": stable_since,
             "failure_count": failures,
+            "rebalance_observations": rebalance_observations,
             "success_count": successes,
             "cooldowns": cooldowns,
             "ownership_host": owner_host,
@@ -1611,6 +1760,7 @@ class ClusterMonitor:
         placement_prefix = self.config.ha.scheduler.placement_prefix.rstrip("/")
         request_prefix = self.config.ha.scheduler.request_prefix.rstrip("/")
         ownership_prefix = self.config.ha.scheduler.ownership_prefix.rstrip("/")
+        request_prefix = self.config.ha.scheduler.request_prefix.rstrip("/")
         node_detail_prefix = NODE_DETAIL_PREFIX.rstrip("/")
         write_backoff_until = 0.0
 
@@ -1644,6 +1794,16 @@ class ClusterMonitor:
                         service = key.removeprefix(request_prefix + "/")
                         if service and isinstance(payload, dict):
                             move_requests[service] = payload
+                scheduling_resources = {host: dict(payload) for host, payload in resource_records.items()}
+                for placed_unit, placement in current_placements.items():
+                    owner = str(placement.get("target_owner") or placement.get("desired_owner") or placement.get("active_owner") or "")
+                    policy = getattr(self.config.ha.scheduler, "unit_policies", {}).get(placed_unit)
+                    resource = scheduling_resources.get(owner)
+                    if not owner or not policy or resource is None:
+                        continue
+                    resource["memory_available_bytes"] = max(0, _safe_int(resource.get("memory_available_bytes")) - policy.estimated_memory_bytes)
+                    cpu_count = max(1, _safe_int(resource.get("cpu_count"), 1))
+                    resource["load_1_per_cpu"] = _safe_float(resource.get("load_1_per_cpu")) + (policy.estimated_cpu / cpu_count)
                 ownership_records: dict[str, dict[str, Any]] = {}
                 if ownership_prefix:
                     for key, entry in etcd.get_prefix_entries(ownership_prefix).items():
@@ -1690,7 +1850,8 @@ class ClusterMonitor:
                     healthy_nodes = payload["healthy_nodes"]
                     ranked_nodes = self.rank_nodes_by_resources(
                         candidate_nodes,
-                        resource_records,
+                        scheduling_resources,
+                        service=service,
                         reports=payload["reports"],
                         now=now,
                         stale_after=resource_stale_after,
@@ -1713,6 +1874,7 @@ class ClusterMonitor:
                         ownership_records.get(service),
                         now,
                         stale_after,
+                        scheduling_resources,
                         requested_target=requested_target,
                     )
                     if request_update is None:

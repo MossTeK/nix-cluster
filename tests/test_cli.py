@@ -104,6 +104,7 @@ class CliTests(unittest.TestCase):
         etcd = FakeEtcd(
             keys={
                 "/nix-cluster/cluster-state": {
+                    "scheduler": {"is_leader": True, "leader": {"hostname": "controller"}},
                     "resources": {"node4": {"observed_at": now, "schedulable": True}},
                     "services": {
                         "demo.service": {
@@ -124,6 +125,7 @@ class CliTests(unittest.TestCase):
         etcd = FakeEtcd(
             keys={
                 "/nix-cluster/cluster-state": {
+                    "scheduler": {"is_leader": True, "leader": {"hostname": "controller"}},
                     "resources": {"node4": {"observed_at": now, "schedulable": True}},
                     "services": {
                         "demo.service": {"reports": {"node4": {"observed_at": now, "load_state": "loaded"}}},
@@ -142,6 +144,18 @@ class CliTests(unittest.TestCase):
             "/nix-cluster/scheduler/requests/demo.service",
         ])
         self.assertEqual(etcd.writes["/nix-cluster/scheduler/requests/demo.service"]["target_owner"], "node4")
+        self.assertTrue(etcd.writes["/nix-cluster/scheduler/requests/demo.service"]["request_id"])
+
+    def test_placement_move_parser_matches_operator_command(self):
+        args = cli.build_parser().parse_args([
+            "placement", "move", "demo.service", "node4", "--wait", "--timeout", "300"
+        ])
+
+        self.assertEqual(args.placement_command, "move")
+        self.assertEqual(args.unit, "demo.service")
+        self.assertEqual(args.node, "node4")
+        self.assertTrue(args.wait)
+        self.assertEqual(args.timeout, 300)
 
 
 if __name__ == "__main__":
