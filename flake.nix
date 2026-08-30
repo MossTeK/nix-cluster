@@ -532,6 +532,15 @@
           reconciler_dry_run = cfg.ha.scheduler.reconcilerDryRun;
           resource_prefix = cfg.ha.scheduler.resourcePrefix;
           resource_interval_seconds = cfg.ha.scheduler.resourceIntervalSeconds;
+          node_schedulable = cfg.ha.scheduler.nodeSchedulable;
+          storage_health = {
+            enable = cfg.ha.scheduler.storageHealth.enable;
+            command = cfg.ha.scheduler.storageHealth.command;
+            required_mounts = cfg.ha.scheduler.storageHealth.requiredMounts;
+            probe_path = cfg.ha.scheduler.storageHealth.probePath;
+            timeout_seconds = cfg.ha.scheduler.storageHealth.timeoutSeconds;
+            healthy_observation_threshold = cfg.ha.scheduler.storageHealth.healthyObservationThreshold;
+          };
           ownership_prefix = cfg.ha.scheduler.ownershipPrefix;
           failure_threshold = cfg.ha.scheduler.failureThreshold;
           recovery_threshold = cfg.ha.scheduler.recoveryThreshold;
@@ -1210,6 +1219,39 @@
               type = lib.types.int;
               default = 15;
               description = "Seconds between local resource and capacity snapshots published for scheduler decisions.";
+            };
+            nodeSchedulable = lib.mkOption {
+              type = lib.types.bool;
+              default = true;
+              description = "Administrative node-wide scheduling gate. Set false to quarantine a node while it continues reporting health.";
+            };
+            storageHealth = {
+              enable = lib.mkEnableOption "state-storage eligibility probing";
+              command = lib.mkOption {
+                type = lib.types.listOf lib.types.str;
+                default = [];
+                description = "Argument vector for an optional bounded state-storage health command. A nonzero exit marks storage unhealthy.";
+              };
+              requiredMounts = lib.mkOption {
+                type = lib.types.listOf lib.types.str;
+                default = [];
+                description = "Mount points that must be mounted before the node is storage-healthy.";
+              };
+              probePath = lib.mkOption {
+                type = lib.types.str;
+                default = "/var/lib/nix-cluster";
+                description = "Directory used for the bounded fsync and read-back storage probe.";
+              };
+              timeoutSeconds = lib.mkOption {
+                type = lib.types.int;
+                default = 10;
+                description = "Timeout for the optional storage health command.";
+              };
+              healthyObservationThreshold = lib.mkOption {
+                type = lib.types.int;
+                default = 3;
+                description = "Consecutive successful probes required before storage becomes schedulable.";
+              };
             };
             ownershipPrefix = lib.mkOption {
               type = lib.types.str;

@@ -71,6 +71,14 @@ deactivation, fencing, activation, and verification state machine.  The
 request never becomes a persistent override; durable preferences remain in
 Git.
 
+Nodes publish state-storage health as `healthy`, `unhealthy`, `unknown`, or
+`recovering`.  The probe combines required-mount checks, an optional bounded
+operator command, and an fsync/read-back check outside user-data paths.
+Unhealthy, unknown, recovering, administratively quarantined, or stale nodes
+are ineligible for new placement.  Confirmed unhealthy storage or an explicit
+quarantine stops local managed units and initiates fenced handoff.  Missing
+storage telemetry is never interpreted as healthy for units that require it.
+
 ## Failure handling and observability
 
 Activation and verification are bounded.  Failed targets enter a cooldown and

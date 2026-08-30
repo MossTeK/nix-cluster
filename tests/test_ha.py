@@ -1,5 +1,6 @@
 import unittest
 import subprocess
+import tempfile
 import threading
 import time
 from types import SimpleNamespace
@@ -130,6 +131,107 @@ class SchedulerTests(unittest.TestCase):
         ranked = monitor.rank_nodes_by_resources(["node2", "node4"], records, service="demo.service", now=100, stale_after=45)
         self.assertEqual(ranked, ["node4", "node2"])
         self.assertFalse(monitor.resource_record_meets_policy("demo.service", records["node2"], 100, 45))
+
+    def test_storage_health_requires_three_fresh_successes(self):
+        reconciler = WorkerReconciler.__new__(WorkerReconciler)
+        reconciler.hostname = "example-node"
+        reconciler.storage_healthy_observations = 0
+        with tempfile.TemporaryDirectory() as probe_path:
+            reconciler.config = SimpleNamespace(ha=SimpleNamespace(scheduler=SimpleNamespace(
+                storage_health=SimpleNamespace(
+                    enable=True,
+                    command=[],
+                    required_mounts=[],
+                    probe_path=probe_path,
+                    timeout_seconds=1,
+                    healthy_observation_threshold=3,
+                )
+            )))
+            first = reconciler.collect_storage_health(100)
+            second = reconciler.collect_storage_health(101)
+            third = reconciler.collect_storage_health(102)
+
+        self.assertEqual(first["state_storage_health"], "recovering")
+        self.assertEqual(second["state_storage_health"], "recovering")
+        self.assertEqual(third["state_storage_health"], "healthy")
+        self.assertTrue(third["state_storage_healthy"])
+
+    def test_storage_probe_error_is_unknown_and_resets_recovery(self):
+        reconciler = WorkerReconciler.__new__(WorkerReconciler)
+        reconciler.hostname = "example-node"
+        reconciler.storage_healthy_observations = 2
+        reconciler.config = SimpleNamespace(ha=SimpleNamespace(scheduler=SimpleNamespace(
+            storage_health=SimpleNamespace(
+                enable=True,
+                command=[],
+                required_mounts=[],
+                probe_path="/definitely/not/a/real/path",
+                timeout_seconds=1,
+                healthy_observation_threshold=3,
+            )
+        )))
+
+        result = reconciler.collect_storage_health(100)
+
+        self.assertEqual(result["state_storage_health"], "unknown")
+        self.assertFalse(result["state_storage_healthy"])
+        self.assertEqual(result["state_storage_healthy_observations"], 0)
+
+    def test_required_storage_health_never_defaults_missing_state_to_healthy(self):
+        monitor = self.monitor_with_stable_policy()
+        monitor.config.ha.scheduler.unit_policies = {
+            "demo.service": SimpleNamespace(
+                preferred_nodes=[],
+                minimum_memory_available_bytes=0,
+                maximum_load_per_cpu=0.0,
+                require_healthy_state_storage=True,
+            )
+        }
+        resource = {"observed_at": 100, "schedulable": True}
+
+        self.assertFalse(monitor.resource_record_meets_policy("demo.service", resource, 100, 45))
+
+    def test_confirmed_storage_failure_initiates_handoff(self):
+        monitor = self.monitor_with_stable_policy()
+        state = monitor.advance_placement(
+            "demo.service",
+            {
+                "desired_owner": "node-a",
+                "active_owner": "node-a",
+                "generation": 1,
+                "phase": "stable",
+                "updated_at": 100,
+            },
+            ["node-a", "node-b"],
+            ["node-a", "node-b"],
+            ["node-b", "node-a"],
+            {
+                "node-a": {"observed_at": 100, "healthy": True},
+                "node-b": {"observed_at": 100, "healthy": True},
+            },
+            {"host": "node-a", "generation": 1},
+            100,
+            45,
+            {
+                "node-a": {
+                    "observed_at": 100,
+                    "schedulable": False,
+                    "node_schedulable_configured": True,
+                    "state_storage_health": "unhealthy",
+                },
+                "node-b": {
+                    "observed_at": 100,
+                    "schedulable": True,
+                    "node_schedulable_configured": True,
+                    "state_storage_health": "healthy",
+                },
+            },
+        )
+
+        self.assertEqual(state["desired_owner"], "node-b")
+        self.assertEqual(state["target_owner"], "node-b")
+        self.assertEqual(state["phase"], "deactivating")
+        self.assertEqual(state["generation"], 2)
 
     def test_transient_store_failure_does_not_stop_before_local_lease_deadline(self):
         reconciler = WorkerReconciler.__new__(WorkerReconciler)

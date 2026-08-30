@@ -497,6 +497,77 @@ class WorkerReconciler:
         self.lease_lock = threading.Lock()
         self.lease_transient_failures: dict[str, int] = {}
         self.resource_samples: list[dict[str, Any]] = []
+        self.storage_healthy_observations = 0
+
+    def collect_storage_health(self, now: int) -> dict[str, Any]:
+        settings = self.config.ha.scheduler.storage_health
+        if not settings.enable:
+            self.storage_healthy_observations = 0
+            return {
+                "state_storage_health": "disabled",
+                "state_storage_healthy": True,
+                "state_storage_observed_at": now,
+                "state_storage_reason": "probe_disabled",
+                "state_storage_healthy_observations": 0,
+            }
+
+        state = "healthy"
+        reason = "checks_passed"
+        try:
+            missing_mounts = [mount for mount in settings.required_mounts if not os.path.ismount(mount)]
+            if missing_mounts:
+                state = "unhealthy"
+                reason = "required_mount_missing"
+            elif settings.command:
+                result = subprocess.run(
+                    settings.command,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=max(1, settings.timeout_seconds),
+                    check=False,
+                )
+                if result.returncode != 0:
+                    state = "unhealthy"
+                    reason = "health_command_failed"
+
+            if state == "healthy":
+                probe_dir = Path(settings.probe_path)
+                probe_file = probe_dir / f".nix-cluster-storage-probe-{os.getpid()}"
+                token = f"{self.hostname}:{now}\n".encode("utf-8")
+                descriptor = os.open(probe_file, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+                try:
+                    os.write(descriptor, token)
+                    os.fsync(descriptor)
+                    os.lseek(descriptor, 0, os.SEEK_SET)
+                    if os.read(descriptor, len(token)) != token:
+                        state = "unhealthy"
+                        reason = "read_write_probe_mismatch"
+                finally:
+                    os.close(descriptor)
+                    probe_file.unlink(missing_ok=True)
+        except subprocess.TimeoutExpired:
+            state = "unknown"
+            reason = "health_command_timeout"
+        except OSError:
+            state = "unknown"
+            reason = "read_write_probe_error"
+
+        if state == "healthy":
+            self.storage_healthy_observations += 1
+        else:
+            self.storage_healthy_observations = 0
+        threshold = max(1, settings.healthy_observation_threshold)
+        effective_healthy = state == "healthy" and self.storage_healthy_observations >= threshold
+        if state == "healthy" and not effective_healthy:
+            state = "recovering"
+            reason = "healthy_observation_threshold"
+        return {
+            "state_storage_health": state,
+            "state_storage_healthy": effective_healthy,
+            "state_storage_observed_at": now,
+            "state_storage_reason": reason,
+            "state_storage_healthy_observations": self.storage_healthy_observations,
+        }
 
     def lease_is_locally_valid(self, unit: str) -> bool:
         with self.lease_lock:
@@ -760,7 +831,13 @@ class WorkerReconciler:
         load_1, load_5, load_15 = os.getloadavg()
         cpu_count = max(1, os.cpu_count() or 1)
         controller_reachable = self.read_controller_status()
-        schedulable = memory_available_bytes >= MIN_AVAILABLE_MEMORY_BYTES and state_dir_free_bytes >= MIN_STATE_FREE_BYTES
+        storage_health = self.collect_storage_health(now)
+        schedulable = (
+            self.config.ha.scheduler.node_schedulable
+            and bool(storage_health["state_storage_healthy"])
+            and memory_available_bytes >= MIN_AVAILABLE_MEMORY_BYTES
+            and state_dir_free_bytes >= MIN_STATE_FREE_BYTES
+        )
 
         snapshot = {
             "host": self.hostname,
@@ -781,6 +858,8 @@ class WorkerReconciler:
             "schedulable": schedulable,
             "minimum_memory_available_bytes": MIN_AVAILABLE_MEMORY_BYTES,
             "minimum_state_dir_free_bytes": MIN_STATE_FREE_BYTES,
+            "node_schedulable_configured": self.config.ha.scheduler.node_schedulable,
+            **storage_health,
         }
         self.resource_samples.append(dict(snapshot))
         self.resource_samples = self.resource_samples[-3:]
@@ -963,6 +1042,12 @@ class WorkerReconciler:
             "# HELP nix_cluster_scheduler_controller_reachable Whether the last controller heartbeat check succeeded on this node.",
             "# TYPE nix_cluster_scheduler_controller_reachable gauge",
             f'nix_cluster_scheduler_controller_reachable{{host="{self.hostname}"}} {1 if resource_snapshot.get("controller_reachable") else 0}',
+            "# HELP nix_cluster_scheduler_state_storage_healthy Whether state storage passed all configured checks and recovery observations.",
+            "# TYPE nix_cluster_scheduler_state_storage_healthy gauge",
+            f'nix_cluster_scheduler_state_storage_healthy{{host="{self.hostname}",state="{resource_snapshot.get("state_storage_health", "unknown")}"}} {1 if resource_snapshot.get("state_storage_healthy") else 0}',
+            "# HELP nix_cluster_scheduler_state_storage_healthy_observations Consecutive successful state-storage observations.",
+            "# TYPE nix_cluster_scheduler_state_storage_healthy_observations gauge",
+            f'nix_cluster_scheduler_state_storage_healthy_observations{{host="{self.hostname}"}} {_safe_int(resource_snapshot.get("state_storage_healthy_observations"))}',
         ]
         if units:
             lines.extend([
@@ -1077,9 +1162,22 @@ class WorkerReconciler:
                     generation = max(1, _safe_int(placement_payload.get("generation"), 1)) if placement_payload else 1
                     ownership_key = f"{ownership_prefix}/{unit}"
                     desired_local = has_placement and desired_owner == self.hostname
+                    local_health_allows = bool(
+                        last_resource_snapshot.get("node_schedulable_configured", True)
+                        and last_resource_snapshot.get("state_storage_healthy", True)
+                    )
                     lease_held = False
                     lease_enforced = self.config.ha.scheduler.ownership_lease_enable
-                    if desired_local and lease_enforced:
+                    if desired_local and not local_health_allows:
+                        if status_before.get("active_state") in ACTIVE_STATES:
+                            self.run_command(["sudo", "systemctl", "--no-block", "stop", unit])
+                        action = {
+                            "action": "stop",
+                            "reason": "local_node_or_storage_quarantined",
+                            "success": True,
+                            "desired_local": False,
+                        }
+                    elif desired_local and lease_enforced:
                         lease_held = self.ensure_service_lease(etcd, ownership_key, unit, generation, now)
                         if lease_held:
                             action = self.reconcile_unit(
@@ -1101,7 +1199,7 @@ class WorkerReconciler:
                         )
                     status_after = self.collect_unit_status(unit, now)
                     active_local = status_after.get("load_state") == "loaded" and status_after.get("active_state") in ACTIVE_STATES
-                    if lease_enforced and not desired_local and not active_local:
+                    if lease_enforced and (not desired_local or not local_health_allows) and not active_local:
                         self.release_service_lease(etcd, ownership_key, unit)
                     units[unit] = {
                         "desired_owner": desired_owner or None,
@@ -1350,7 +1448,7 @@ class ClusterMonitor:
             return False
         if policy.maximum_load_per_cpu and _safe_float(payload.get("load_1_per_cpu"), 9999.0) > policy.maximum_load_per_cpu:
             return False
-        if policy.require_healthy_state_storage and not bool(payload.get("state_storage_healthy", True)):
+        if policy.require_healthy_state_storage and payload.get("state_storage_health") != "healthy":
             return False
         return True
 
@@ -1418,7 +1516,7 @@ class ClusterMonitor:
         ]
 
         if strategy == "prefer-current-healthy" and prior in healthy_nodes:
-            if not schedulable_nodes or self.resource_record_meets_policy(service, resource_records.get(prior), now, stale_after):
+            if self.resource_record_meets_policy(service, resource_records.get(prior), now, stale_after):
                 return prior
 
         if schedulable_nodes:
@@ -1427,11 +1525,7 @@ class ClusterMonitor:
                 if next_nodes:
                     return next_nodes[0]
             return schedulable_nodes[0]
-        if prior and prior not in healthy_nodes:
-            next_nodes = [host for host in ranked_nodes if host != prior]
-            if next_nodes:
-                return next_nodes[0]
-        return ranked_nodes[0]
+        return prior
 
     def advance_placement(
         self,
@@ -1473,7 +1567,14 @@ class ClusterMonitor:
         lease_matches_active = bool(active and owner_host == active and owner_generation == generation)
         lease_matches_target = bool(target and owner_host == target and owner_generation == generation)
 
-        eligible = [host for host in ranked_nodes if host not in cooldowns]
+        eligible = [
+            host for host in ranked_nodes
+            if host not in cooldowns
+            and (
+                not resource_records
+                or self.resource_record_meets_policy(service, resource_records.get(host), now, stale_after)
+            )
+        ]
         if not desired:
             chosen = requested_target if requested_target in eligible else next(iter(eligible), None)
             desired = chosen
@@ -1484,7 +1585,24 @@ class ClusterMonitor:
             stable_since = now
 
         if phase == "stable" and active:
-            if requested_target and requested_target in eligible and requested_target != active:
+            active_resource = (resource_records or {}).get(active, {})
+            confirmed_node_quarantine = bool(
+                self.resource_record_is_fresh(active_resource, now, stale_after)
+                and (
+                    active_resource.get("node_schedulable_configured") is False
+                    or active_resource.get("state_storage_health") == "unhealthy"
+                )
+            )
+            if confirmed_node_quarantine and active not in eligible:
+                alternatives = [host for host in eligible if host != active]
+                target = next(iter(alternatives), None)
+                desired = target
+                generation += 1
+                phase = "deactivating" if target else "awaiting-fence"
+                phase_started_at = now
+                failures = 0
+                successes = 0
+            elif requested_target and requested_target in eligible and requested_target != active:
                 target = requested_target
                 desired = target
                 generation += 1

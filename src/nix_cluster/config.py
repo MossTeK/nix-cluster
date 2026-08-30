@@ -178,6 +178,17 @@ class UnitPolicySettings:
     minimum_load_advantage_percent: float
     require_healthy_state_storage: bool
 
+
+@dataclass(slots=True)
+class StorageHealthSettings:
+    enable: bool
+    command: list[str]
+    required_mounts: list[str]
+    probe_path: str
+    timeout_seconds: int
+    healthy_observation_threshold: int
+
+
 @dataclass(slots=True)
 # How controller nodes choose service owners and how workers apply that choice.
 class SchedulerSettings:
@@ -196,6 +207,8 @@ class SchedulerSettings:
     reconciler_dry_run: bool
     resource_prefix: str
     resource_interval_seconds: int
+    node_schedulable: bool
+    storage_health: StorageHealthSettings
     ownership_prefix: str
     failure_threshold: int
     recovery_threshold: int
@@ -412,6 +425,15 @@ class RuntimeConfig:
                 reconciler_dry_run=_as_bool(scheduler_raw.get("reconciler_dry_run"), False),
                 resource_prefix=str(scheduler_raw.get("resource_prefix", "/nix-cluster/scheduler/resources")),
                 resource_interval_seconds=_as_int(scheduler_raw.get("resource_interval_seconds"), 30),
+                node_schedulable=_as_bool(scheduler_raw.get("node_schedulable"), True),
+                storage_health=StorageHealthSettings(
+                    enable=_as_bool(dict(scheduler_raw.get("storage_health", {})).get("enable"), False),
+                    command=_as_list(dict(scheduler_raw.get("storage_health", {})).get("command", [])),
+                    required_mounts=_as_list(dict(scheduler_raw.get("storage_health", {})).get("required_mounts", [])),
+                    probe_path=str(dict(scheduler_raw.get("storage_health", {})).get("probe_path", "/var/lib/nix-cluster")),
+                    timeout_seconds=_as_int(dict(scheduler_raw.get("storage_health", {})).get("timeout_seconds"), 10),
+                    healthy_observation_threshold=_as_int(dict(scheduler_raw.get("storage_health", {})).get("healthy_observation_threshold"), 3),
+                ),
                 ownership_prefix=str(scheduler_raw.get("ownership_prefix", "/nix-cluster/scheduler/ownership")),
                 failure_threshold=_as_int(scheduler_raw.get("failure_threshold"), 3),
                 recovery_threshold=_as_int(scheduler_raw.get("recovery_threshold"), 2),
