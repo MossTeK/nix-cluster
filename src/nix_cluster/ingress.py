@@ -34,20 +34,137 @@ def _route_unavailable(reason: str) -> str:
     return f'respond "nix-cluster route unavailable: {_caddy_escape(reason)}" 503\n'
 
 
-# Check whether the scheduler's chosen owner has a fresh healthy report.
-def _healthy_owner(cluster_state: dict[str, Any], unit: str, owner: str, now: int, stale_after: int) -> bool:
+def route_status_for_unit(
+    unit: str,
+    placements: dict[str, dict[str, Any]],
+    cluster_state: dict[str, Any],
+    node_addresses: dict[str, str],
+    now: int,
+    stale_after: int,
+    ownership_records: dict[str, dict[str, Any]] | None = None,
+    *,
+    has_route: bool = True,
+) -> dict[str, Any]:
+    """Compute whether a service is actually usable by ingress.
+
+    A systemd-active unit is not enough. Dynamic ingress is allowed only when
+    the controller has fresh health, a non-stale placement, an address, and a
+    matching ownership lease for the active generation.
+    """
+    status: dict[str, Any] = {
+        "has_route": has_route,
+        "routable": False,
+        "route_reason": "not evaluated",
+        "lease_valid": False,
+        "lease_reason": "not evaluated",
+        "health_fresh": False,
+        "usable": False,
+        "usable_reason": "not evaluated",
+    }
+
     observed_at = _safe_int(cluster_state.get("observed_at"))
     if not observed_at or now - observed_at > stale_after:
-        return False
+        status.update({
+            "route_reason": "cluster state stale",
+            "lease_reason": "not checked",
+            "usable_reason": "cluster state stale",
+        })
+        return status
+
+    placement = placements.get(unit)
+    if not placement:
+        status.update({
+            "route_reason": "missing placement",
+            "lease_reason": "not checked",
+            "usable_reason": "missing placement",
+        })
+        return status
+    if now - _safe_int(placement.get("updated_at")) > stale_after:
+        status.update({
+            "route_reason": "stale placement",
+            "lease_reason": "not checked",
+            "usable_reason": "stale placement",
+        })
+        return status
+
+    owner = str(placement.get("active_owner") or placement.get("desired_owner") or "")
+    if not owner:
+        status.update({
+            "route_reason": "missing desired owner",
+            "lease_reason": "not checked",
+            "usable_reason": "missing desired owner",
+        })
+        return status
+    status["owner"] = owner
 
     service = dict(cluster_state.get("services", {})).get(unit, {})
     reports = dict(service.get("reports", {}))
     report = dict(reports.get(owner, {}))
     if not report:
-        return False
+        status.update({
+            "route_reason": "owner report missing",
+            "lease_reason": "not checked",
+            "usable_reason": "owner report missing",
+        })
+        return status
     if now - _safe_int(report.get("observed_at")) > stale_after:
-        return False
-    return bool(report.get("healthy"))
+        status.update({
+            "route_reason": "owner report stale",
+            "lease_reason": "not checked",
+            "usable_reason": "owner report stale",
+        })
+        return status
+    status["health_fresh"] = True
+    if not report.get("healthy"):
+        status.update({
+            "route_reason": "owner unhealthy",
+            "lease_reason": "not checked",
+            "usable_reason": "owner unhealthy",
+        })
+        return status
+
+    if "active_owner" in placement and ownership_records is not None:
+        ownership = ownership_records.get(unit, {})
+        if not ownership:
+            status.update({
+                "route_reason": "ownership lease missing",
+                "lease_reason": "ownership lease missing",
+                "usable_reason": "ownership lease missing",
+            })
+            return status
+        if ownership.get("host") != owner:
+            status.update({
+                "route_reason": "ownership lease owner mismatch",
+                "lease_reason": "ownership lease owner mismatch",
+                "usable_reason": "ownership lease owner mismatch",
+            })
+            return status
+        if _safe_int(ownership.get("generation")) != _safe_int(placement.get("generation")):
+            status.update({
+                "route_reason": "ownership lease generation mismatch",
+                "lease_reason": "ownership lease generation mismatch",
+                "usable_reason": "ownership lease generation mismatch",
+            })
+            return status
+
+    status.update({"lease_valid": True, "lease_reason": "ownership lease valid"})
+    address = node_addresses.get(owner)
+    if has_route and not address:
+        status.update({
+            "route_reason": "missing owner address",
+            "usable_reason": "missing owner address",
+        })
+        return status
+    if not has_route:
+        status.update({
+            "routable": False,
+            "route_reason": "no route configured",
+            "usable": True,
+            "usable_reason": "service healthy with valid ownership",
+        })
+        return status
+    status.update({"routable": True, "route_reason": "route available", "usable": True, "usable_reason": "route available"})
+    return status
 
 
 def target_for_route(
@@ -75,18 +192,10 @@ def target_for_route(
     if not owner:
         return None, "missing desired owner"
 
+    status = route_status_for_unit(route.unit, placements, cluster_state, node_addresses, now, stale_after, ownership_records)
+    if not status.get("routable"):
+        return None, str(status.get("route_reason") or status.get("usable_reason") or "no backend")
     address = node_addresses.get(owner)
-    if not address:
-        return None, "missing owner address"
-
-    if not _healthy_owner(cluster_state, route.unit, owner, now, stale_after):
-        return None, "owner not healthy"
-
-    if "active_owner" in placement and ownership_records is not None:
-        ownership = ownership_records.get(route.unit, {})
-        if ownership.get("host") != owner or _safe_int(ownership.get("generation")) != _safe_int(placement.get("generation")):
-            return None, "owner lease not valid"
-
     return f"{route.scheme}://{address}:{route.port}", None
 
 

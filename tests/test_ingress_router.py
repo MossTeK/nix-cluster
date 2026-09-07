@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from nix_cluster.config import IngressRouteSettings
-from nix_cluster.ingress import IngressRouter, render_route_snippet, target_for_route
+from nix_cluster.ingress import IngressRouter, render_route_snippet, route_status_for_unit, target_for_route
 
 
 def route(**overrides):
@@ -100,7 +100,7 @@ class IngressRouterTests(unittest.TestCase):
         )
 
         self.assertIsNone(target)
-        self.assertEqual(reason, "owner not healthy")
+        self.assertEqual(reason, "owner unhealthy")
 
     def test_versioned_route_requires_matching_active_owner_lease(self):
         now = int(time.time())
@@ -111,7 +111,50 @@ class IngressRouterTests(unittest.TestCase):
             {"nix-cluster-portal.service": {"host": "node4", "generation": 7}},
         )
         self.assertIsNone(target)
-        self.assertEqual(reason, "owner lease not valid")
+        self.assertEqual(reason, "ownership lease owner mismatch")
+
+    def test_stale_owner_report_exposes_precise_route_reason(self):
+        now = int(time.time())
+        placement = {"desired_owner": "node2", "active_owner": "node2", "generation": 1, "updated_at": now}
+        state = {"observed_at": now, "services": {"nix-cluster-portal.service": {"reports": {"node2": {"observed_at": now - 100, "healthy": True}}}}}
+
+        target, reason = target_for_route(
+            route(), {"nix-cluster-portal.service": placement}, state, {"node2": "192.0.2.22"}, now, 45,
+            {"nix-cluster-portal.service": {"host": "node2", "generation": 1}},
+        )
+        status = route_status_for_unit(
+            "nix-cluster-portal.service",
+            {"nix-cluster-portal.service": placement},
+            state,
+            {"node2": "192.0.2.22"},
+            now,
+            45,
+            {"nix-cluster-portal.service": {"host": "node2", "generation": 1}},
+        )
+
+        self.assertIsNone(target)
+        self.assertEqual(reason, "owner report stale")
+        self.assertFalse(status["usable"])
+        self.assertFalse(status["health_fresh"])
+
+    def test_missing_ownership_lease_is_not_usable(self):
+        now = int(time.time())
+        placement = {"desired_owner": "node2", "active_owner": "node2", "generation": 1, "updated_at": now}
+        state = {"observed_at": now, "services": {"nix-cluster-portal.service": {"reports": {"node2": {"observed_at": now, "healthy": True}}}}}
+
+        status = route_status_for_unit(
+            "nix-cluster-portal.service",
+            {"nix-cluster-portal.service": placement},
+            state,
+            {"node2": "192.0.2.22"},
+            now,
+            45,
+            {},
+        )
+
+        self.assertFalse(status["lease_valid"])
+        self.assertFalse(status["usable"])
+        self.assertEqual(status["route_reason"], "ownership lease missing")
 
     def test_authentik_route_uses_same_backend_for_all_paths(self):
         snippet = render_route_snippet(route(), "http://192.0.2.22:8090", None)

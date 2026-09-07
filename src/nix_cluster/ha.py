@@ -16,6 +16,7 @@ from typing import Any
 
 from .config import RuntimeConfig
 from .core import atomic_write_json, atomic_write_text, configure_logging
+from .ingress import route_status_for_unit
 from .runtime import EtcdClient, RuntimeStoreRateLimited, RuntimeStoreWriteBlocked
 
 ACTIVE_STATES = {"active", "activating", "reloading"}
@@ -499,6 +500,20 @@ class WorkerReconciler:
         self.resource_samples: list[dict[str, Any]] = []
         self.storage_healthy_observations = 0
 
+    @staticmethod
+    def classify_storage_command_failure(output: str) -> str:
+        normalized = output.lower()
+        if "hostid" in normalized and ("mismatch" in normalized or "last accessed by another system" in normalized):
+            return "warning_hostid_mismatch"
+        if "zfs-8000-ey" in normalized:
+            return "warning_hostid_mismatch"
+        if "permanent errors" in normalized or "data corruption" in normalized or "zfs-8000-8a" in normalized:
+            return "unhealthy_data_corruption"
+        degraded_terms = ("degraded", "faulted", "unavail", "offline", "removed", "insufficient replicas")
+        if any(term in normalized for term in degraded_terms):
+            return "unhealthy_degraded_pool"
+        return "unknown_probe_failed"
+
     def collect_storage_health(self, now: int) -> dict[str, Any]:
         settings = self.config.ha.scheduler.storage_health
         if not settings.enable:
@@ -516,19 +531,21 @@ class WorkerReconciler:
         try:
             missing_mounts = [mount for mount in settings.required_mounts if not os.path.ismount(mount)]
             if missing_mounts:
-                state = "unhealthy"
+                state = "unhealthy_required_mount_missing"
                 reason = "required_mount_missing"
             elif settings.command:
                 result = subprocess.run(
                     settings.command,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
                     timeout=max(1, settings.timeout_seconds),
                     check=False,
                 )
                 if result.returncode != 0:
-                    state = "unhealthy"
-                    reason = "health_command_failed"
+                    output = f"{result.stdout}\n{result.stderr}"
+                    state = self.classify_storage_command_failure(output)
+                    reason = state
 
             if state == "healthy":
                 probe_dir = Path(settings.probe_path)
@@ -540,16 +557,16 @@ class WorkerReconciler:
                     os.fsync(descriptor)
                     os.lseek(descriptor, 0, os.SEEK_SET)
                     if os.read(descriptor, len(token)) != token:
-                        state = "unhealthy"
+                        state = "unhealthy_data_corruption"
                         reason = "read_write_probe_mismatch"
                 finally:
                     os.close(descriptor)
                     probe_file.unlink(missing_ok=True)
         except subprocess.TimeoutExpired:
-            state = "unknown"
+            state = "unknown_probe_timeout"
             reason = "health_command_timeout"
         except OSError:
-            state = "unknown"
+            state = "unknown_probe_failed"
             reason = "read_write_probe_error"
 
         if state == "healthy":
@@ -1448,7 +1465,7 @@ class ClusterMonitor:
             return False
         if policy.maximum_load_per_cpu and _safe_float(payload.get("load_1_per_cpu"), 9999.0) > policy.maximum_load_per_cpu:
             return False
-        if policy.require_healthy_state_storage and payload.get("state_storage_health") != "healthy":
+        if policy.require_healthy_state_storage and payload.get("state_storage_healthy") is not True:
             return False
         return True
 
@@ -1590,7 +1607,7 @@ class ClusterMonitor:
                 self.resource_record_is_fresh(active_resource, now, stale_after)
                 and (
                     active_resource.get("node_schedulable_configured") is False
-                    or active_resource.get("state_storage_health") == "unhealthy"
+                    or active_resource.get("state_storage_healthy") is False
                 )
             )
             if confirmed_node_quarantine and active not in eligible:
@@ -1610,11 +1627,22 @@ class ClusterMonitor:
                 phase_started_at = now
                 failures = 0
                 successes = 0
+            elif cfg.ownership_lease_enable and not lease_matches_active:
+                failures += 1
+                alternatives = [host for host in eligible if host != active]
+                if failures >= max(1, cfg.failure_threshold) and alternatives:
+                    target = alternatives[0]
+                    desired = target
+                    generation += 1
+                    phase = "deactivating"
+                    phase_started_at = now
+                    successes = 0
+                else:
+                    phase = "recovering"
+                    phase_started_at = now
             elif healthy(active):
                 failures = 0
             elif fresh(active):
-                failures += 1
-            elif cfg.ownership_lease_enable and not lease_matches_active:
                 failures += 1
             # Unknown telemetry with a live ownership lease is not failure.
             if failures >= max(1, cfg.failure_threshold):
@@ -1660,7 +1688,27 @@ class ClusterMonitor:
                 rebalance_observations = 0
 
         elif phase != "stable":
-            if lease_matches_target and target:
+            if phase == "recovering" and active:
+                if healthy(active) and (lease_matches_active or not cfg.ownership_lease_enable):
+                    phase = "stable"
+                    stable_since = now
+                    phase_started_at = now
+                    failures = 0
+                    successes = 0
+                else:
+                    failures += 1
+                    alternatives = [host for host in eligible if host != active]
+                    if failures >= max(1, cfg.failure_threshold) and alternatives:
+                        target = alternatives[0]
+                        desired = target
+                        generation += 1
+                        phase = "deactivating"
+                        phase_started_at = now
+                        successes = 0
+                    else:
+                        target = None
+                        desired = active
+            elif lease_matches_target and target:
                 phase = "verifying" if healthy(target) else "activating"
                 if healthy(target):
                     successes += 1
@@ -1775,6 +1823,13 @@ class ClusterMonitor:
             lines.append(f'nix_cluster_service_instances{{service="{service}",state="healthy"}} {len(payload.get("healthy_nodes", []))}')
             lines.append(f'nix_cluster_service_instances{{service="{service}",state="unhealthy"}} {len(payload.get("unhealthy_nodes", []))}')
             lines.append(f'nix_cluster_service_instances{{service="{service}",state="stale"}} {len(payload.get("stale_nodes", []))}')
+            lines.append(f'nix_cluster_service_usable{{service="{service}"}} {1 if payload.get("usable") else 0}')
+            lines.append(f'nix_cluster_service_routable{{service="{service}"}} {1 if payload.get("routable") else 0}')
+            lines.append(f'nix_cluster_service_lease_valid{{service="{service}"}} {1 if payload.get("lease_valid") else 0}')
+        for host, payload in sorted(cluster_state.get("resources", {}).items()):
+            state = str(payload.get("state_storage_health", "unknown"))
+            reason = str(payload.get("state_storage_reason", "unknown"))
+            lines.append(f'nix_cluster_node_storage_healthy{{host="{host}",state="{state}",reason="{reason}"}} {1 if payload.get("state_storage_healthy") else 0}')
         scheduler = cluster_state.get("scheduler", {})
         leader = scheduler.get("leader", {})
         controller_mode = str(scheduler.get("controller_mode", ""))
@@ -1928,6 +1983,11 @@ class ClusterMonitor:
                         service = key.removeprefix(ownership_prefix + "/")
                         if service:
                             ownership_records[service] = dict(entry.get("value", {}))
+                route_units = {
+                    route.unit
+                    for route in self.config.ingress_router.routes.values()
+                    if route.enable and route.unit
+                }
                 services: dict[str, dict[str, Any]] = {}
                 placement_updates: dict[str, dict[str, Any]] = {}
                 for key, payload in records.items():
@@ -2012,6 +2072,17 @@ class ClusterMonitor:
                     payload["current_owner"] = current_owner
                     payload["desired_owner"] = target if (is_leader and service in managed_units) else None
                     payload.update({key: value for key, value in state.items() if key != "desired_owner"})
+                    route_status = route_status_for_unit(
+                        service,
+                        {service: {"updated_at": now, **state}},
+                        {"observed_at": now, "services": services},
+                        self.config.ingress_router.node_addresses,
+                        now,
+                        stale_after,
+                        ownership_records,
+                        has_route=service in route_units,
+                    )
+                    payload.update(route_status)
                     payload["placement_published_at"] = now if (is_leader and service in managed_units) else None
                     self.previous_targets[service] = target
                     if is_leader and service in managed_units:

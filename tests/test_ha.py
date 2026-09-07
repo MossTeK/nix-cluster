@@ -38,6 +38,22 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(state["failure_count"], 0)
         self.assertEqual(state["phase"], "stable")
 
+    def test_active_owner_with_missing_lease_is_recovering_not_stable(self):
+        monitor = self.monitor_with_stable_policy()
+        state = monitor.advance_placement(
+            "demo.service",
+            {"desired_owner": "node2", "active_owner": "node2", "generation": 1, "phase": "stable", "updated_at": 100},
+            ["node2"], ["node2"], ["node2"],
+            {"node2": {"observed_at": 100, "healthy": True}},
+            None,
+            100, 30,
+        )
+
+        self.assertEqual(state["desired_owner"], "node2")
+        self.assertEqual(state["active_owner"], "node2")
+        self.assertEqual(state["phase"], "recovering")
+        self.assertEqual(state["failure_count"], 1)
+
     def test_three_fresh_failures_begin_handoff(self):
         monitor = self.monitor_with_stable_policy()
         placement = {"desired_owner": "node2", "active_owner": "node2", "generation": 1, "phase": "stable", "updated_at": 100}
@@ -173,9 +189,25 @@ class SchedulerTests(unittest.TestCase):
 
         result = reconciler.collect_storage_health(100)
 
-        self.assertEqual(result["state_storage_health"], "unknown")
+        self.assertEqual(result["state_storage_health"], "unknown_probe_failed")
         self.assertFalse(result["state_storage_healthy"])
         self.assertEqual(result["state_storage_healthy_observations"], 0)
+
+    def test_zfs_hostid_mismatch_is_classified_as_warning(self):
+        output = "cannot import 'zroot': pool was previously in use from another system. Mismatch between pool hostid and system hostid"
+
+        self.assertEqual(
+            WorkerReconciler.classify_storage_command_failure(output),
+            "warning_hostid_mismatch",
+        )
+
+    def test_zfs_permanent_errors_are_classified_as_data_corruption(self):
+        output = "status: One or more devices has experienced an error resulting in data corruption. Permanent errors have been detected"
+
+        self.assertEqual(
+            WorkerReconciler.classify_storage_command_failure(output),
+            "unhealthy_data_corruption",
+        )
 
     def test_required_storage_health_never_defaults_missing_state_to_healthy(self):
         monitor = self.monitor_with_stable_policy()
@@ -217,13 +249,15 @@ class SchedulerTests(unittest.TestCase):
                     "observed_at": 100,
                     "schedulable": False,
                     "node_schedulable_configured": True,
-                    "state_storage_health": "unhealthy",
+                    "state_storage_health": "warning_hostid_mismatch",
+                    "state_storage_healthy": False,
                 },
                 "node-b": {
                     "observed_at": 100,
                     "schedulable": True,
                     "node_schedulable_configured": True,
                     "state_storage_health": "healthy",
+                    "state_storage_healthy": True,
                 },
             },
         )

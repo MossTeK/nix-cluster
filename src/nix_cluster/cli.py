@@ -112,9 +112,10 @@ def summarize_app(
         for unit in units
         for candidate in dict(cluster_state.get("services", {})).get(unit, {}).get("candidate_nodes", [])
     ])
+    service_states = dict(cluster_state.get("services", {}))
     healthy = bool(active) and all(
-        bool(dict(dict(cluster_state.get("services", {})).get(unit, {}).get("reports", {})).get(str(active), {}).get("healthy"))
-        for unit in units
+        bool(service.get("usable")) if "usable" in service else bool(dict(service.get("reports", {})).get(str(active), {}).get("healthy"))
+        for service in (dict(service_states.get(unit, {})) for unit in units)
     )
     return AppInfo(name, units, domains, str(active) if active else None, str(desired) if desired else None, str(target) if target else None, phase, healthy, candidates)
 
@@ -255,6 +256,8 @@ def wait_for_move(config: RuntimeConfig, etcd: EtcdClient, units: list[str], nod
 
 def print_placement_status(config: RuntimeConfig, etcd: EtcdClient, unit: str | None, json_output: bool) -> int:
     placements = load_placements(config, etcd)
+    cluster_state = load_cluster_state(etcd)
+    service_states = dict(cluster_state.get("services", {}))
     if unit:
         units = resolve_units(config, unit)
         if not units:
@@ -262,11 +265,19 @@ def print_placement_status(config: RuntimeConfig, etcd: EtcdClient, unit: str | 
             return 2
         placements = {name: placements.get(name, {}) for name in units}
     if json_output:
-        print(json.dumps(placements, indent=2, sort_keys=True))
+        print(json.dumps({
+            name: {**state, **{key: value for key, value in dict(service_states.get(name, {})).items() if key in {
+                "usable", "usable_reason", "routable", "route_reason", "lease_valid", "lease_reason", "health_fresh", "has_route",
+            }}}
+            for name, state in placements.items()
+        }, indent=2, sort_keys=True))
     else:
-        print(f"{'UNIT':<36} {'ACTIVE':<12} {'DESIRED':<12} {'PHASE':<16} GENERATION")
+        print(f"{'UNIT':<36} {'ACTIVE':<12} {'DESIRED':<12} {'PHASE':<16} {'USABLE':<8} REASON")
         for name, state in sorted(placements.items()):
-            print(f"{name:<36} {state.get('active_owner') or '-':<12} {state.get('desired_owner') or '-':<12} {state.get('phase') or 'unknown':<16} {_safe_int(state.get('generation'))}")
+            service = dict(service_states.get(name, {}))
+            usable = "yes" if service.get("usable") else "no"
+            reason = service.get("usable_reason") or service.get("route_reason") or service.get("lease_reason") or "-"
+            print(f"{name:<36} {state.get('active_owner') or '-':<12} {state.get('desired_owner') or '-':<12} {state.get('phase') or 'unknown':<16} {usable:<8} {reason}")
     return 0
 
 
@@ -274,10 +285,10 @@ def print_apps(apps: list[AppInfo], json_output: bool) -> None:
     if json_output:
         print(json.dumps([app.to_json() for app in apps], indent=2, sort_keys=True))
         return
-    print(f"{'APP':<28} {'DOMAIN':<34} {'ACTIVE':<10} {'DESIRED':<10} {'TARGET':<10} {'PHASE':<14} HEALTH")
+    print(f"{'APP':<28} {'DOMAIN':<34} {'ACTIVE':<10} {'DESIRED':<10} {'TARGET':<10} {'PHASE':<14} USABLE")
     for app in apps:
         domain = ",".join(app.domains) if app.domains else "-"
-        print(f"{app.name:<28} {domain:<34} {app.active_owner or '-':<10} {app.desired_owner or '-':<10} {app.target_owner or '-':<10} {app.phase:<14} {'ok' if app.healthy else 'bad'}")
+        print(f"{app.name:<28} {domain:<34} {app.active_owner or '-':<10} {app.desired_owner or '-':<10} {app.target_owner or '-':<10} {app.phase:<14} {'yes' if app.healthy else 'no'}")
 
 
 def build_parser() -> argparse.ArgumentParser:
