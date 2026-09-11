@@ -76,6 +76,20 @@ class UpdateSettings:
 
 
 @dataclass(slots=True)
+class PostUpdateRefreshUnitSettings:
+    unit: str
+    restart: bool
+    verify_paths: list[str]
+    required_paths: list[str]
+
+
+@dataclass(slots=True)
+class PostUpdateRefreshSettings:
+    enable: bool
+    units: list[PostUpdateRefreshUnitSettings]
+
+
+@dataclass(slots=True)
 # Worker-side controller reachability checks written by the heartbeat helper.
 class ControllerMonitorSettings:
     enable: bool
@@ -290,6 +304,7 @@ class RuntimeConfig:
     hostname: str
     directories: DirectorySettings
     update: UpdateSettings
+    post_update_refresh: PostUpdateRefreshSettings
     controller: ControllerSettings
     placement: PlacementSettings
     observability: ObservabilitySettings
@@ -312,6 +327,7 @@ class RuntimeConfig:
         # Turn the raw JSON dictionary from Nix into small typed settings objects.
         directories_raw = raw.get("directories", {})
         update_raw = raw.get("update", raw.get("commands", {}))
+        post_update_refresh_raw = raw.get("post_update_refresh", {})
         controller_raw = raw.get("controller", {})
         monitor_raw = controller_raw.get("monitor", {})
         placement_raw = raw.get("placement", {})
@@ -344,6 +360,20 @@ class RuntimeConfig:
             branch_ref=str(update_raw.get("branch_ref", "origin/main")),
             relevant_paths=_as_list(update_raw.get("relevant_paths", [])),
             worker_wait_seconds=_as_int(update_raw.get("worker_wait_seconds"), 30),
+        )
+
+        post_update_refresh = PostUpdateRefreshSettings(
+            enable=_as_bool(post_update_refresh_raw.get("enable"), True),
+            units=[
+                PostUpdateRefreshUnitSettings(
+                    unit=str(unit_raw.get("unit", "")),
+                    restart=_as_bool(unit_raw.get("restart"), True),
+                    verify_paths=_as_list(unit_raw.get("verify_paths", [])),
+                    required_paths=_as_list(unit_raw.get("required_paths", [])),
+                )
+                for unit_raw in post_update_refresh_raw.get("units", [])
+                if isinstance(unit_raw, dict) and str(unit_raw.get("unit", ""))
+            ],
         )
 
         controller = ControllerSettings(
@@ -515,6 +545,7 @@ class RuntimeConfig:
             hostname=str(raw.get("hostname", "")),
             directories=directories,
             update=update,
+            post_update_refresh=post_update_refresh,
             controller=controller,
             placement=placement,
             observability=observability,

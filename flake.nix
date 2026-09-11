@@ -51,14 +51,14 @@
           makeWrapper ${pythonEnv}/bin/python3 $out/bin/nix-cluster-daemon \
             --prefix PYTHONPATH : "$out/lib" \
             --add-flags "-m nix_cluster.listener" \
-            --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.git pkgs.inetutils pkgs.nixos-rebuild pkgs.systemd pkgs.procps pkgs.bash pkgs.sops pkgs.age pkgs.jq pkgs.openssh pkgs.sshpass pkgs.mkpasswd ]}
+            --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.git pkgs.inetutils pkgs.nixos-rebuild pkgs.systemd pkgs.procps pkgs.bash pkgs.sops pkgs.age pkgs.jq pkgs.openssh pkgs.sshpass pkgs.mkpasswd pkgs.util-linux ]}
 
           # Wraps the Webhook server with required binaries for fleet operations.
           # Injects git, nixos-rebuild, and secret management tools into the execution environment.
           makeWrapper ${pythonEnv}/bin/python3 $out/bin/nix-cluster-webhook \
             --prefix PYTHONPATH : "$out/lib" \
             --add-flags "-m nix_cluster.webhook" \
-            --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.git pkgs.inetutils pkgs.nixos-rebuild pkgs.systemd pkgs.procps pkgs.bash pkgs.sops pkgs.age pkgs.jq pkgs.openssh pkgs.sshpass pkgs.mkpasswd ]}
+            --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.git pkgs.inetutils pkgs.nixos-rebuild pkgs.systemd pkgs.procps pkgs.bash pkgs.sops pkgs.age pkgs.jq pkgs.openssh pkgs.sshpass pkgs.mkpasswd pkgs.util-linux ]}
 
           # Local status/journal helper. This is for looking at the current node.
           makeWrapper ${pkgs.bash}/bin/bash $out/bin/nix-cluster-observe \
@@ -405,6 +405,15 @@
         branch_ref = cfg.update.branchRef;
         relevant_paths = cfg.update.relevantPaths;
         worker_wait_seconds = cfg.update.workerWaitSeconds;
+      };
+      post_update_refresh = {
+        enable = cfg.postUpdateRefresh.enable;
+        units = map (unitConfig: {
+          unit = unitConfig.unit;
+          restart = unitConfig.restart;
+          verify_paths = unitConfig.verifyPaths;
+          required_paths = unitConfig.requiredPaths;
+        }) cfg.postUpdateRefresh.units;
       };
       # Controller timing and worker heartbeat settings.
       controller = {
@@ -810,6 +819,40 @@
             type = lib.types.int;
             default = 30;
             description = "Seconds a worker waits before re-fetching after controller-side provisioning.";
+          };
+        };
+        postUpdateRefresh = {
+          enable = lib.mkOption {
+            type = lib.types.bool;
+            default = true;
+            description = "Restart and verify local services whose bind-mounted inputs may become stale after nix-cluster replaces the fleet checkout.";
+          };
+          units = lib.mkOption {
+            type = lib.types.listOf (lib.types.submodule {
+              options = {
+                unit = lib.mkOption {
+                  type = lib.types.str;
+                  description = "Systemd unit to refresh after a successful nix-cluster update.";
+                };
+                restart = lib.mkOption {
+                  type = lib.types.bool;
+                  default = true;
+                  description = "Restart the unit before verification so systemd recreates bind mounts against the current filesystem paths.";
+                };
+                verifyPaths = lib.mkOption {
+                  type = lib.types.listOf lib.types.str;
+                  default = [];
+                  description = "Mount paths to inspect inside the unit namespace; any source containing '(deleted)' fails the update.";
+                };
+                requiredPaths = lib.mkOption {
+                  type = lib.types.listOf lib.types.str;
+                  default = [];
+                  description = "Paths that must exist inside the unit namespace after refresh.";
+                };
+              };
+            });
+            default = [];
+            description = "Services that should be refreshed and checked after the fleet checkout changes.";
           };
         };
         afterPush = lib.mkOption {
@@ -1922,7 +1965,7 @@
           wantedBy = [ "multi-user.target" ];
           after = [ "network-online.target" ];
           wants = [ "network-online.target" ];
-          path = [ pkgs.git pkgs.curl pkgs.nixos-rebuild pkgs.inetutils pkgs.systemd pkgs.procps pkgs.bash pkgs.openssl pkgs.sops pkgs.age pkgs.openssh pkgs.jq pkgs.sshpass pkgs.mkpasswd ]
+          path = [ pkgs.git pkgs.curl pkgs.nixos-rebuild pkgs.inetutils pkgs.systemd pkgs.procps pkgs.bash pkgs.openssl pkgs.sops pkgs.age pkgs.openssh pkgs.jq pkgs.sshpass pkgs.mkpasswd pkgs.util-linux ]
             ++ lib.optionals cfg.isController [ pkgs.terraform ];
           serviceConfig = {
             User = serviceUser;

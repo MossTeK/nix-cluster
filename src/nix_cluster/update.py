@@ -142,6 +142,99 @@ class UpdateManager:
                 return True
         return False
 
+    def _systemd_unit_main_pid(self, unit: str, repo_dir: str) -> int:
+        output = self._run_command(
+            ["systemctl", "show", unit, "--property=MainPID", "--value"],
+            cwd=repo_dir,
+            stage=f"REFRESH-PID-{unit}",
+        )
+        try:
+            return int(output.strip() or "0")
+        except ValueError:
+            return 0
+
+    def _verify_unit_mount_paths(self, unit: str, paths: Sequence[str], repo_dir: str) -> None:
+        if not paths:
+            return
+
+        pid = self._systemd_unit_main_pid(unit, repo_dir)
+        if pid <= 0:
+            raise RuntimeError(f"{unit} has no running MainPID after post-update refresh")
+
+        for path in paths:
+            output = self._run_command(
+                [
+                    "sudo",
+                    "-n",
+                    "nsenter",
+                    "-t",
+                    str(pid),
+                    "-m",
+                    "--",
+                    "findmnt",
+                    "--target",
+                    path,
+                    "--output",
+                    "TARGET,SOURCE,FSTYPE",
+                    "--noheadings",
+                ],
+                cwd=repo_dir,
+                stage=f"REFRESH-MOUNT-{unit}",
+            )
+            if not output:
+                raise RuntimeError(f"{unit} path {path} is not mounted in the service namespace")
+            if "deleted" in output:
+                raise RuntimeError(f"{unit} path {path} is mounted from a deleted source: {output}")
+            logger.info("post_update_refresh_mount_ok unit=%s path=%s mount=%s", unit, path, output)
+
+    def _verify_unit_required_paths(self, unit: str, paths: Sequence[str], repo_dir: str) -> None:
+        if not paths:
+            return
+
+        pid = self._systemd_unit_main_pid(unit, repo_dir)
+        if pid <= 0:
+            raise RuntimeError(f"{unit} has no running MainPID after post-update refresh")
+
+        for path in paths:
+            self._run_command(
+                [
+                    "sudo",
+                    "-n",
+                    "nsenter",
+                    "-t",
+                    str(pid),
+                    "-m",
+                    "--",
+                    "test",
+                    "-e",
+                    path,
+                ],
+                cwd=repo_dir,
+                stage=f"REFRESH-PATH-{unit}",
+            )
+
+    def _refresh_post_update_units(self, repo_dir: str) -> None:
+        refresh = self.runtime_config.post_update_refresh
+        if not refresh.enable or not refresh.units:
+            return
+
+        for unit_config in refresh.units:
+            unit = unit_config.unit
+            try:
+                if unit_config.restart:
+                    logger.info("post_update_refresh_restart unit=%s", unit)
+                    self._run_command(
+                        ["sudo", "-n", "systemctl", "restart", unit],
+                        cwd=repo_dir,
+                        stage=f"REFRESH-RESTART-{unit}",
+                    )
+                self._verify_unit_mount_paths(unit, unit_config.verify_paths, repo_dir)
+                self._verify_unit_required_paths(unit, unit_config.required_paths, repo_dir)
+                logger.info("post_update_refresh_success unit=%s", unit)
+            except Exception as error:
+                logger.error("post_update_refresh_failed unit=%s error=%s", unit, error)
+                raise
+
     def _fleet_hostnames(self, repo_dir: str) -> list[str]:
         # Discover fleet node names from `nodes/`, falling back to this node.
         nodes_dir = Path(repo_dir) / "nodes"
@@ -294,6 +387,7 @@ class UpdateManager:
 
             if not needs_rebuild:
                 self._reset(repo_dir, "GIT-RESET")
+                self._refresh_post_update_units(repo_dir)
                 logger.info("NO RELEVANT CHANGES FOUND. RESETTING REPO.")
                 return "SKIPPED"
 
@@ -305,6 +399,7 @@ class UpdateManager:
                 self._run_command(["bash", "-c", command.replace("\r", "")], cwd=repo_dir, stage="REBUILD")
                 for command in self.runtime_config.update.commands
             ]
+            self._refresh_post_update_units(repo_dir)
             logger.info("NIX-CLUSTER REBUILD TASK COMPLETED: %s", trigger_id)
             return "\n".join(filter(None, output_log)).strip()
         except Exception as error:
@@ -336,5 +431,6 @@ class UpdateManager:
         try:
             self._fetch(repo_dir, "BOOT")
             self._reset(repo_dir, "BOOT")
+            self._refresh_post_update_units(repo_dir)
         except Exception as error:
             logger.error("BOOT SYNC FAILED: %s", error)

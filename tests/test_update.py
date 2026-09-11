@@ -46,6 +46,85 @@ class UpdateManagerTests(unittest.TestCase):
 
         self.assertFalse(manager._switch_in_progress("/repo"))
 
+    def test_post_update_refresh_restarts_and_verifies_unit_mount(self):
+        calls = []
+
+        class RefreshManager(UpdateManager):
+            def _run_command(self, command, cwd, stage):
+                calls.append((stage, command))
+                if stage == "REFRESH-PID-nix-cluster-portal.service":
+                    return "1234"
+                if stage == "REFRESH-MOUNT-nix-cluster-portal.service":
+                    return "/var/lib/nix-cluster-portal/fleet /home/nix-cluster/homelab-fleet zfs"
+                return ""
+
+        manager = RefreshManager.__new__(RefreshManager)
+        manager.runtime_config = SimpleNamespace(
+            post_update_refresh=SimpleNamespace(
+                enable=True,
+                units=[
+                    SimpleNamespace(
+                        unit="nix-cluster-portal.service",
+                        restart=True,
+                        verify_paths=["/var/lib/nix-cluster-portal/fleet"],
+                        required_paths=["/var/lib/nix-cluster-portal/fleet/resources/apps/installed.json"],
+                    )
+                ],
+            )
+        )
+
+        manager._refresh_post_update_units("/repo")
+
+        self.assertIn(
+            ("REFRESH-RESTART-nix-cluster-portal.service", ["sudo", "-n", "systemctl", "restart", "nix-cluster-portal.service"]),
+            calls,
+        )
+        self.assertIn(
+            (
+                "REFRESH-PATH-nix-cluster-portal.service",
+                [
+                    "sudo",
+                    "-n",
+                    "nsenter",
+                    "-t",
+                    "1234",
+                    "-m",
+                    "--",
+                    "test",
+                    "-e",
+                    "/var/lib/nix-cluster-portal/fleet/resources/apps/installed.json",
+                ],
+            ),
+            calls,
+        )
+
+    def test_post_update_refresh_rejects_deleted_bind_mount(self):
+        class RefreshManager(UpdateManager):
+            def _run_command(self, command, cwd, stage):
+                if stage == "REFRESH-PID-nix-cluster-portal.service":
+                    return "1234"
+                if stage == "REFRESH-MOUNT-nix-cluster-portal.service":
+                    return "/var/lib/nix-cluster-portal/fleet zroot/home[/nix-cluster/homelab-fleet//deleted] zfs"
+                return ""
+
+        manager = RefreshManager.__new__(RefreshManager)
+        manager.runtime_config = SimpleNamespace(
+            post_update_refresh=SimpleNamespace(
+                enable=True,
+                units=[
+                    SimpleNamespace(
+                        unit="nix-cluster-portal.service",
+                        restart=False,
+                        verify_paths=["/var/lib/nix-cluster-portal/fleet"],
+                        required_paths=[],
+                    )
+                ],
+            )
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "deleted source"):
+            manager._refresh_post_update_units("/repo")
+
     def test_trigger_during_update_is_queued_and_replayed(self):
         test_case = self
         started = threading.Event()
@@ -122,6 +201,7 @@ class UpdateManagerTests(unittest.TestCase):
             is_controller=True,
             controller_script="echo controller",
             update=SimpleNamespace(commands=["echo rebuild"]),
+            post_update_refresh=SimpleNamespace(enable=False, units=[]),
         )
         manager.hostname = "node1"
         calls = []
