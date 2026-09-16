@@ -650,7 +650,6 @@ class WorkerReconciler:
             old_lease = _safe_int(existing.get("lease"))
             acquired = bool(
                 value.get("host") == self.hostname
-                and _safe_int(value.get("generation")) == generation
                 and old_lease
                 and etcd.replace_json_if_lease(ownership_key, old_lease, payload, lease_id=new_lease)
             )

@@ -9,6 +9,30 @@ from nix_cluster import ha as ha_module
 from nix_cluster.ha import HEALTHY_ACTIVE_STATES, ClusterMonitor, LocalRecoveryMonitor, WorkerReconciler, _payload_digest
 
 
+class FakeLeaseEtcd:
+    def __init__(self):
+        self.entry = {
+            "value": {"host": "node2", "unit": "demo.service", "generation": 1, "observed_at": 90},
+            "lease": 41,
+        }
+        self.revoked = []
+
+    def get_key(self, key):
+        return self.entry
+
+    def grant_lease(self, ttl):
+        return 42
+
+    def replace_json_if_lease(self, key, old_lease, payload, lease_id=0):
+        if old_lease != self.entry["lease"]:
+            return False
+        self.entry = {"value": payload, "lease": lease_id}
+        return True
+
+    def revoke_lease(self, lease):
+        self.revoked.append(lease)
+
+
 class SchedulerTests(unittest.TestCase):
     def monitor_with_stable_policy(self):
         monitor = ClusterMonitor.__new__(ClusterMonitor)
@@ -275,6 +299,20 @@ class SchedulerTests(unittest.TestCase):
         reconciler.fail_closed_stop = lambda units, reason: stopped.extend(units)
         reconciler.stop_expired_leases("TimeoutError")
         self.assertEqual(stopped, [])
+
+    def test_same_host_lease_can_advance_generation(self):
+        reconciler = WorkerReconciler.__new__(WorkerReconciler)
+        reconciler.hostname = "node2"
+        reconciler.lease_lock = threading.Lock()
+        reconciler.owned_leases = {}
+        reconciler.config = SimpleNamespace(ha=SimpleNamespace(scheduler=SimpleNamespace(lease_ttl_seconds=90)))
+        etcd = FakeLeaseEtcd()
+
+        acquired = reconciler.ensure_service_lease(etcd, "/owner/demo.service", "demo.service", 2, 100)
+
+        self.assertTrue(acquired)
+        self.assertEqual(etcd.entry["value"]["generation"], 2)
+        self.assertEqual(etcd.revoked, [41])
 
     def test_activating_units_are_not_considered_healthy(self):
         self.assertNotIn("activating", HEALTHY_ACTIVE_STATES)
