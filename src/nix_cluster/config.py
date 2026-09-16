@@ -26,6 +26,12 @@ def _as_bool(raw: Any, default: bool = False) -> bool:
     return bool(raw)
 
 
+def _default_ownership_lease_enable(scheduler_raw: dict[str, Any]) -> bool:
+    # Legacy runtime JSON did not carry this field. Managed units are stateful
+    # scheduler targets, so fail closed into exclusive leases when omitted.
+    return bool(_as_list(scheduler_raw.get("managed_units", [])))
+
+
 # Read an integer config value, with a default for omitted fields.
 def _as_int(raw: Any, default: int) -> int:
     if raw is None:
@@ -470,7 +476,10 @@ class RuntimeConfig:
                 minimum_owner_seconds=_as_int(scheduler_raw.get("minimum_owner_seconds"), 300),
                 transition_timeout_seconds=_as_int(scheduler_raw.get("transition_timeout_seconds"), 120),
                 target_cooldown_seconds=_as_int(scheduler_raw.get("target_cooldown_seconds"), 300),
-                ownership_lease_enable=_as_bool(scheduler_raw.get("ownership_lease_enable"), False),
+                ownership_lease_enable=_as_bool(
+                    scheduler_raw.get("ownership_lease_enable"),
+                    _default_ownership_lease_enable(scheduler_raw),
+                ),
                 lease_renewal_seconds=_as_int(scheduler_raw.get("lease_renewal_seconds"), 15),
                 unit_policies={
                     str(unit): UnitPolicySettings(

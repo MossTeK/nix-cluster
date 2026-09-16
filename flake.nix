@@ -1328,7 +1328,7 @@
             };
             ownershipLeaseEnable = lib.mkOption {
               type = lib.types.bool;
-              default = false;
+              default = true;
               description = "Require an exclusive etcd lease before a managed service may run.";
             };
             unitPolicies = lib.mkOption {
