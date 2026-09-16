@@ -279,6 +279,41 @@
           requireHealthyStateStorage = lib.mkOption { type = lib.types.bool; default = true; };
         };
       });
+      schedulerWorkloadType = lib.types.submodule ({ name, ... }: {
+        options = {
+          enable = lib.mkOption {
+            type = lib.types.bool;
+            default = true;
+            description = "Include this application workload in scheduler desired state.";
+          };
+          units = lib.mkOption {
+            type = lib.types.listOf lib.types.str;
+            default = [];
+            description = "Systemd service units that make up this application workload.";
+          };
+          group = lib.mkOption {
+            type = lib.types.nullOr lib.types.str;
+            default = null;
+            description = "Optional operator move group name. Defaults to the workload name.";
+          };
+        };
+      });
+      schedulerDeniedUnits = [
+        "NetworkManager.service"
+        "caddy.service"
+        "etcd.service"
+        "keepalived.service"
+        "nix-cluster-runtime-store.service"
+        "nix-cluster.service"
+        "ssh.service"
+        "sshd.service"
+      ];
+      schedulerWorkloadUnits = lib.unique (lib.concatLists (lib.mapAttrsToList (_: workload:
+        lib.optionals workload.enable workload.units
+      ) cfg.ha.scheduler.workloads));
+      schedulerRequestedUnits = lib.unique (cfg.ha.scheduler.managedUnits ++ schedulerWorkloadUnits);
+      schedulerManagedUnits = lib.filter (unit: !(lib.elem unit schedulerDeniedUnits)) schedulerRequestedUnits;
+      schedulerRejectedUnits = lib.filter (unit: lib.elem unit schedulerDeniedUnits) schedulerRequestedUnits;
       # Emergency users deliberately live outside shared /home so an NFS/home
       # outage does not lock operators out of recovery.
       recoverySshUserType = lib.types.submodule ({ name, ... }: {
@@ -534,7 +569,13 @@
             lease_ttl_seconds = cfg.ha.scheduler.leaseTtlSeconds;
             lease_renewal_seconds = cfg.ha.scheduler.leaseRenewalSeconds;
             default_strategy = cfg.ha.scheduler.defaultStrategy;
-          managed_units = cfg.ha.scheduler.managedUnits;
+          managed_units = schedulerManagedUnits;
+          rejected_managed_units = schedulerRejectedUnits;
+          workloads = lib.mapAttrs (_: workload: {
+            enable = workload.enable;
+            units = workload.units;
+            group = if workload.group == null then "" else workload.group;
+          }) cfg.ha.scheduler.workloads;
           app_groups = cfg.ha.scheduler.appGroups;
           reconciler_enable = cfg.ha.scheduler.reconcilerEnable;
           reconciler_interval_seconds = cfg.ha.scheduler.reconcilerIntervalSeconds;
@@ -1233,6 +1274,11 @@
               default = [];
               description = "Systemd units that the worker-side scheduler reconciler may start or stop based on desired placement records.";
             };
+            workloads = lib.mkOption {
+              type = lib.types.attrsOf schedulerWorkloadType;
+              default = {};
+              description = "Explicit application workloads that may be owned by the HA scheduler. Control-plane and host infrastructure units are refused.";
+            };
             appGroups = lib.mkOption {
               type = lib.types.attrsOf (lib.types.listOf lib.types.str);
               default = {};
@@ -1643,6 +1689,9 @@
         };
         # Assertions fail evaluation early for states that would be dangerous or
         # internally inconsistent at runtime.
+        warnings = lib.optionals (schedulerRejectedUnits != []) [
+          "nix-cluster HA scheduler refused unsafe units: ${lib.concatStringsSep ", " schedulerRejectedUnits}"
+        ];
         assertions = [
           {
             assertion = lib.hasPrefix "/etc/" cfg.paths.runtimeConfigPath;

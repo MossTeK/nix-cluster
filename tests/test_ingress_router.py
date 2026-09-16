@@ -30,13 +30,15 @@ def route(**overrides):
 
 
 class IngressRouterTests(unittest.TestCase):
-    def test_route_targets_healthy_desired_owner(self):
+    def test_route_targets_healthy_stable_active_owner(self):
         now = int(time.time())
         target, reason = target_for_route(
             route(),
             {
                 "nix-cluster-portal.service": {
                     "desired_owner": "node2",
+                    "active_owner": "node2",
+                    "phase": "stable",
                     "updated_at": now,
                 }
             },
@@ -61,11 +63,33 @@ class IngressRouterTests(unittest.TestCase):
         self.assertEqual(target, "http://192.0.2.22:8090")
         self.assertIsNone(reason)
 
+    def test_activating_placement_fails_closed(self):
+        now = int(time.time())
+        target, reason = target_for_route(
+            route(),
+            {
+                "nix-cluster-portal.service": {
+                    "desired_owner": "node3",
+                    "active_owner": "node2",
+                    "target_owner": "node3",
+                    "phase": "activating",
+                    "updated_at": now,
+                }
+            },
+            {"observed_at": now, "services": {}},
+            {"node2": "192.0.2.22", "node3": "192.0.2.23"},
+            now,
+            45,
+        )
+
+        self.assertIsNone(target)
+        self.assertEqual(reason, "placement activating")
+
     def test_stale_placement_fails_closed(self):
         now = int(time.time())
         target, reason = target_for_route(
             route(),
-            {"nix-cluster-portal.service": {"desired_owner": "node2", "updated_at": now - 100}},
+            {"nix-cluster-portal.service": {"desired_owner": "node2", "active_owner": "node2", "phase": "stable", "updated_at": now - 100}},
             {"observed_at": now, "services": {}},
             {"node2": "192.0.2.22"},
             now,
@@ -80,7 +104,7 @@ class IngressRouterTests(unittest.TestCase):
         now = int(time.time())
         target, reason = target_for_route(
             route(),
-            {"nix-cluster-portal.service": {"desired_owner": "node2", "updated_at": now}},
+            {"nix-cluster-portal.service": {"desired_owner": "node2", "active_owner": "node2", "phase": "stable", "updated_at": now}},
             {
                 "observed_at": now,
                 "services": {
@@ -104,7 +128,7 @@ class IngressRouterTests(unittest.TestCase):
 
     def test_versioned_route_requires_matching_active_owner_lease(self):
         now = int(time.time())
-        placement = {"desired_owner": "node4", "active_owner": "node2", "generation": 7, "updated_at": now}
+        placement = {"desired_owner": "node4", "active_owner": "node2", "phase": "stable", "generation": 7, "updated_at": now}
         state = {"observed_at": now, "services": {"nix-cluster-portal.service": {"reports": {"node2": {"observed_at": now, "healthy": True}}}}}
         target, reason = target_for_route(
             route(), {"nix-cluster-portal.service": placement}, state, {"node2": "192.0.2.22"}, now, 45,
@@ -115,7 +139,7 @@ class IngressRouterTests(unittest.TestCase):
 
     def test_stale_owner_report_exposes_precise_route_reason(self):
         now = int(time.time())
-        placement = {"desired_owner": "node2", "active_owner": "node2", "generation": 1, "updated_at": now}
+        placement = {"desired_owner": "node2", "active_owner": "node2", "phase": "stable", "generation": 1, "updated_at": now}
         state = {"observed_at": now, "services": {"nix-cluster-portal.service": {"reports": {"node2": {"observed_at": now - 100, "healthy": True}}}}}
 
         target, reason = target_for_route(
@@ -139,7 +163,7 @@ class IngressRouterTests(unittest.TestCase):
 
     def test_missing_ownership_lease_is_not_usable(self):
         now = int(time.time())
-        placement = {"desired_owner": "node2", "active_owner": "node2", "generation": 1, "updated_at": now}
+        placement = {"desired_owner": "node2", "active_owner": "node2", "phase": "stable", "generation": 1, "updated_at": now}
         state = {"observed_at": now, "services": {"nix-cluster-portal.service": {"reports": {"node2": {"observed_at": now, "healthy": True}}}}}
 
         status = route_status_for_unit(

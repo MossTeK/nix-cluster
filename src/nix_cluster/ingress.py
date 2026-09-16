@@ -87,12 +87,21 @@ def route_status_for_unit(
         })
         return status
 
-    owner = str(placement.get("active_owner") or placement.get("desired_owner") or "")
+    phase = str(placement.get("phase") or "")
+    if phase and phase != "stable":
+        status.update({
+            "route_reason": f"placement {phase}",
+            "lease_reason": "not checked",
+            "usable_reason": f"placement {phase}",
+        })
+        return status
+
+    owner = str(placement.get("active_owner") or "")
     if not owner:
         status.update({
-            "route_reason": "missing desired owner",
+            "route_reason": "missing active owner",
             "lease_reason": "not checked",
-            "usable_reason": "missing desired owner",
+            "usable_reason": "missing active owner",
         })
         return status
     status["owner"] = owner
@@ -188,9 +197,12 @@ def target_for_route(
     if now - _safe_int(placement.get("updated_at")) > stale_after:
         return None, "stale placement"
 
-    owner = str(placement.get("active_owner") or placement.get("desired_owner") or "")
+    if str(placement.get("phase") or "") != "stable":
+        return None, f"placement {placement.get('phase') or 'not stable'}"
+
+    owner = str(placement.get("active_owner") or "")
     if not owner:
-        return None, "missing desired owner"
+        return None, "missing active owner"
 
     status = route_status_for_unit(route.unit, placements, cluster_state, node_addresses, now, stale_after, ownership_records)
     if not status.get("routable"):

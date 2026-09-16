@@ -7,6 +7,16 @@ from typing import Any
 
 DEFAULT_CONFIG_PATH = "/etc/nix-cluster-runtime-config.json"
 LEGACY_CONFIG_PATH = "/etc/nops-runtime-config.json"
+SCHEDULER_DENIED_UNITS = {
+    "NetworkManager.service",
+    "caddy.service",
+    "etcd.service",
+    "keepalived.service",
+    "nix-cluster-runtime-store.service",
+    "nix-cluster.service",
+    "sshd.service",
+    "ssh.service",
+}
 
 
 # Normalize loose JSON values into a list of non-empty strings.
@@ -29,7 +39,47 @@ def _as_bool(raw: Any, default: bool = False) -> bool:
 def _default_ownership_lease_enable(scheduler_raw: dict[str, Any]) -> bool:
     # Legacy runtime JSON did not carry this field. Managed units are stateful
     # scheduler targets, so fail closed into exclusive leases when omitted.
-    return bool(_as_list(scheduler_raw.get("managed_units", [])))
+    return bool(_as_list(scheduler_raw.get("managed_units", [])) or _enabled_workloads(scheduler_raw))
+
+
+def _enabled_workloads(scheduler_raw: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    workloads: dict[str, dict[str, Any]] = {}
+    for name, raw in dict(scheduler_raw.get("workloads", {})).items():
+        payload = dict(raw) if isinstance(raw, dict) else {}
+        if not _as_bool(payload.get("enable"), True):
+            continue
+        units = _as_list(payload.get("units", []))
+        if units:
+            workloads[str(name)] = {
+                "units": units,
+                "group": str(payload.get("group", "") or ""),
+            }
+    return workloads
+
+
+def _dedupe(values: list[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if value and value not in seen:
+            seen.add(value)
+            result.append(value)
+    return result
+
+
+def scheduler_unit_sets(scheduler_raw: dict[str, Any]) -> tuple[list[str], list[str], dict[str, list[str]], dict[str, dict[str, Any]]]:
+    workloads = _enabled_workloads(scheduler_raw)
+    requested = _dedupe(
+        _as_list(scheduler_raw.get("managed_units", []))
+        + [unit for workload in workloads.values() for unit in workload["units"]]
+    )
+    managed = [unit for unit in requested if unit not in SCHEDULER_DENIED_UNITS]
+    rejected = [unit for unit in requested if unit in SCHEDULER_DENIED_UNITS]
+    app_groups = {str(name): _as_list(units) for name, units in dict(scheduler_raw.get("app_groups", {})).items()}
+    for name, workload in workloads.items():
+        group = workload.get("group") or name
+        app_groups[group] = _dedupe(app_groups.get(group, []) + workload["units"])
+    return managed, rejected, app_groups, workloads
 
 
 # Read an integer config value, with a default for omitted fields.
@@ -221,6 +271,8 @@ class SchedulerSettings:
     lease_ttl_seconds: int
     default_strategy: str
     managed_units: list[str]
+    rejected_managed_units: list[str]
+    workloads: dict[str, dict[str, Any]]
     app_groups: dict[str, list[str]]
     reconciler_enable: bool
     reconciler_interval_seconds: int
@@ -346,6 +398,7 @@ class RuntimeConfig:
         runtime_store_raw = ha_raw.get("runtime_store", {})
         local_server_raw = runtime_store_raw.get("local_server", {})
         scheduler_raw = ha_raw.get("scheduler", {})
+        managed_units, rejected_managed_units, app_groups, workloads = scheduler_unit_sets(dict(scheduler_raw))
         ingress_router_raw = raw.get("ingress_router", {})
         matrix_raw = raw.get("matrix", {})
         webhook_raw = raw.get("webhook", {})
@@ -454,8 +507,10 @@ class RuntimeConfig:
                 request_prefix=str(scheduler_raw.get("request_prefix", "/nix-cluster/scheduler/requests")),
                 lease_ttl_seconds=_as_int(scheduler_raw.get("lease_ttl_seconds"), 90),
                 default_strategy=str(scheduler_raw.get("default_strategy", "prefer-current-healthy")),
-                managed_units=_as_list(scheduler_raw.get("managed_units", [])),
-                app_groups={str(name): _as_list(units) for name, units in dict(scheduler_raw.get("app_groups", {})).items()},
+                managed_units=managed_units,
+                rejected_managed_units=rejected_managed_units,
+                workloads=workloads,
+                app_groups=app_groups,
                 reconciler_enable=_as_bool(scheduler_raw.get("reconciler_enable"), False),
                 reconciler_interval_seconds=_as_int(scheduler_raw.get("reconciler_interval_seconds"), 15),
                 reconciler_dry_run=_as_bool(scheduler_raw.get("reconciler_dry_run"), False),

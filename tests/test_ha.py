@@ -374,6 +374,26 @@ class SchedulerTests(unittest.TestCase):
 
         self.assertEqual(target, "node4")
 
+    def test_removed_workload_runtime_keys_are_garbage_collected(self):
+        stale = ClusterMonitor.stale_runtime_keys(
+            {"kept.service"},
+            "/nix-cluster/scheduler/placement",
+            {
+                "/nix-cluster/scheduler/placement/kept.service": {},
+                "/nix-cluster/scheduler/placement/removed.service": {},
+            },
+            "/nix-cluster/scheduler/requests",
+            {"/nix-cluster/scheduler/requests/removed.service": {}},
+            "/nix-cluster/scheduler/ownership",
+            {"/nix-cluster/scheduler/ownership/removed.service": {}},
+        )
+
+        self.assertEqual(stale, [
+            "/nix-cluster/scheduler/ownership/removed.service",
+            "/nix-cluster/scheduler/placement/removed.service",
+            "/nix-cluster/scheduler/requests/removed.service",
+        ])
+
     def test_node_detail_omits_processes_and_includes_safe_resource_data(self):
         reconciler = WorkerReconciler.__new__(WorkerReconciler)
         reconciler.hostname = "node2"

@@ -45,6 +45,39 @@ class RuntimeConfigTests(unittest.TestCase):
 
         self.assertFalse(config.ha.scheduler.ownership_lease_enable)
 
+    def test_unsafe_legacy_managed_units_are_rejected(self):
+        config = RuntimeConfig.from_raw(
+            "/tmp/nix-cluster-runtime-config.json",
+            {
+                "ha": {
+                    "scheduler": {
+                        "managed_units": ["demo.service", "nix-cluster.service", "caddy.service"],
+                    },
+                },
+            },
+        )
+
+        self.assertEqual(config.ha.scheduler.managed_units, ["demo.service"])
+        self.assertEqual(config.ha.scheduler.rejected_managed_units, ["nix-cluster.service", "caddy.service"])
+
+    def test_enabled_workloads_define_managed_units_and_groups(self):
+        config = RuntimeConfig.from_raw(
+            "/tmp/nix-cluster-runtime-config.json",
+            {
+                "ha": {
+                    "scheduler": {
+                        "workloads": {
+                            "notes": {"units": ["outline.service"], "group": "office"},
+                            "disabled": {"enable": False, "units": ["disabled.service"]},
+                        },
+                    },
+                },
+            },
+        )
+
+        self.assertEqual(config.ha.scheduler.managed_units, ["outline.service"])
+        self.assertEqual(config.ha.scheduler.app_groups, {"office": ["outline.service"]})
+
 
 if __name__ == "__main__":
     unittest.main()

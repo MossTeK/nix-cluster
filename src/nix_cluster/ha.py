@@ -1135,6 +1135,27 @@ class WorkerReconciler:
         next_resource_publish_at = 0.0
         last_resource_snapshot: dict[str, Any] | None = None
 
+        if self.config.ha.scheduler.rejected_managed_units:
+            self.logger.warning(
+                "scheduler_rejected_unsafe_units host=%s units=%s",
+                self.hostname,
+                ",".join(sorted(self.config.ha.scheduler.rejected_managed_units)),
+            )
+        if reconcile_state_path.exists():
+            try:
+                previous_state = json.loads(reconcile_state_path.read_text(encoding="utf-8"))
+                previous_units = set(dict(previous_state.get("managed_units", {})).keys())
+                removed_units = sorted(previous_units - set(managed_units))
+                for unit in removed_units:
+                    status = self.collect_unit_status(unit, int(time.time()))
+                    if status.get("active_state") in ACTIVE_STATES:
+                        self.logger.info("scheduler_removed_workload_stop host=%s unit=%s", self.hostname, unit)
+                        self.run_command(["sudo", "systemctl", "--no-block", "stop", unit])
+                    if ownership_prefix:
+                        self.release_service_lease(etcd, f"{ownership_prefix}/{unit}", unit)
+            except Exception as error:
+                self.logger.warning("scheduler_removed_workload_cleanup_failed host=%s error=%s", self.hostname, error)
+
         threading.Thread(target=self.lease_keeper, args=(endpoint,), daemon=True, name="nix-cluster-lease-keeper").start()
         self.logger.info("starting scheduler reconciler on %s", self.hostname)
         while True:
@@ -1334,6 +1355,34 @@ class ClusterMonitor:
     def host_from_resource_key(prefix: str, key: str) -> str:
         # Split `/prefix/host` resource keys back into host names.
         return key.removeprefix(prefix.rstrip("/") + "/")
+
+    @staticmethod
+    def stale_runtime_keys(
+        managed_units: set[str],
+        placement_prefix: str,
+        placement_records: dict[str, Any],
+        request_prefix: str,
+        request_records: dict[str, Any],
+        ownership_prefix: str,
+        ownership_records: dict[str, Any],
+    ) -> list[str]:
+        stale: list[str] = []
+        if placement_prefix:
+            stale.extend(
+                key for key in placement_records
+                if key.removeprefix(placement_prefix + "/") not in managed_units
+            )
+        if request_prefix:
+            stale.extend(
+                key for key in request_records
+                if key.removeprefix(request_prefix + "/") not in managed_units
+            )
+        if ownership_prefix:
+            stale.extend(
+                key for key in ownership_records
+                if key.removeprefix(ownership_prefix + "/") not in managed_units
+            )
+        return sorted(set(stale))
 
     def build_leader_payload(self, now: int, lease_id: int = 0) -> dict[str, Any]:
         # Create the scheduler leadership record written to etcd.
@@ -1936,6 +1985,13 @@ class ClusterMonitor:
         node_detail_prefix = NODE_DETAIL_PREFIX.rstrip("/")
         write_backoff_until = 0.0
 
+        if self.config.ha.scheduler.rejected_managed_units:
+            self.logger.warning(
+                "scheduler_rejected_unsafe_units controller=%s units=%s",
+                self.controller,
+                ",".join(sorted(self.config.ha.scheduler.rejected_managed_units)),
+            )
+
         self.logger.info("starting controller monitor on %s", self.controller)
         while True:
             try:
@@ -1954,15 +2010,19 @@ class ClusterMonitor:
                         host = self.host_from_resource_key(node_detail_prefix, key)
                         if host:
                             node_details[host] = payload
+                current_placement_records: dict[str, dict[str, Any]] = {}
                 current_placements: dict[str, dict[str, Any]] = {}
                 if placement_prefix:
-                    for key, payload in etcd.get_prefix(placement_prefix).items():
+                    current_placement_records = etcd.get_prefix(placement_prefix)
+                    for key, payload in current_placement_records.items():
                         service = key.removeprefix(placement_prefix + "/")
                         if service:
                             current_placements[service] = payload
+                request_records: dict[str, dict[str, Any]] = {}
                 move_requests: dict[str, dict[str, Any]] = {}
                 if request_prefix:
-                    for key, payload in etcd.get_prefix(request_prefix).items():
+                    request_records = etcd.get_prefix(request_prefix)
+                    for key, payload in request_records.items():
                         service = key.removeprefix(request_prefix + "/")
                         if service and isinstance(payload, dict):
                             move_requests[service] = payload
@@ -1977,11 +2037,22 @@ class ClusterMonitor:
                     cpu_count = max(1, _safe_int(resource.get("cpu_count"), 1))
                     resource["load_1_per_cpu"] = _safe_float(resource.get("load_1_per_cpu")) + (policy.estimated_cpu / cpu_count)
                 ownership_records: dict[str, dict[str, Any]] = {}
+                ownership_entries: dict[str, dict[str, Any]] = {}
                 if ownership_prefix:
-                    for key, entry in etcd.get_prefix_entries(ownership_prefix).items():
+                    ownership_entries = etcd.get_prefix_entries(ownership_prefix)
+                    for key, entry in ownership_entries.items():
                         service = key.removeprefix(ownership_prefix + "/")
                         if service:
                             ownership_records[service] = dict(entry.get("value", {}))
+                stale_runtime_keys = self.stale_runtime_keys(
+                    managed_units,
+                    placement_prefix,
+                    current_placement_records,
+                    request_prefix,
+                    request_records,
+                    ownership_prefix,
+                    ownership_entries,
+                )
                 route_units = {
                     route.unit
                     for route in self.config.ingress_router.routes.values()
@@ -2023,6 +2094,20 @@ class ClusterMonitor:
                     payload["healthy_nodes"].sort()
                     payload["unhealthy_nodes"].sort()
                     payload["stale_nodes"].sort()
+                    payload["scheduler_managed"] = service in managed_units
+                    if service not in managed_units:
+                        payload["recommended_target"] = None
+                        payload["resource_ranked_nodes"] = []
+                        payload["placement_strategy"] = self.config.ha.scheduler.default_strategy
+                        payload["placement_key"] = f"{placement_prefix}/{service}"
+                        payload["current_owner"] = None
+                        payload["desired_owner"] = None
+                        payload["usable"] = False
+                        payload["usable_reason"] = "not scheduler workload"
+                        payload["routable"] = False
+                        payload["route_reason"] = "not scheduler workload"
+                        payload["placement_published_at"] = None
+                        continue
                     candidate_nodes = payload["candidate_nodes"]
                     healthy_nodes = payload["healthy_nodes"]
                     ranked_nodes = self.rank_nodes_by_resources(
@@ -2067,7 +2152,6 @@ class ClusterMonitor:
                     payload["resource_ranked_nodes"] = ranked_nodes
                     payload["placement_strategy"] = self.config.ha.scheduler.default_strategy
                     payload["placement_key"] = f"{placement_prefix}/{service}"
-                    payload["scheduler_managed"] = service in managed_units
                     payload["current_owner"] = current_owner
                     payload["desired_owner"] = target if (is_leader and service in managed_units) else None
                     payload.update({key: value for key, value in state.items() if key != "desired_owner"})
@@ -2129,6 +2213,8 @@ class ClusterMonitor:
                     "leader": leader_payload.get("hostname", self.controller),
                     "placement_prefix": placement_prefix,
                     "units": sorted(managed_units),
+                    "rejected_units": sorted(self.config.ha.scheduler.rejected_managed_units),
+                    "workloads": self.config.ha.scheduler.workloads,
                 }
                 cluster_state = {
                     "controller": self.controller,
@@ -2160,6 +2246,8 @@ class ClusterMonitor:
                 atomic_write_text(metrics_path, self.build_cluster_metrics(cluster_state))
                 if time.monotonic() >= write_backoff_until:
                     try:
+                        if is_leader and stale_runtime_keys:
+                            etcd.delete_keys(sorted(set(stale_runtime_keys)))
                         etcd.put_json_many(etcd_updates)
                     except RuntimeStoreRateLimited as error:
                         event, retry_after = _runtime_store_warning_details(error, max(5.0, float(interval)))

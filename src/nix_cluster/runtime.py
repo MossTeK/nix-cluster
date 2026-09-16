@@ -165,6 +165,28 @@ class EtcdClient:
             timeout=4,
         )
 
+    def delete_keys(self, keys: list[str]) -> None:
+        # Delete several exact keys in one etcd transaction.
+        if not keys:
+            return
+
+        self._request_json(
+            "/v3/kv/txn",
+            {
+                "compare": [],
+                "success": [
+                    {
+                        "request_delete_range": {
+                            "key": _base64_text(key.encode("utf-8")),
+                        }
+                    }
+                    for key in keys
+                ],
+                "failure": [],
+            },
+            timeout=4,
+        )
+
     def health(self) -> dict[str, Any]:
         # Read etcd's lightweight health endpoint.
         request = urllib.request.Request(f"{self.endpoint}/health", method="GET")

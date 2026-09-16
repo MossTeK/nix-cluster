@@ -27,6 +27,18 @@ class RuntimeStoreTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.endpoint, "http://127.0.0.1:2379")
 
+    def test_delete_keys_uses_single_transaction(self):
+        client = EtcdClient("http://127.0.0.1:2379")
+        calls = []
+        client._request_json = lambda path, payload, timeout: calls.append((path, payload, timeout)) or {}
+
+        client.delete_keys(["/a", "/b"])
+
+        self.assertEqual(calls[0][0], "/v3/kv/txn")
+        deletes = calls[0][1]["success"]
+        self.assertEqual(len(deletes), 2)
+        self.assertIn("request_delete_range", deletes[0])
+
 
 if __name__ == "__main__":
     unittest.main()
