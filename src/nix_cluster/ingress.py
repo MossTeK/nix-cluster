@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import hashlib
+import json
 import logging
 import os
 import subprocess
@@ -265,6 +266,7 @@ class IngressRouter:
         self.etcd = EtcdClient(config.ha.runtime_store.endpoint)
         self.last_digest = ""
         self.reload_backoff_until = 0.0
+        self.last_route_states: dict[str, tuple[str | None, str]] = {}
 
     def load_placements(self) -> dict[str, dict[str, Any]]:
         # Read scheduler placement records keyed by managed systemd unit.
@@ -289,21 +291,51 @@ class IngressRouter:
         records = self.etcd.get_prefix(prefix) if prefix else {}
         return {key.removeprefix(prefix + "/"): payload for key, payload in records.items()}
 
-    def write_snippets(self, snippets: dict[str, str]) -> bool:
-        # Write changed Caddy snippets and report whether any file changed.
+    def write_route_status(self, statuses: list[dict[str, Any]]) -> None:
+        status_path = Path(self.router.status_path)
+        status_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = status_path.with_suffix(status_path.suffix + ".tmp")
+        temporary.write_text(json.dumps({"routes": statuses}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        os.replace(temporary, status_path)
+
+    def write_snippets(self, snippets: dict[str, str]) -> tuple[bool, dict[Path, str | None]]:
+        # Write changed Caddy snippets and return originals for rollback.
         output_dir = Path(self.router.output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         changed = False
+        originals: dict[Path, str | None] = {}
         for name, content in snippets.items():
             path = output_dir / f"{name}.caddy"
             current = path.read_text(encoding="utf-8") if path.exists() else ""
             if current == content:
                 continue
+            originals[path] = current if path.exists() else None
             temporary = path.with_suffix(".caddy.tmp")
             temporary.write_text(content, encoding="utf-8")
             os.replace(temporary, path)
             changed = True
-        return changed
+        return changed, originals
+
+    def restore_snippets(self, originals: dict[Path, str | None]) -> None:
+        for path, content in originals.items():
+            if content is None:
+                path.unlink(missing_ok=True)
+                continue
+            temporary = path.with_suffix(".caddy.rollback.tmp")
+            temporary.write_text(content, encoding="utf-8")
+            os.replace(temporary, path)
+
+    def validate_caddy(self) -> tuple[bool, str]:
+        command = ["caddy", "validate", "--config", self.router.caddy_config_path, "--adapter", "caddyfile"]
+        try:
+            result = subprocess.run(command, text=True, capture_output=True, timeout=10, check=False)
+        except subprocess.TimeoutExpired:
+            return False, "caddy validation timed out"
+        except FileNotFoundError:
+            return False, "caddy command not found"
+        if result.returncode == 0:
+            return True, ""
+        return False, (result.stderr or result.stdout or "caddy validation failed").strip()
 
     def reload_caddy(self) -> None:
         # Reload Caddy once snippets change, with a lock and failure backoff.
@@ -355,6 +387,7 @@ class IngressRouter:
         cluster_state = self.load_cluster_state()
         ownership_records = self.load_ownership() if self.config.ha.scheduler.ownership_lease_enable else None
         snippets: dict[str, str] = {}
+        route_statuses: list[dict[str, Any]] = []
         for name, route in sorted(self.router.routes.items()):
             target, reason = target_for_route(
                 route,
@@ -365,14 +398,65 @@ class IngressRouter:
                 self.router.stale_after_seconds,
                 ownership_records,
             )
+            status = route_status_for_unit(
+                route.unit,
+                placements,
+                cluster_state,
+                self.router.node_addresses,
+                now,
+                self.router.stale_after_seconds,
+                ownership_records,
+            )
+            owner = status.get("owner")
+            route_reason = str(reason or status.get("route_reason") or "")
+            route_statuses.append({
+                "route_name": name,
+                "domain": route.domain,
+                "unit": route.unit,
+                "owner": owner,
+                "target": target,
+                "routable": bool(target),
+                "reason": "route available" if target else route_reason,
+                "generated_at": now,
+                "placement_phase": str(placements.get(route.unit, {}).get("phase") or ""),
+                "lease_valid": bool(status.get("lease_valid")),
+                "health_fresh": bool(status.get("health_fresh")),
+            })
+            state_key = (target, "route available" if target else route_reason)
+            if self.last_route_states.get(name) != state_key:
+                self.logger.info(
+                    "route_state_change route=%s unit=%s target=%s reason=%s",
+                    name,
+                    route.unit,
+                    target or "",
+                    state_key[1],
+                )
+                self.last_route_states[name] = state_key
             snippets[name] = render_route_snippet(route, target, reason)
 
         digest = hashlib.sha256("".join(f"{name}\0{content}\0" for name, content in sorted(snippets.items())).encode("utf-8")).hexdigest()
-        changed = self.write_snippets(snippets)
+        changed, originals = self.write_snippets(snippets)
         if changed or digest != self.last_digest:
-            self.last_digest = digest
             if changed:
+                valid, validation_reason = self.validate_caddy()
+                if not valid:
+                    self.restore_snippets(originals)
+                    for status in route_statuses:
+                        status["validation"] = "failed"
+                        status["validation_reason"] = validation_reason
+                    self.write_route_status(route_statuses)
+                    self.logger.error("caddy validation failed after ingress route update: %s", validation_reason)
+                    return False
+                for status in route_statuses:
+                    status["validation"] = "ok"
+                self.write_route_status(route_statuses)
+                self.last_digest = digest
                 self.reload_caddy()
+            else:
+                self.write_route_status(route_statuses)
+                self.last_digest = digest
+        else:
+            self.write_route_status(route_statuses)
         return changed
 
     def run(self) -> None:

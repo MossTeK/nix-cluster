@@ -788,6 +788,7 @@
         interval_seconds = cfg.ingressRouter.intervalSeconds;
         stale_after_seconds = cfg.ingressRouter.staleAfterSeconds;
         output_dir = cfg.ingressRouter.outputDir;
+        status_path = cfg.ingressRouter.statusPath;
         caddy_config_path = cfg.ingressRouter.caddyConfigPath;
         reload_timeout_seconds = cfg.ingressRouter.reloadTimeoutSeconds;
         reload_backoff_seconds = cfg.ingressRouter.reloadBackoffSeconds;
@@ -1175,6 +1176,11 @@
             type = lib.types.str;
             default = "/run/nix-cluster/ingress/caddy.d";
             description = "Runtime directory where generated Caddy snippets are written.";
+          };
+          statusPath = lib.mkOption {
+            type = lib.types.str;
+            default = "/var/lib/nix-cluster/ingress/routes.json";
+            description = "Runtime JSON status file describing generated ingress routes and fail-closed reasons.";
           };
           caddyConfigPath = lib.mkOption {
             type = lib.types.str;
@@ -2086,6 +2092,7 @@
           "d /run/nix-cluster 0755 ${serviceUser} ${serviceGroup} -"
           "d /run/nix-cluster/ingress 0755 ${serviceUser} ${serviceGroup} -"
           "d ${cfg.ingressRouter.outputDir} 0755 ${serviceUser} ${serviceGroup} -"
+          "d ${dirOf cfg.ingressRouter.statusPath} 0755 ${serviceUser} ${serviceGroup} -"
         ] ++ ingressRoutePlaceholderRules) ++ lib.optionals cfg.ha.runtimeStore.localServer.enable [
           "d ${cfg.paths.stateDir}/etcd 0700 ${serviceUser} ${serviceGroup} -"
         ] ++ lib.optionals (sharedHomes.enable && isSharedHomeNode) [

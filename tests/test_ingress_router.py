@@ -2,6 +2,7 @@ import time
 import unittest
 import subprocess
 import tempfile
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -246,6 +247,103 @@ class IngressRouterTests(unittest.TestCase):
 
             self.assertEqual(run.call_count, 1)
             self.assertEqual(run.call_args.args[0], ["systemctl", "is-active", "--quiet", "caddy.service"])
+
+    def test_reconcile_writes_route_status_and_reloads_changed_healthy_route(self):
+        now = int(time.time())
+        with tempfile.TemporaryDirectory() as directory:
+            router = object.__new__(IngressRouter)
+            router.router = SimpleNamespace(
+                output_dir=str(Path(directory) / "caddy.d"),
+                status_path=str(Path(directory) / "routes.json"),
+                stale_after_seconds=45,
+                node_addresses={"node2": "192.0.2.22"},
+                routes={"portal": route()},
+            )
+            router.config = SimpleNamespace(ha=SimpleNamespace(scheduler=SimpleNamespace(ownership_lease_enable=True)))
+            router.last_digest = ""
+            router.last_route_states = {}
+            router.logger = SimpleNamespace(info=lambda *a: None, warning=lambda *a: None, error=lambda *a: None)
+            router.load_placements = lambda: {"nix-cluster-portal.service": {"active_owner": "node2", "phase": "stable", "generation": 1, "updated_at": now}}
+            router.load_cluster_state = lambda: {"observed_at": now, "services": {"nix-cluster-portal.service": {"reports": {"node2": {"observed_at": now, "healthy": True}}}}}
+            router.load_ownership = lambda: {"nix-cluster-portal.service": {"host": "node2", "generation": 1}}
+            router.validate_caddy = lambda: (True, "")
+            reloads = []
+            router.reload_caddy = lambda: reloads.append("reload")
+
+            self.assertTrue(router.reconcile_once())
+
+            snippet = (Path(directory) / "caddy.d" / "portal.caddy").read_text(encoding="utf-8")
+            status = json.loads((Path(directory) / "routes.json").read_text(encoding="utf-8"))
+            self.assertIn("to http://192.0.2.22:8090", snippet)
+            self.assertEqual(status["routes"][0]["target"], "http://192.0.2.22:8090")
+            self.assertTrue(status["routes"][0]["routable"])
+            self.assertEqual(reloads, ["reload"])
+
+    def test_reconcile_writes_503_status_without_reload_when_snippet_unchanged(self):
+        now = int(time.time())
+        with tempfile.TemporaryDirectory() as directory:
+            router = object.__new__(IngressRouter)
+            router.router = SimpleNamespace(
+                output_dir=str(Path(directory) / "caddy.d"),
+                status_path=str(Path(directory) / "routes.json"),
+                stale_after_seconds=45,
+                node_addresses={"node2": "192.0.2.22"},
+                routes={"portal": route()},
+            )
+            router.config = SimpleNamespace(ha=SimpleNamespace(scheduler=SimpleNamespace(ownership_lease_enable=True)))
+            router.last_digest = ""
+            router.last_route_states = {}
+            router.logger = SimpleNamespace(info=lambda *a: None, warning=lambda *a: None, error=lambda *a: None)
+            router.load_placements = lambda: {"nix-cluster-portal.service": {"active_owner": "node2", "phase": "stable", "generation": 1, "updated_at": now}}
+            router.load_cluster_state = lambda: {"observed_at": now, "services": {"nix-cluster-portal.service": {"reports": {"node2": {"observed_at": now, "healthy": True}}}}}
+            router.load_ownership = lambda: {}
+            router.validate_caddy = lambda: (True, "")
+            reloads = []
+            router.reload_caddy = lambda: reloads.append("reload")
+
+            self.assertTrue(router.reconcile_once())
+            self.assertFalse(router.reconcile_once())
+
+            snippet = (Path(directory) / "caddy.d" / "portal.caddy").read_text(encoding="utf-8")
+            status = json.loads((Path(directory) / "routes.json").read_text(encoding="utf-8"))
+            self.assertIn("ownership lease missing", snippet)
+            self.assertFalse(status["routes"][0]["routable"])
+            self.assertEqual(status["routes"][0]["reason"], "ownership lease missing")
+            self.assertEqual(reloads, ["reload"])
+
+    def test_failed_validation_rolls_back_snippet_and_skips_reload(self):
+        now = int(time.time())
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory) / "caddy.d"
+            output_dir.mkdir()
+            snippet_path = output_dir / "portal.caddy"
+            snippet_path.write_text('respond "old" 503\n', encoding="utf-8")
+            router = object.__new__(IngressRouter)
+            router.router = SimpleNamespace(
+                output_dir=str(output_dir),
+                status_path=str(Path(directory) / "routes.json"),
+                stale_after_seconds=45,
+                node_addresses={"node2": "192.0.2.22"},
+                routes={"portal": route()},
+            )
+            router.config = SimpleNamespace(ha=SimpleNamespace(scheduler=SimpleNamespace(ownership_lease_enable=True)))
+            router.last_digest = ""
+            router.last_route_states = {}
+            router.logger = SimpleNamespace(info=lambda *a: None, warning=lambda *a: None, error=lambda *a: None)
+            router.load_placements = lambda: {"nix-cluster-portal.service": {"active_owner": "node2", "phase": "stable", "generation": 1, "updated_at": now}}
+            router.load_cluster_state = lambda: {"observed_at": now, "services": {"nix-cluster-portal.service": {"reports": {"node2": {"observed_at": now, "healthy": True}}}}}
+            router.load_ownership = lambda: {"nix-cluster-portal.service": {"host": "node2", "generation": 1}}
+            router.validate_caddy = lambda: (False, "bad caddy")
+            reloads = []
+            router.reload_caddy = lambda: reloads.append("reload")
+
+            self.assertFalse(router.reconcile_once())
+
+            status = json.loads((Path(directory) / "routes.json").read_text(encoding="utf-8"))
+            self.assertEqual(snippet_path.read_text(encoding="utf-8"), 'respond "old" 503\n')
+            self.assertEqual(status["routes"][0]["validation"], "failed")
+            self.assertEqual(status["routes"][0]["validation_reason"], "bad caddy")
+            self.assertEqual(reloads, [])
 
 
 if __name__ == "__main__":
