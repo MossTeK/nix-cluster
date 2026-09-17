@@ -1645,6 +1645,9 @@ class ClusterMonitor:
                 or self.resource_record_meets_policy(service, resource_records.get(host), now, stale_after)
             )
         ]
+        if not desired and active:
+            desired = active
+
         if not desired:
             chosen = requested_target if requested_target in eligible else next(iter(eligible), None)
             desired = chosen

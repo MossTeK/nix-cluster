@@ -78,6 +78,25 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(state["phase"], "recovering")
         self.assertEqual(state["failure_count"], 1)
 
+    def test_missing_desired_owner_keeps_active_owner(self):
+        monitor = self.monitor_with_stable_policy()
+        state = monitor.advance_placement(
+            "demo.service",
+            {"active_owner": "node3", "generation": 1, "phase": "stable", "updated_at": 100},
+            ["node2", "node3"],
+            ["node3"],
+            ["node2", "node3"],
+            {"node3": {"observed_at": 100, "healthy": True}},
+            {"host": "node3", "generation": 1},
+            100,
+            45,
+        )
+
+        self.assertEqual(state["desired_owner"], "node3")
+        self.assertEqual(state["active_owner"], "node3")
+        self.assertIsNone(state["target_owner"])
+        self.assertEqual(state["phase"], "stable")
+
     def test_three_fresh_failures_begin_handoff(self):
         monitor = self.monitor_with_stable_policy()
         placement = {"desired_owner": "node2", "active_owner": "node2", "generation": 1, "phase": "stable", "updated_at": 100}
