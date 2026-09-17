@@ -79,6 +79,14 @@ class NixOSModuleStaticTests(unittest.TestCase):
         self.assertIn("controllerSwitchCooldownSeconds = lib.mkOption", text)
         self.assertIn("controller_switch_cooldown_seconds = cfg.update.controllerSwitchCooldownSeconds", text)
 
+    def test_default_gitops_switch_is_detached_from_nix_cluster_service(self):
+        flake = Path(__file__).resolve().parents[1] / "flake.nix"
+        text = flake.read_text(encoding="utf-8")
+
+        self.assertIn("--unit=nix-cluster-gitops-switch", text)
+        self.assertIn("--no-block", text)
+        self.assertNotIn("systemd-run --wait --collect --pipe", text)
+
 
 if __name__ == "__main__":
     unittest.main()

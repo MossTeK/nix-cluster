@@ -1093,7 +1093,7 @@
         afterPush = lib.mkOption {
           type = lib.types.listOf lib.types.str;
           default = [
-            "/run/wrappers/bin/sudo /run/current-system/sw/bin/systemd-run --wait --collect --pipe --working-directory=${config.services."nix-cluster".repoPath} --service-type=oneshot --setenv=PATH=/run/current-system/sw/bin:/run/wrappers/bin -- /run/current-system/sw/bin/nixos-rebuild switch --flake ${config.services."nix-cluster".repoPath}#${config.networking.hostName} --impure"
+            "/run/wrappers/bin/sudo /run/current-system/sw/bin/systemd-run --unit=nix-cluster-gitops-switch --collect --no-block --working-directory=${config.services."nix-cluster".repoPath} --service-type=oneshot --setenv=PATH=/run/current-system/sw/bin:/run/wrappers/bin -- /run/current-system/sw/bin/nixos-rebuild switch --flake ${config.services."nix-cluster".repoPath}#${config.networking.hostName} --impure"
           ];
           description = "Array of shell commands to execute after a push is received.";
         };
