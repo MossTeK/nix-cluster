@@ -69,7 +69,8 @@ class NixOSModuleStaticTests(unittest.TestCase):
         self.assertIn("unit_labels = contractUnitLabels", text)
         self.assertIn("targets = monitoringTargets", text)
         self.assertIn("tracked_units = trackedUnits", text)
-        self.assertIn('action = "keep";', text)
+        self.assertIn('loki.relabel "journal"', text)
+        self.assertIn('action = "keep"', text)
 
     def test_controller_switch_cooldown_is_serialized(self):
         flake = Path(__file__).resolve().parents[1] / "flake.nix"

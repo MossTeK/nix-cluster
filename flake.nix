@@ -518,7 +518,7 @@
         ++ lib.optionals cfg.localRecovery.enable cfg.localRecovery.criticalUnits
         ++ lib.optionals cfg.ha.runtimeStore.localServer.enable [ "nix-cluster-runtime-store.service" ]
         ++ lib.optionals cfg.observability.prometheus.enable [ "prometheus-node-exporter.service" ]
-        ++ lib.optionals (cfg.observability.loki.enable && cfg.observability.loki.url != "") [ "promtail.service" ]
+        ++ lib.optionals (cfg.observability.loki.enable && cfg.observability.loki.url != "") [ "alloy.service" ]
         ++ contractTrackedUnits
         ++ cfg.observability.monitoredServices
         ++ cfg.observability.extraTrackedUnits
@@ -2088,8 +2088,6 @@
           "d ${cfg.ingressRouter.outputDir} 0755 ${serviceUser} ${serviceGroup} -"
         ] ++ ingressRoutePlaceholderRules) ++ lib.optionals cfg.ha.runtimeStore.localServer.enable [
           "d ${cfg.paths.stateDir}/etcd 0700 ${serviceUser} ${serviceGroup} -"
-        ] ++ lib.optionals (cfg.observability.loki.enable && cfg.observability.loki.url != "") [
-          "d /var/lib/promtail 0755 promtail promtail -"
         ] ++ lib.optionals (sharedHomes.enable && isSharedHomeNode) [
           "d ${sharedStorage.exportPath} 0755 root root -"
           "d ${sharedStorage.appRoot} 0755 root root -"
@@ -2106,50 +2104,46 @@
           extraFlags = [ "--collector.textfile.directory=${cfg.paths.metricsDir}" ];
         };
 
-        # Optional journal shipping through Promtail.
-        services.promtail = lib.mkIf (cfg.observability.loki.enable && cfg.observability.loki.url != "") {
+        # Optional journal shipping through Grafana Alloy.
+        services.alloy = lib.mkIf (cfg.observability.loki.enable && cfg.observability.loki.url != "") {
           enable = true;
-          configuration = {
-            server = {
-              http_listen_port = 9080;
-              grpc_listen_port = 0;
-            };
-            positions = {
-              filename = "/var/lib/promtail/positions.yaml";
-            };
-            clients = [{
-              url = cfg.observability.loki.url;
-            }];
-            scrape_configs = [{
-              job_name = "journal";
-              journal = {
-                max_age = "24h";
-                labels = {
-                  job = "systemd-journal";
-                  host = config.networking.hostName;
-                  cluster_service = "nix-cluster";
-                };
-              };
-              relabel_configs = [
-                {
-                  source_labels = [ "__journal__systemd_unit" ];
-                  regex = lib.concatStringsSep "|" (map (unit: lib.replaceStrings [ "." ] [ "\\." ] unit) trackedUnits);
-                  action = "keep";
-                }
-                {
-                  source_labels = [ "__journal__systemd_unit" ];
-                  target_label = "unit";
-                }
-                {
-                  source_labels = [ "__journal_priority" ];
-                  target_label = "priority";
-                }
-              ];
-            }];
-          };
+          configPath = pkgs.writeText "nix-cluster.alloy" ''
+            loki.relabel "journal" {
+              rule {
+                source_labels = ["__journal__systemd_unit"]
+                regex = "${lib.concatStringsSep "|" (map (unit: lib.replaceStrings [ "." ] [ "\\." ] unit) trackedUnits)}"
+                action = "keep"
+              }
+              rule {
+                source_labels = ["__journal__systemd_unit"]
+                target_label = "unit"
+              }
+              rule {
+                source_labels = ["__journal_priority"]
+                target_label = "priority"
+              }
+            }
+
+            loki.source.journal "systemd" {
+              max_age = "24h"
+              labels = {
+                job = "systemd-journal",
+                host = "${config.networking.hostName}",
+                cluster_service = "nix-cluster",
+              }
+              relabel_rules = loki.relabel.journal.rules
+              forward_to = [loki.write.default.receiver]
+            }
+
+            loki.write "default" {
+              endpoint {
+                url = "${cfg.observability.loki.url}"
+              }
+            }
+          '';
         };
 
-        systemd.services.promtail = lib.mkIf (cfg.observability.loki.enable && cfg.observability.loki.url != "") {
+        systemd.services.alloy = lib.mkIf (cfg.observability.loki.enable && cfg.observability.loki.url != "") {
           serviceConfig.SupplementaryGroups = [ "systemd-journal" ];
         };
 
