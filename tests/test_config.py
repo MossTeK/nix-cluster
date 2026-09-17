@@ -51,14 +51,44 @@ class RuntimeConfigTests(unittest.TestCase):
             {
                 "ha": {
                     "scheduler": {
-                        "managed_units": ["demo.service", "nix-cluster.service", "caddy.service"],
+                        "managed_units": [
+                            "demo.service",
+                            "nix-cluster.service",
+                            "caddy.service",
+                            "cloudflared.service",
+                            "keepalived.service",
+                            "NetworkManager.service",
+                            "authentik-server.service",
+                            "postgresql.service",
+                        ],
                     },
                 },
             },
         )
 
         self.assertEqual(config.ha.scheduler.managed_units, ["demo.service"])
-        self.assertEqual(config.ha.scheduler.rejected_managed_units, ["nix-cluster.service", "caddy.service"])
+        self.assertEqual(
+            config.ha.scheduler.rejected_managed_units,
+            [
+                "nix-cluster.service",
+                "caddy.service",
+                "cloudflared.service",
+                "keepalived.service",
+                "NetworkManager.service",
+                "authentik-server.service",
+                "postgresql.service",
+            ],
+        )
+
+    def test_controller_switch_cooldown_defaults_to_five_minutes(self):
+        config = RuntimeConfig.from_raw(
+            "/tmp/nix-cluster-runtime-config.json",
+            {
+                "update": {},
+            },
+        )
+
+        self.assertEqual(config.update.controller_switch_cooldown_seconds, 300)
 
     def test_enabled_workloads_define_managed_units_and_groups(self):
         config = RuntimeConfig.from_raw(

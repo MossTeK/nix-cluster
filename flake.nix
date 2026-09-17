@@ -591,6 +591,7 @@
         branch_ref = cfg.update.branchRef;
         relevant_paths = cfg.update.relevantPaths;
         worker_wait_seconds = cfg.update.workerWaitSeconds;
+        controller_switch_cooldown_seconds = cfg.update.controllerSwitchCooldownSeconds;
       };
       post_update_refresh = {
         enable = cfg.postUpdateRefresh.enable;
@@ -1029,6 +1030,11 @@
             type = lib.types.int;
             default = 30;
             description = "Seconds a worker waits before re-fetching after controller-side provisioning.";
+          };
+          controllerSwitchCooldownSeconds = lib.mkOption {
+            type = lib.types.int;
+            default = 300;
+            description = "Minimum seconds between controller-triggered NixOS switches. Prevents queued webhooks or recovery loops from stacking rebuilds on the ingress/controller node.";
           };
         };
         postUpdateRefresh = {

@@ -56,6 +56,13 @@ class NixOSModuleStaticTests(unittest.TestCase):
         self.assertIn("effectiveIngressRoutes", text)
         self.assertIn("app_contracts = lib.mapAttrs", text)
 
+    def test_controller_switch_cooldown_is_serialized(self):
+        flake = Path(__file__).resolve().parents[1] / "flake.nix"
+        text = flake.read_text(encoding="utf-8")
+
+        self.assertIn("controllerSwitchCooldownSeconds = lib.mkOption", text)
+        self.assertIn("controller_switch_cooldown_seconds = cfg.update.controllerSwitchCooldownSeconds", text)
+
 
 if __name__ == "__main__":
     unittest.main()

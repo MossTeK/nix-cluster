@@ -1,5 +1,6 @@
 import unittest
 import threading
+import tempfile
 from types import SimpleNamespace
 
 from nix_cluster import update as update_module
@@ -42,9 +43,31 @@ class UpdateManagerTests(unittest.TestCase):
 
     def test_switch_not_in_progress(self):
         manager = UpdateManager.__new__(UpdateManager)
-        manager.runner = FakeRunner([1, 1])
+        manager.runner = FakeRunner([1, 1, 1])
 
         self.assertFalse(manager._switch_in_progress("/repo"))
+
+    def test_recent_controller_switch_blocks_followup_rebuild(self):
+        with tempfile.TemporaryDirectory() as state_dir:
+            manager = UpdateManager.__new__(UpdateManager)
+            manager.runtime_config = SimpleNamespace(
+                is_controller=True,
+                directories=SimpleNamespace(state=state_dir),
+                update=SimpleNamespace(controller_switch_cooldown_seconds=300),
+            )
+            manager.hostname = "node1"
+            manager._record_controller_switch_success("first")
+
+            self.assertTrue(manager._controller_switch_in_cooldown())
+
+    def test_worker_ignores_controller_switch_cooldown(self):
+        manager = UpdateManager.__new__(UpdateManager)
+        manager.runtime_config = SimpleNamespace(
+            is_controller=False,
+            update=SimpleNamespace(controller_switch_cooldown_seconds=300),
+        )
+
+        self.assertFalse(manager._controller_switch_in_cooldown())
 
     def test_post_update_refresh_restarts_and_verifies_unit_mount(self):
         calls = []
@@ -191,6 +214,12 @@ class UpdateManagerTests(unittest.TestCase):
             def _switch_in_progress(self, repo_dir):
                 return False
 
+            def _controller_switch_in_cooldown(self):
+                return False
+
+            def _record_controller_switch_success(self, trigger_id):
+                calls.append(("record-switch", trigger_id))
+
             def _run_command(self, command, cwd, stage):
                 calls.append(("run", stage, command))
                 return ""
@@ -200,7 +229,7 @@ class UpdateManagerTests(unittest.TestCase):
             repo_dir="/repo",
             is_controller=True,
             controller_script="echo controller",
-            update=SimpleNamespace(commands=["echo rebuild"]),
+            update=SimpleNamespace(commands=["echo rebuild"], controller_switch_cooldown_seconds=300),
             post_update_refresh=SimpleNamespace(enable=False, units=[]),
         )
         manager.hostname = "node1"
@@ -211,6 +240,7 @@ class UpdateManagerTests(unittest.TestCase):
 
         self.assertEqual(result, "")
         self.assertIn(("run", "REBUILD", ["bash", "-c", "echo rebuild"]), calls)
+        self.assertIn(("record-switch", "queued"), calls)
 
 
 if __name__ == "__main__":

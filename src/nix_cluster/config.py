@@ -10,13 +10,24 @@ LEGACY_CONFIG_PATH = "/etc/nops-runtime-config.json"
 SCHEDULER_DENIED_UNITS = {
     "NetworkManager.service",
     "caddy.service",
+    "cloudflared.service",
     "etcd.service",
+    "forgejo.service",
     "keepalived.service",
     "nix-cluster-runtime-store.service",
     "nix-cluster.service",
+    "pixiecore.service",
+    "postgresql.service",
+    "prometheus-node-exporter.service",
+    "redis-authentik.service",
     "sshd.service",
     "ssh.service",
 }
+SCHEDULER_DENIED_PREFIXES = (
+    "authentik-",
+    "systemd-",
+    "user@",
+)
 
 
 # Normalize loose JSON values into a list of non-empty strings.
@@ -67,14 +78,20 @@ def _dedupe(values: list[str]) -> list[str]:
     return result
 
 
+def scheduler_unit_is_allowed(unit: str) -> bool:
+    if unit in SCHEDULER_DENIED_UNITS:
+        return False
+    return not any(unit.startswith(prefix) for prefix in SCHEDULER_DENIED_PREFIXES)
+
+
 def scheduler_unit_sets(scheduler_raw: dict[str, Any]) -> tuple[list[str], list[str], dict[str, list[str]], dict[str, dict[str, Any]]]:
     workloads = _enabled_workloads(scheduler_raw)
     requested = _dedupe(
         _as_list(scheduler_raw.get("managed_units", []))
         + [unit for workload in workloads.values() for unit in workload["units"]]
     )
-    managed = [unit for unit in requested if unit not in SCHEDULER_DENIED_UNITS]
-    rejected = [unit for unit in requested if unit in SCHEDULER_DENIED_UNITS]
+    managed = [unit for unit in requested if scheduler_unit_is_allowed(unit)]
+    rejected = [unit for unit in requested if not scheduler_unit_is_allowed(unit)]
     app_groups = {str(name): _as_list(units) for name, units in dict(scheduler_raw.get("app_groups", {})).items()}
     for name, workload in workloads.items():
         group = workload.get("group") or name
@@ -129,6 +146,7 @@ class UpdateSettings:
     branch_ref: str
     relevant_paths: list[str]
     worker_wait_seconds: int
+    controller_switch_cooldown_seconds: int
 
 
 @dataclass(slots=True)
@@ -438,6 +456,7 @@ class RuntimeConfig:
             branch_ref=str(update_raw.get("branch_ref", "origin/main")),
             relevant_paths=_as_list(update_raw.get("relevant_paths", [])),
             worker_wait_seconds=_as_int(update_raw.get("worker_wait_seconds"), 30),
+            controller_switch_cooldown_seconds=_as_int(update_raw.get("controller_switch_cooldown_seconds"), 300),
         )
 
         post_update_refresh = PostUpdateRefreshSettings(

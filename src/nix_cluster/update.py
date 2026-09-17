@@ -134,6 +134,7 @@ class UpdateManager:
         checks = [
             ["systemctl", "is-active", "--quiet", "nixos-rebuild-switch-to-configuration.service"],
             ["pgrep", "-f", "switch-to-configuration switch"],
+            ["pgrep", "-f", "nixos-rebuild switch"],
         ]
         for command in checks:
             result = self.runner.run(command, cwd=repo_dir, check=False, capture_output=True)
@@ -141,6 +142,47 @@ class UpdateManager:
                 logger.warning("REBUILD BLOCKED: existing switch-to-configuration is still running")
                 return True
         return False
+
+    def _controller_switch_stamp_path(self) -> Path:
+        return Path(self.runtime_config.directories.state) / "last-controller-switch.json"
+
+    def _controller_switch_in_cooldown(self) -> bool:
+        if not self.runtime_config.is_controller:
+            return False
+        cooldown = max(0, self.runtime_config.update.controller_switch_cooldown_seconds)
+        if cooldown <= 0:
+            return False
+
+        stamp_path = self._controller_switch_stamp_path()
+        try:
+            payload = json.loads(stamp_path.read_text(encoding="utf-8"))
+            completed_at = float(payload.get("completed_at", 0))
+        except Exception:
+            return False
+
+        age = time.time() - completed_at
+        if age < cooldown:
+            logger.warning(
+                "REBUILD BLOCKED: controller switch completed %.1fs ago, cooldown is %ss",
+                age,
+                cooldown,
+            )
+            return True
+        return False
+
+    def _record_controller_switch_success(self, trigger_id: str) -> None:
+        if not self.runtime_config.is_controller:
+            return
+        stamp_path = self._controller_switch_stamp_path()
+        stamp_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "completed_at": time.time(),
+            "trigger_id": trigger_id,
+            "hostname": self.hostname,
+        }
+        tmp_path = stamp_path.with_suffix(".tmp")
+        tmp_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+        tmp_path.replace(stamp_path)
 
     def _systemd_unit_main_pid(self, unit: str, repo_dir: str) -> int:
         output = self._run_command(
@@ -393,12 +435,15 @@ class UpdateManager:
 
             if self._switch_in_progress(repo_dir):
                 return "SKIPPED: switch-to-configuration already running"
+            if self._controller_switch_in_cooldown():
+                return "SKIPPED: controller switch cooldown active"
 
             self._reset(repo_dir, "GIT-RESET")
             output_log = [
                 self._run_command(["bash", "-c", command.replace("\r", "")], cwd=repo_dir, stage="REBUILD")
                 for command in self.runtime_config.update.commands
             ]
+            self._record_controller_switch_success(trigger_id)
             self._refresh_post_update_units(repo_dir)
             logger.info("NIX-CLUSTER REBUILD TASK COMPLETED: %s", trigger_id)
             return "\n".join(filter(None, output_log)).strip()
