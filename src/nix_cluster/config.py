@@ -567,7 +567,7 @@ class RuntimeConfig:
                 failure_threshold=_as_int(scheduler_raw.get("failure_threshold"), 3),
                 recovery_threshold=_as_int(scheduler_raw.get("recovery_threshold"), 2),
                 minimum_owner_seconds=_as_int(scheduler_raw.get("minimum_owner_seconds"), 300),
-                transition_timeout_seconds=_as_int(scheduler_raw.get("transition_timeout_seconds"), 120),
+                transition_timeout_seconds=_as_int(scheduler_raw.get("transition_timeout_seconds"), 30),
                 target_cooldown_seconds=_as_int(scheduler_raw.get("target_cooldown_seconds"), 300),
                 ownership_lease_enable=_as_bool(
                     scheduler_raw.get("ownership_lease_enable"),

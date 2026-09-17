@@ -140,6 +140,52 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(placement["active_owner"], "node4")
         self.assertEqual(placement["phase"], "stable")
 
+    def test_target_healthy_report_without_lease_does_not_promote(self):
+        monitor = self.monitor_with_stable_policy()
+        state = monitor.advance_placement(
+            "demo.service",
+            {
+                "desired_owner": "node4", "active_owner": "node2", "target_owner": "node4",
+                "generation": 2, "phase": "activating", "phase_started_at": 100,
+            },
+            ["node2", "node4"], ["node4"], ["node4", "node2"],
+            {"node4": {"observed_at": 110, "healthy": True}},
+            None,
+            110,
+            45,
+        )
+
+        self.assertEqual(state["active_owner"], "node2")
+        self.assertEqual(state["target_owner"], "node4")
+        self.assertEqual(state["phase"], "activating")
+        self.assertEqual(state["success_count"], 0)
+
+    def test_timed_out_activation_tries_next_eligible_target(self):
+        monitor = self.monitor_with_stable_policy()
+        monitor.config.ha.scheduler.transition_timeout_seconds = 30
+        state = monitor.advance_placement(
+            "demo.service",
+            {
+                "desired_owner": "node4", "active_owner": "node2", "target_owner": "node4",
+                "generation": 2, "phase": "activating", "phase_started_at": 100,
+            },
+            ["node2", "node3", "node4"], [], ["node4", "node3", "node2"],
+            {},
+            None,
+            131,
+            45,
+            {
+                "node2": {"observed_at": 131, "schedulable": True, "controller_reachable": True, "state_storage_healthy": True},
+                "node3": {"observed_at": 131, "schedulable": True, "controller_reachable": True, "state_storage_healthy": True},
+                "node4": {"observed_at": 131, "schedulable": True, "controller_reachable": True, "state_storage_healthy": True},
+            },
+        )
+
+        self.assertEqual(state["target_owner"], "node3")
+        self.assertEqual(state["desired_owner"], "node3")
+        self.assertEqual(state["phase"], "deactivating")
+        self.assertEqual(state["cooldowns"]["node4"], 431)
+
     def test_timed_out_transition_recovers_when_target_has_matching_lease(self):
         monitor = self.monitor_with_stable_policy()
         state = monitor.advance_placement(

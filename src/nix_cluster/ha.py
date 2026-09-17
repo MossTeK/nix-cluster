@@ -1624,13 +1624,18 @@ class ClusterMonitor:
             report = reports.get(host or "", {})
             return bool(report) and now - _safe_int(report.get("observed_at")) <= stale_after
 
-        def healthy(host: str | None) -> bool:
-            return fresh(host) and bool(reports.get(host or "", {}).get("healthy"))
-
         owner_host = str((ownership or {}).get("host") or "") or None
         owner_generation = _safe_int((ownership or {}).get("generation"))
         lease_matches_active = bool(active and owner_host == active and owner_generation == generation)
         lease_matches_target = bool(target and owner_host == target and owner_generation == generation)
+
+        def has_matching_lease(host: str | None) -> bool:
+            if not cfg.ownership_lease_enable:
+                return bool(host)
+            return bool(host and owner_host == host and owner_generation == generation)
+
+        def healthy(host: str | None) -> bool:
+            return fresh(host) and bool(reports.get(host or "", {}).get("healthy")) and has_matching_lease(host)
 
         eligible = [
             host for host in ranked_nodes

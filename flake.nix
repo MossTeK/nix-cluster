@@ -1540,7 +1540,7 @@
             };
             transitionTimeoutSeconds = lib.mkOption {
               type = lib.types.int;
-              default = 120;
+              default = 30;
               description = "Maximum time allowed for activation and verification phases.";
             };
             targetCooldownSeconds = lib.mkOption {
