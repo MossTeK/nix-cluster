@@ -465,6 +465,20 @@
       contractTrackedUnits = lib.unique (lib.concatLists (lib.mapAttrsToList (_: contract:
         lib.optionals contract.enable contract.units
       ) enabledAppContracts));
+      contractUnitLabels = lib.listToAttrs (lib.concatLists (lib.mapAttrsToList (appId: contract:
+        lib.optionals contract.enable (map (unit: {
+          name = unit;
+          value = {
+            app_id = appId;
+            route_name = contract.routeName;
+            primary = unit == contract.primaryUnit;
+          };
+        }) contract.units)
+      ) enabledAppContracts));
+      monitoringTargets = lib.mapAttrs (host: address: {
+        address = address;
+        node_exporter = "${address}:${toString cfg.observability.prometheus.port}";
+      }) cfg.ingressRouter.nodeAddresses;
       # Emergency users deliberately live outside shared /home so an NFS/home
       # outage does not lock operators out of recovery.
       recoverySshUserType = lib.types.submodule ({ name, ... }: {
@@ -667,13 +681,16 @@
       # Units and integrations that feed local status, Prometheus, and logs.
       observability = {
         tracked_units = trackedUnits;
+        unit_labels = contractUnitLabels;
         prometheus = {
           enable = cfg.observability.prometheus.enable;
           port = cfg.observability.prometheus.port;
+          targets = monitoringTargets;
         };
         loki = {
           enable = cfg.observability.loki.enable;
           url = cfg.observability.loki.url;
+          tracked_units = trackedUnits;
         };
       };
       # App-declared generated secrets that the controller reconciles into SOPS.
@@ -2114,6 +2131,11 @@
                 };
               };
               relabel_configs = [
+                {
+                  source_labels = [ "__journal__systemd_unit" ];
+                  regex = lib.concatStringsSep "|" (map (unit: lib.replaceStrings [ "." ] [ "\\." ] unit) trackedUnits);
+                  action = "keep";
+                }
                 {
                   source_labels = [ "__journal__systemd_unit" ];
                   target_label = "unit";

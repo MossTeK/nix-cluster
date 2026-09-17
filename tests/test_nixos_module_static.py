@@ -54,10 +54,22 @@ class NixOSModuleStaticTests(unittest.TestCase):
         self.assertIn("effectiveAppContracts = lib.recursiveUpdate cfg.appContracts cfg.clusterAppContracts", text)
         self.assertIn("contractWorkloads", text)
         self.assertIn("contractRoutes", text)
+        self.assertIn("contractTrackedUnits", text)
+        self.assertIn("contractUnitLabels", text)
         self.assertIn("effectiveSchedulerWorkloads", text)
         self.assertIn("effectiveIngressRoutes", text)
         self.assertIn("app_contracts = lib.mapAttrs", text)
         self.assertIn("}) effectiveAppContracts;", text)
+
+    def test_monitoring_inventory_is_generated(self):
+        flake = Path(__file__).resolve().parents[1] / "flake.nix"
+        text = flake.read_text(encoding="utf-8")
+
+        self.assertIn("monitoringTargets = lib.mapAttrs", text)
+        self.assertIn("unit_labels = contractUnitLabels", text)
+        self.assertIn("targets = monitoringTargets", text)
+        self.assertIn("tracked_units = trackedUnits", text)
+        self.assertIn('action = "keep";', text)
 
     def test_controller_switch_cooldown_is_serialized(self):
         flake = Path(__file__).resolve().parents[1] / "flake.nix"
