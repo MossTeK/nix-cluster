@@ -78,6 +78,40 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertEqual(config.ha.scheduler.managed_units, ["outline.service"])
         self.assertEqual(config.ha.scheduler.app_groups, {"office": ["outline.service"]})
 
+    def test_app_contracts_are_exposed_to_runtime_tools(self):
+        config = RuntimeConfig.from_raw(
+            "/tmp/nix-cluster-runtime-config.json",
+            {
+                "app_contracts": {
+                    "notes": {
+                        "enable": True,
+                        "units": ["outline.service", "outline-redis.service"],
+                        "primary_unit": "outline.service",
+                        "port": 3000,
+                        "domain": "notes.example.com",
+                        "route_name": "notes",
+                        "shared_state": {
+                            "required": True,
+                            "root": "/srv/nix-cluster/apps/outline",
+                            "mounts": ["/srv/nix-cluster"],
+                        },
+                        "placement": {
+                            "ha": True,
+                            "preferred_nodes": ["node2"],
+                            "require_healthy_state_storage": True,
+                        },
+                    },
+                },
+            },
+        )
+
+        contract = config.app_contracts["notes"]
+        self.assertTrue(contract.enable)
+        self.assertEqual(contract.primary_unit, "outline.service")
+        self.assertEqual(contract.port, 3000)
+        self.assertEqual(contract.shared_state_root, "/srv/nix-cluster/apps/outline")
+        self.assertEqual(contract.preferred_nodes, ["node2"])
+
 
 if __name__ == "__main__":
     unittest.main()

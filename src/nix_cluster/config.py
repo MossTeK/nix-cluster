@@ -335,6 +335,23 @@ class IngressRouterSettings:
 
 
 @dataclass(slots=True)
+class AppContractSettings:
+    name: str
+    enable: bool
+    units: list[str]
+    primary_unit: str
+    port: int
+    domain: str
+    route_name: str
+    shared_state_required: bool
+    shared_state_root: str
+    shared_state_mounts: list[str]
+    placement_ha: bool
+    preferred_nodes: list[str]
+    require_healthy_state_storage: bool
+
+
+@dataclass(slots=True)
 # Matrix trigger settings used by the long-polling listener.
 class MatrixSettings:
     enable: bool
@@ -369,6 +386,7 @@ class RuntimeConfig:
     local_recovery: LocalRecoverySettings
     ha: HASettings
     ingress_router: IngressRouterSettings
+    app_contracts: dict[str, AppContractSettings]
     matrix: MatrixSettings
     webhook: WebhookSettings
 
@@ -400,6 +418,7 @@ class RuntimeConfig:
         scheduler_raw = ha_raw.get("scheduler", {})
         managed_units, rejected_managed_units, app_groups, workloads = scheduler_unit_sets(dict(scheduler_raw))
         ingress_router_raw = raw.get("ingress_router", {})
+        app_contracts_raw = raw.get("app_contracts", {})
         matrix_raw = raw.get("matrix", {})
         webhook_raw = raw.get("webhook", {})
 
@@ -587,6 +606,29 @@ class RuntimeConfig:
             routes=routes,
         )
 
+        app_contracts: dict[str, AppContractSettings] = {}
+        for name, contract_raw in dict(app_contracts_raw or {}).items():
+            contract_name = str(name)
+            if not contract_name or not isinstance(contract_raw, dict):
+                continue
+            shared_raw = dict(contract_raw.get("shared_state", {}))
+            placement_contract_raw = dict(contract_raw.get("placement", {}))
+            app_contracts[contract_name] = AppContractSettings(
+                name=contract_name,
+                enable=_as_bool(contract_raw.get("enable"), False),
+                units=_as_list(contract_raw.get("units", [])),
+                primary_unit=str(contract_raw.get("primary_unit", "")),
+                port=_as_int(contract_raw.get("port"), 0),
+                domain=str(contract_raw.get("domain", "")),
+                route_name=str(contract_raw.get("route_name", contract_name)),
+                shared_state_required=_as_bool(shared_raw.get("required"), True),
+                shared_state_root=str(shared_raw.get("root", "")),
+                shared_state_mounts=_as_list(shared_raw.get("mounts", [])),
+                placement_ha=_as_bool(placement_contract_raw.get("ha"), True),
+                preferred_nodes=_as_list(placement_contract_raw.get("preferred_nodes", [])),
+                require_healthy_state_storage=_as_bool(placement_contract_raw.get("require_healthy_state_storage"), True),
+            )
+
         matrix = MatrixSettings(
             enable=_as_bool(matrix_raw.get("enable"), True),
             trigger_keywords=[keyword.lower() for keyword in _as_list(matrix_raw.get("trigger_keywords", ["push", "commit", "update"]))],
@@ -616,6 +658,7 @@ class RuntimeConfig:
             local_recovery=local_recovery,
             ha=ha,
             ingress_router=ingress_router,
+            app_contracts=app_contracts,
             matrix=matrix,
             webhook=webhook,
         )

@@ -45,6 +45,17 @@ class NixOSModuleStaticTests(unittest.TestCase):
         self.assertIn('kill -KILL "$pid"', text)
         self.assertIn("wait -n \"''${pids[@]}\"", text)
 
+    def test_app_contracts_generate_runtime_surfaces(self):
+        flake = Path(__file__).resolve().parents[1] / "flake.nix"
+        text = flake.read_text(encoding="utf-8")
+
+        self.assertIn("appContracts = lib.mkOption", text)
+        self.assertIn("contractWorkloads", text)
+        self.assertIn("contractRoutes", text)
+        self.assertIn("effectiveSchedulerWorkloads", text)
+        self.assertIn("effectiveIngressRoutes", text)
+        self.assertIn("app_contracts = lib.mapAttrs", text)
+
 
 if __name__ == "__main__":
     unittest.main()

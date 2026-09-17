@@ -265,6 +265,109 @@
           };
         };
       });
+      appContractType = lib.types.submodule ({ name, ... }: {
+        options = {
+          enable = lib.mkOption {
+            type = lib.types.bool;
+            default = false;
+            description = "Enable this reusable app runtime contract.";
+          };
+          units = lib.mkOption {
+            type = lib.types.listOf lib.types.str;
+            default = [];
+            description = "Systemd service units that make up the app.";
+          };
+          primaryUnit = lib.mkOption {
+            type = lib.types.str;
+            default = "";
+            description = "Primary systemd unit used for routing and app status.";
+          };
+          port = lib.mkOption {
+            type = lib.types.nullOr lib.types.port;
+            default = null;
+            description = "Backend port for generated ingress routing.";
+          };
+          domain = lib.mkOption {
+            type = lib.types.nullOr lib.types.str;
+            default = null;
+            description = "Hostname for generated ingress routing; null disables route generation.";
+          };
+          aliases = lib.mkOption {
+            type = lib.types.listOf lib.types.str;
+            default = [];
+            description = "Additional hostnames for generated ingress routing.";
+          };
+          routeName = lib.mkOption {
+            type = lib.types.str;
+            default = name;
+            description = "Stable generated ingress route name.";
+          };
+          scheme = lib.mkOption {
+            type = lib.types.enum [ "http" "https" ];
+            default = "http";
+            description = "Scheme used between Caddy and the selected backend node.";
+          };
+          healthPath = lib.mkOption {
+            type = lib.types.str;
+            default = "/";
+            description = "Caddy active health-check path for the backend.";
+          };
+          auth = lib.mkOption {
+            type = lib.types.enum [ "none" "authentik" ];
+            default = "none";
+            description = "Generated ingress auth wrapper.";
+          };
+          authentikHost = lib.mkOption {
+            type = lib.types.str;
+            default = "127.0.0.1";
+            description = "Authentik outpost upstream host used when auth is authentik.";
+          };
+          authentikPort = lib.mkOption {
+            type = lib.types.port;
+            default = 9000;
+            description = "Authentik outpost upstream port used when auth is authentik.";
+          };
+          extraConfig = lib.mkOption {
+            type = lib.types.lines;
+            default = "";
+            description = "Additional Caddy directives appended inside the generated reverse_proxy block.";
+          };
+          sharedState = {
+            required = lib.mkOption {
+              type = lib.types.bool;
+              default = true;
+              description = "Require healthy shared state storage before this app can run.";
+            };
+            root = lib.mkOption {
+              type = lib.types.str;
+              default = "/srv/nix-cluster/apps/${name}";
+              description = "Shared app state root.";
+            };
+            mounts = lib.mkOption {
+              type = lib.types.listOf lib.types.str;
+              default = [ "/srv/nix-cluster" ];
+              description = "Mount points that must be healthy for this app.";
+            };
+          };
+          placement = {
+            ha = lib.mkOption {
+              type = lib.types.bool;
+              default = true;
+              description = "Let the nix-cluster HA scheduler own this app.";
+            };
+            preferredNodes = lib.mkOption {
+              type = lib.types.listOf lib.types.str;
+              default = [];
+              description = "Preferred scheduler nodes for this app.";
+            };
+            requireHealthyStateStorage = lib.mkOption {
+              type = lib.types.bool;
+              default = true;
+              description = "Require healthy state storage for scheduler placement.";
+            };
+          };
+        };
+      });
       schedulerUnitPolicyType = lib.types.submodule ({ ... }: {
         options = {
           preferredNodes = lib.mkOption { type = lib.types.listOf lib.types.str; default = []; };
@@ -310,10 +413,49 @@
       ];
       schedulerWorkloadUnits = lib.unique (lib.concatLists (lib.mapAttrsToList (_: workload:
         lib.optionals workload.enable workload.units
-      ) cfg.ha.scheduler.workloads));
+      ) effectiveSchedulerWorkloads));
       schedulerRequestedUnits = lib.unique (cfg.ha.scheduler.managedUnits ++ schedulerWorkloadUnits);
       schedulerManagedUnits = lib.filter (unit: !(lib.elem unit schedulerDeniedUnits)) schedulerRequestedUnits;
       schedulerRejectedUnits = lib.filter (unit: lib.elem unit schedulerDeniedUnits) schedulerRequestedUnits;
+      enabledAppContracts = lib.filterAttrs (_: contract: contract.enable) cfg.appContracts;
+      contractWorkloads = lib.mapAttrs (_: contract: {
+        enable = contract.placement.ha;
+        units = contract.units;
+        group = contract.routeName;
+      }) enabledAppContracts;
+      contractRoutes = lib.listToAttrs (lib.filter (entry: entry != null) (lib.mapAttrsToList (_: contract:
+        if contract.enable && contract.placement.ha && contract.domain != null && contract.port != null then {
+          name = contract.routeName;
+          value = {
+            enable = true;
+            domain = contract.domain;
+            aliases = contract.aliases;
+            unit = contract.primaryUnit;
+            scheme = contract.scheme;
+            port = contract.port;
+            healthPath = contract.healthPath;
+            auth = contract.auth;
+            authentikHost = contract.authentikHost;
+            authentikPort = contract.authentikPort;
+            extraConfig = contract.extraConfig;
+          };
+        } else null
+      ) enabledAppContracts));
+      contractUnitPolicies = lib.listToAttrs (lib.concatLists (lib.mapAttrsToList (_: contract:
+        lib.optionals (contract.enable && contract.placement.ha) (map (unit: {
+          name = unit;
+          value = {
+            preferredNodes = contract.placement.preferredNodes;
+            requireHealthyStateStorage = contract.sharedState.required && contract.placement.requireHealthyStateStorage;
+          };
+        }) contract.units)
+      ) enabledAppContracts));
+      effectiveSchedulerWorkloads = lib.recursiveUpdate contractWorkloads cfg.ha.scheduler.workloads;
+      effectiveUnitPolicies = lib.recursiveUpdate contractUnitPolicies cfg.ha.scheduler.unitPolicies;
+      effectiveIngressRoutes = lib.recursiveUpdate contractRoutes cfg.ingressRouter.routes;
+      contractTrackedUnits = lib.unique (lib.concatLists (lib.mapAttrsToList (_: contract:
+        lib.optionals contract.enable contract.units
+      ) enabledAppContracts));
       # Emergency users deliberately live outside shared /home so an NFS/home
       # outage does not lock operators out of recovery.
       recoverySshUserType = lib.types.submodule ({ name, ... }: {
@@ -354,6 +496,7 @@
         ++ lib.optionals cfg.ha.runtimeStore.localServer.enable [ "nix-cluster-runtime-store.service" ]
         ++ lib.optionals cfg.observability.prometheus.enable [ "prometheus-node-exporter.service" ]
         ++ lib.optionals (cfg.observability.loki.enable && cfg.observability.loki.url != "") [ "promtail.service" ]
+        ++ contractTrackedUnits
         ++ cfg.observability.monitoredServices
         ++ cfg.observability.extraTrackedUnits
       );
@@ -365,7 +508,7 @@
       }) cfg.secretGeneration.requests;
       # Caddy gets placeholder snippets at boot, then ingress.py replaces them
       # once scheduler placement and health records exist.
-      enabledIngressRoutes = lib.filterAttrs (_: route: route.enable) cfg.ingressRouter.routes;
+      enabledIngressRoutes = lib.filterAttrs (_: route: route.enable) effectiveIngressRoutes;
       ingressRouteNames = lib.attrNames enabledIngressRoutes;
       ingressRoutePlaceholderRules = map (routeName:
         "f ${cfg.ingressRouter.outputDir}/${routeName}.caddy 0644 ${serviceUser} ${serviceGroup} - respond\\x20\\\"nix-cluster\\x20route\\x20unavailable:\\x20router\\x20not\\x20ready\\\"\\x20503"
@@ -575,7 +718,7 @@
             enable = workload.enable;
             units = workload.units;
             group = if workload.group == null then "" else workload.group;
-          }) cfg.ha.scheduler.workloads;
+          }) effectiveSchedulerWorkloads;
           app_groups = cfg.ha.scheduler.appGroups;
           reconciler_enable = cfg.ha.scheduler.reconcilerEnable;
           reconciler_interval_seconds = cfg.ha.scheduler.reconcilerIntervalSeconds;
@@ -609,7 +752,7 @@
             minimum_memory_advantage_bytes = policy.minimumMemoryAdvantageBytes;
             minimum_load_advantage_percent = policy.minimumLoadAdvantagePercent;
             require_healthy_state_storage = policy.requireHealthyStateStorage;
-          }) cfg.ha.scheduler.unitPolicies;
+          }) effectiveUnitPolicies;
         };
       };
       # Dynamic ingress settings consumed by ingress.py.
@@ -635,8 +778,26 @@
           authentik_host = route.authentikHost;
           authentik_port = route.authentikPort;
           extra_config = route.extraConfig;
-        }) cfg.ingressRouter.routes;
+        }) effectiveIngressRoutes;
       };
+      app_contracts = lib.mapAttrs (name: contract: {
+        enable = contract.enable;
+        units = contract.units;
+        primary_unit = contract.primaryUnit;
+        port = if contract.port == null then 0 else contract.port;
+        domain = if contract.domain == null then "" else contract.domain;
+        route_name = contract.routeName;
+        shared_state = {
+          required = contract.sharedState.required;
+          root = contract.sharedState.root;
+          mounts = contract.sharedState.mounts;
+        };
+        placement = {
+          ha = contract.placement.ha;
+          preferred_nodes = contract.placement.preferredNodes;
+          require_healthy_state_storage = contract.placement.requireHealthyStateStorage;
+        };
+      }) cfg.appContracts;
       # Deprecated alias of `apps`; kept so older helpers do not break during upgrades.
       modules = {
         caddy = {
@@ -1384,6 +1545,11 @@
             };
           };
         };
+        appContracts = lib.mkOption {
+          type = lib.types.attrsOf appContractType;
+          default = {};
+          description = "Reusable app runtime contracts that generate scheduler workloads, ingress routes, and observability tracking.";
+        };
         # Built-in app knobs used by templates and fleet module composition.
         apps = {
           caddy.enable = lib.mkOption {
@@ -1724,6 +1890,18 @@
           {
             assertion = (!cfg.ha.reporting.enable) || cfg.ha.runtimeStore.staleAfterSeconds >= ((3 * cfg.ha.reporting.intervalSeconds) + cfg.ha.reporting.collectionDeadlineSeconds);
             message = "services.nix-cluster.ha.runtimeStore.staleAfterSeconds must be at least three reporting intervals plus collectionDeadlineSeconds.";
+          }
+          {
+            assertion = lib.all (contract: (!contract.enable) || contract.units != []) (lib.attrValues cfg.appContracts);
+            message = "Every enabled services.nix-cluster.appContracts entry must declare at least one unit.";
+          }
+          {
+            assertion = lib.all (contract: (!contract.enable) || contract.primaryUnit == "" || lib.elem contract.primaryUnit contract.units) (lib.attrValues cfg.appContracts);
+            message = "Every services.nix-cluster.appContracts primaryUnit must be present in units.";
+          }
+          {
+            assertion = lib.all (contract: (!contract.enable) || contract.domain == null || (contract.primaryUnit != "" && contract.port != null)) (lib.attrValues cfg.appContracts);
+            message = "Every routed services.nix-cluster.appContracts entry must declare primaryUnit and port.";
           }
           {
             assertion =
