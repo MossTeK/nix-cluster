@@ -2241,6 +2241,7 @@
             User = serviceUser;
             Restart = "always";
             RestartSec = "10s";
+            SuccessExitStatus = [ 143 ];
             TimeoutStopSec = "20s";
             WorkingDirectory = "/";
           };
