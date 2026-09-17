@@ -50,11 +50,14 @@ class NixOSModuleStaticTests(unittest.TestCase):
         text = flake.read_text(encoding="utf-8")
 
         self.assertIn("appContracts = lib.mkOption", text)
+        self.assertIn("clusterAppContracts = lib.mkOption", text)
+        self.assertIn("effectiveAppContracts = lib.recursiveUpdate cfg.appContracts cfg.clusterAppContracts", text)
         self.assertIn("contractWorkloads", text)
         self.assertIn("contractRoutes", text)
         self.assertIn("effectiveSchedulerWorkloads", text)
         self.assertIn("effectiveIngressRoutes", text)
         self.assertIn("app_contracts = lib.mapAttrs", text)
+        self.assertIn("}) effectiveAppContracts;", text)
 
     def test_controller_switch_cooldown_is_serialized(self):
         flake = Path(__file__).resolve().parents[1] / "flake.nix"

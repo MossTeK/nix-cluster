@@ -417,7 +417,8 @@
       schedulerRequestedUnits = lib.unique (cfg.ha.scheduler.managedUnits ++ schedulerWorkloadUnits);
       schedulerManagedUnits = lib.filter (unit: !(lib.elem unit schedulerDeniedUnits)) schedulerRequestedUnits;
       schedulerRejectedUnits = lib.filter (unit: lib.elem unit schedulerDeniedUnits) schedulerRequestedUnits;
-      enabledAppContracts = lib.filterAttrs (_: contract: contract.enable) cfg.appContracts;
+      effectiveAppContracts = lib.recursiveUpdate cfg.appContracts cfg.clusterAppContracts;
+      enabledAppContracts = lib.filterAttrs (_: contract: contract.enable) effectiveAppContracts;
       contractWorkloads = lib.mapAttrs (_: contract: {
         enable = contract.placement.ha;
         units = contract.units;
@@ -806,7 +807,7 @@
           preferred_nodes = contract.placement.preferredNodes;
           require_healthy_state_storage = contract.placement.requireHealthyStateStorage;
         };
-      }) cfg.appContracts;
+        }) effectiveAppContracts;
       # Deprecated alias of `apps`; kept so older helpers do not break during upgrades.
       modules = {
         caddy = {
@@ -1562,7 +1563,12 @@
         appContracts = lib.mkOption {
           type = lib.types.attrsOf appContractType;
           default = {};
-          description = "Reusable app runtime contracts that generate scheduler workloads, ingress routes, and observability tracking.";
+          description = "Compatibility app runtime contracts. Prefer clusterAppContracts for fleet-wide HA routes.";
+        };
+        clusterAppContracts = lib.mkOption {
+          type = lib.types.attrsOf appContractType;
+          default = {};
+          description = "Fleet-wide app runtime contracts that generate scheduler workloads, ingress routes, and observability tracking on every node.";
         };
         # Built-in app knobs used by templates and fleet module composition.
         apps = {
@@ -1906,16 +1912,16 @@
             message = "services.nix-cluster.ha.runtimeStore.staleAfterSeconds must be at least three reporting intervals plus collectionDeadlineSeconds.";
           }
           {
-            assertion = lib.all (contract: (!contract.enable) || contract.units != []) (lib.attrValues cfg.appContracts);
-            message = "Every enabled services.nix-cluster.appContracts entry must declare at least one unit.";
+            assertion = lib.all (contract: (!contract.enable) || contract.units != []) (lib.attrValues effectiveAppContracts);
+            message = "Every enabled services.nix-cluster app contract entry must declare at least one unit.";
           }
           {
-            assertion = lib.all (contract: (!contract.enable) || contract.primaryUnit == "" || lib.elem contract.primaryUnit contract.units) (lib.attrValues cfg.appContracts);
-            message = "Every services.nix-cluster.appContracts primaryUnit must be present in units.";
+            assertion = lib.all (contract: (!contract.enable) || contract.primaryUnit == "" || lib.elem contract.primaryUnit contract.units) (lib.attrValues effectiveAppContracts);
+            message = "Every services.nix-cluster app contract primaryUnit must be present in units.";
           }
           {
-            assertion = lib.all (contract: (!contract.enable) || contract.domain == null || (contract.primaryUnit != "" && contract.port != null)) (lib.attrValues cfg.appContracts);
-            message = "Every routed services.nix-cluster.appContracts entry must declare primaryUnit and port.";
+            assertion = lib.all (contract: (!contract.enable) || contract.domain == null || (contract.primaryUnit != "" && contract.port != null)) (lib.attrValues effectiveAppContracts);
+            message = "Every routed services.nix-cluster app contract entry must declare primaryUnit and port.";
           }
           {
             assertion =
