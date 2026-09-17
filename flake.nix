@@ -446,6 +446,14 @@
           name = unit;
           value = {
             preferredNodes = contract.placement.preferredNodes;
+            minimumMemoryAvailableBytes = 0;
+            maximumLoadPerCpu = 0.0;
+            estimatedMemoryBytes = 0;
+            estimatedCpu = 0.0;
+            automaticRebalance = false;
+            rebalanceObservationThreshold = 3;
+            minimumMemoryAdvantageBytes = 0;
+            minimumLoadAdvantagePercent = 30.0;
             requireHealthyStateStorage = contract.sharedState.required && contract.placement.requireHealthyStateStorage;
           };
         }) contract.units)
