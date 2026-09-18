@@ -326,7 +326,7 @@ class IngressRouter:
             os.replace(temporary, path)
 
     def validate_caddy(self) -> tuple[bool, str]:
-        command = [self.router.caddy_command, "validate", "--config", self.router.caddy_config_path, "--adapter", "caddyfile"]
+        command = [self.router.caddy_command, "adapt", "--config", self.router.caddy_config_path, "--adapter", "caddyfile"]
         try:
             result = subprocess.run(command, text=True, capture_output=True, timeout=10, check=False)
         except subprocess.TimeoutExpired:
