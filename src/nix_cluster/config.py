@@ -346,6 +346,7 @@ class IngressRouterSettings:
     output_dir: str
     status_path: str
     caddy_config_path: str
+    caddy_command: str
     reload_timeout_seconds: int
     reload_backoff_seconds: int
     reload_lock_path: str
@@ -620,6 +621,7 @@ class RuntimeConfig:
             output_dir=str(ingress_router_raw.get("output_dir", "/run/nix-cluster/ingress/caddy.d")),
             status_path=str(ingress_router_raw.get("status_path", "/var/lib/nix-cluster/ingress/routes.json")),
             caddy_config_path=str(ingress_router_raw.get("caddy_config_path", "/etc/caddy/caddy_config")),
+            caddy_command=str(ingress_router_raw.get("caddy_command", "caddy")),
             reload_timeout_seconds=_as_int(ingress_router_raw.get("reload_timeout_seconds"), 20),
             reload_backoff_seconds=_as_int(ingress_router_raw.get("reload_backoff_seconds"), 30),
             reload_lock_path=str(ingress_router_raw.get("reload_lock_path", "/run/nix-cluster/ingress/caddy.reload.lock")),

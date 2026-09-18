@@ -790,6 +790,7 @@
         output_dir = cfg.ingressRouter.outputDir;
         status_path = cfg.ingressRouter.statusPath;
         caddy_config_path = cfg.ingressRouter.caddyConfigPath;
+        caddy_command = cfg.ingressRouter.caddyCommand;
         reload_timeout_seconds = cfg.ingressRouter.reloadTimeoutSeconds;
         reload_backoff_seconds = cfg.ingressRouter.reloadBackoffSeconds;
         reload_lock_path = cfg.ingressRouter.reloadLockPath;
@@ -1186,6 +1187,11 @@
             type = lib.types.str;
             default = "/etc/caddy/caddy_config";
             description = "Caddy config path used when reloading generated routes.";
+          };
+          caddyCommand = lib.mkOption {
+            type = lib.types.str;
+            default = "${pkgs.caddy}/bin/caddy";
+            description = "Absolute Caddy binary used to validate generated ingress route snippets before reload.";
           };
           reloadTimeoutSeconds = lib.mkOption {
             type = lib.types.int;

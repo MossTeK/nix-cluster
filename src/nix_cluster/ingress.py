@@ -326,13 +326,13 @@ class IngressRouter:
             os.replace(temporary, path)
 
     def validate_caddy(self) -> tuple[bool, str]:
-        command = ["caddy", "validate", "--config", self.router.caddy_config_path, "--adapter", "caddyfile"]
+        command = [self.router.caddy_command, "validate", "--config", self.router.caddy_config_path, "--adapter", "caddyfile"]
         try:
             result = subprocess.run(command, text=True, capture_output=True, timeout=10, check=False)
         except subprocess.TimeoutExpired:
             return False, "caddy validation timed out"
         except FileNotFoundError:
-            return False, "caddy command not found"
+            return False, f"caddy command not found: {self.router.caddy_command}"
         if result.returncode == 0:
             return True, ""
         return False, (result.stderr or result.stdout or "caddy validation failed").strip()
