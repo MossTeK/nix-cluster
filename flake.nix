@@ -2124,7 +2124,7 @@
             loki.relabel "journal" {
               rule {
                 source_labels = ["__journal__systemd_unit"]
-                regex = "${lib.concatStringsSep "|" (map (unit: lib.replaceStrings [ "." ] [ "\\." ] unit) trackedUnits)}"
+                regex = "${lib.concatStringsSep "|" (map (unit: lib.replaceStrings [ "." ] [ "\\\\." ] unit) trackedUnits)}"
                 action = "keep"
               }
               rule {
