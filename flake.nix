@@ -2135,6 +2135,7 @@
                 source_labels = ["__journal_priority"]
                 target_label = "priority"
               }
+              forward_to = [loki.write.default.receiver]
             }
 
             loki.source.journal "systemd" {
